@@ -213,10 +213,22 @@ export default function AuthGate({ children }: AuthGateProps) {
           </>
         )}
 
-        {/* AGPL §13 source-offer — visible on the login screen too. */}
+        {/* 🔴 AGPL §13 SOURCE OFFER — and this is the ONLY link an anonymous
+            visitor ever sees. The whole app sits behind this gate, so the offer
+            is not a footer under the tool: it is the first thing a stranger
+            meets, before authentication.
+            ⚠ It pointed at `github.com/2bee-farm/2bee.slicer` until 2026-09-09,
+            which 404'd — a dead offer on the public face of the domain. The
+            mirror `legal` ruled is now published and the founder has given the
+            go-word; VERIFIED FROM THIS SEAT before the edit, anonymously and
+            with no auth header: repo 200, LICENSE 200 whose first lines read
+            "GNU AFFERO GENERAL PUBLIC LICENSE Version 3" (checked by CONTENT,
+            not by the filename existing), MIRROR.md 200, and the tag
+            `src-8483971c40` resolving — a tag whose bound monorepo commit
+            exists in this tree. */}
         <p className="auth-gate-licence">
           AGPL-3.0-or-later &middot;{' '}
-          <a href="https://github.com/2bee-farm/2bee.slicer" rel="noreferrer">
+          <a href="https://github.com/2hives-ai/2bee.app-source" rel="noreferrer">
             source
           </a>
         </p>

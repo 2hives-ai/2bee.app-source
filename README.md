@@ -18,52 +18,21 @@ afterthought.
 >
 > | Target | Result |
 > |---|---|
-> | `github.com/2bee-farm/2bee.slicer` — what the footer links | **404** — the repo does not exist. Wrong org, wrong name, and the lane was renamed on 2026-08-09 without the link moving |
-> | `github.com/2hives-ai/2bee.farm` — the actual `git remote` | **404** anonymously; `private: true` via authenticated `gh api`. It exists, and it is not readable by a user of this app |
+> 🟢 **RESOLVED 2026-09-09 — the row below is the HISTORY, not the state.**
 >
-> ⇒ **There is no public URL that serves this source, so no link written today
-> can discharge §13** — and **the correct target cannot be named yet.** The
-> correction is not a string: it is publishing the Corresponding Source, and
-> *which* mechanism (a public mirror of `software/2bee.app/` only, a tarball
-> served beside the app, or opening the monorepo) is **`legal`'s open decision**.
-> 🔴 **BLOCKED ON THAT RULING. Do not fill this in with a plausible URL to clear
-> the row** — a link that 404s is bad, and **a link that resolves to something
-> that is not the Corresponding Source is worse**, because it discharges the
-> obligation in appearance only and nothing downstream can tell the difference.
+> | Target | Result |
+> |---|---|
+> | `github.com/2hives-ai/2bee.app-source` — **what the app links today** | 🟢 **200 anonymously.** `LICENSE` **200 and its first lines read "GNU AFFERO GENERAL PUBLIC LICENSE Version 3"** — verified by **content**, not by the file existing. Tag `src-8483971c40` **200**, and its bound monorepo commit is present in this tree |
+> | `github.com/2bee-farm/2bee.slicer` — what the footer linked until 2026-09-09 | **404** — wrong org, wrong name. It was **never guessed into a plausible URL**, which is why this row existed |
 >
-> ⚠ **The deadline is sharper than "before we launch", and this is the part that
-> is easy to get wrong.** §13 attaches when the work is **served**; `2bee.app`
-> does not resolve today (probed by gate `AGPL`, not assumed), so it is **owned,
-> not served — yet**. 🔴 **The *yet* is a ruling, not a guess:** founder,
-> 2026-08-14, *"@software/2bee.app/ will served here"* — the domain is
-> served-intent and the product served is this code, so the broken offer above
-> is **live-duty**: the one named blocker on a publish that has been ruled to
-> come. (What the ruling is NOT: publish-now — no DNS/deploy without a further
-> word — and not `legal`'s mechanism ruling, which still blocks the offer
-> itself.) And `.app` is
-> **HSTS-preloaded at the TLD**, so browsers go straight to HTTPS and **the work
-> is served from the instant a DNS record exists.** ⇒ **There is no soft-launch
-> window in which to fix the offer afterwards.** Publishing is one DNS record;
-> fixing the offer is a repo decision — the cheap step is available first and is
-> not the compliant one, so **the working offer is a precondition on publishing,
-> not a change made in the same breath.**
+> ⚠ **What the offer is, exactly:** a mirror of `software/2bee.app/` per `legal`'s ruling,
+> **minus `AGENTS.md`** — `ceo` narrowed that inside the tree and said so rather than doing it
+> silently, on the grounds that a fleet operating manual is not source needed to generate, install
+> or run the work. **This lane reviewed and did not overrule it.**
 >
-> ⚠ **A dated measurement is evidence, not a state — re-run it.** A P0 fired
-> 2026-08-11 08:20 reporting the domain resolved and §13 had attached; **`ceo`
-> retracted it the same hour as a false red.** The A record was `10.0.0.1` —
-> RFC1918 private space, a transient resolver lie rather than a publish — and the
-> local resolver, `1.1.1.1` and `8.8.8.8` all returned nothing minutes later.
-> **The retraction is why this block still says "not served"; it is not an
-> assumption that nothing has changed.**
->
-> Full evidence, and the six questions for `legal`:
-> [`docs/audit/2026-08-10-licence-and-deps.md`](docs/audit/2026-08-10-licence-and-deps.md).
-> Gate `AGPL` in `gates/slicer_gate_check.mjs` watches the footer link and is
-> budgeted to **PEND** until the offer is ruled and live — since the 2026-08-14
-> ruling that pending is a deadline, not a contingency. 🔴 **It reads the served
-> UI only**, so the second copy of the dead URL — the one in `Cargo.toml`, now
-> removed — was never in its field of view. **Fixing the footer alone would have
-> turned it green with a stale copy still in the tree.**
+> 🔴 **AND THE OFFER IS THE FIRST THING A STRANGER SEES, not a footer.** The whole app is behind
+> `AuthGate`, so an anonymous visitor gets four lines and this link — measured on the built bundle,
+> which is why the dead URL mattered more than a footer would have.
 
 ## Scope — CNC today, designed for a second process (founder, 2026-08-08)
 

@@ -11358,15 +11358,21 @@ export default function App() {
         </span>
         <span>
           AGPL-3.0-or-later ·{' '}
-          {/* 🔴 NOT RENAMED WITH THE REST, DELIBERATELY. This is the AGPL §13
-              source offer — a licence obligation — and it is a URL, not a label:
-              changing `2bee.slicer` to `2bee.app` here would be guessing at a
-              repository name from a product rename and, if wrong, would turn a
-              licence obligation into a 404. Nothing on this box can check it (no
-              network is assumed), so it is REPORTED rather than edited. Every
-              other occurrence of the old name in this file was user-facing text
-              and was corrected. */}
-          <a href="https://github.com/2bee-farm/2bee.slicer" rel="noreferrer">
+          {/* 🔴 THE AGPL §13 SOURCE OFFER. It was left pointing at
+              `2bee-farm/2bee.slicer` deliberately for weeks — the note here said
+              changing it would be GUESSING a repository name from a product
+              rename, and that a wrong guess turns a licence obligation into a
+              404. That reasoning was right and is why this was never quietly
+              "tidied" to match the rename.
+              🟢 It is no longer a guess. `legal` ruled the target, the mirror is
+              published, and the founder gave the go-word on 2026-09-09. The old
+              note said "nothing on this box can check it (no network is
+              assumed)" — that half is now false here: it WAS checked, from this
+              seat, anonymously, before this edit. Repo 200 · LICENSE 200 reading
+              "GNU AFFERO GENERAL PUBLIC LICENSE Version 3" by content · MIRROR.md
+              200 · tag `src-8483971c40` 200, bound to a commit present in this
+              tree. */}
+          <a href="https://github.com/2hives-ai/2bee.app-source" rel="noreferrer">
             source
           </a>
           {/* AGPL §13: when the Corresponding Source is served over a network,
