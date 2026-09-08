@@ -336,9 +336,23 @@ const MACHINE_PRESETS = [
  * (publishing the Corresponding Source) where `AGENTS.md` puts it: with
  * `legal`, not with a plausible string typed in here.
  */
+/* ⚠ THE SECOND SENTENCE WAS A STALE UNDER-CLAIM, corrected 2026-09-09 (found by
+ * `brand`). It read "No output has been run on a real controller" — a sentence
+ * this lane's own README retired on 2026-08-27, because it had been false since
+ * 2026-08-20, when 47 of 50 lines of `fixture rect-profile` were answered by a
+ * real grblHAL 1.1f board.
+ *
+ * 🔴 WHY NOTHING CAUGHT IT FOR TWELVE DAYS: every gate here hunts OVER-claim. A
+ * stale RETRACTION is invisible to a tool built to find stale claims, and this
+ * one renders permanently on the CNC tab and in About.
+ *
+ * ⚠ The correction is narrowing, never widening: the run was `rig=bare` — no
+ * motors, no spindle, no material — so acceptance was a PARSE, and the first
+ * sentence stands untouched. Nothing has cut anything. */
 const CNC_NEVER_CUT =
-  'Nothing this app has emitted has ever cut anything. No output has been run on a real ' +
-  'controller, and the air-cut → foam/MDF coupon → real ply rungs are unclimbed.';
+  'Nothing this app has emitted has ever cut anything. Output has once been sent to a real ' +
+  'controller — a bare rig, parse-only acceptance, nothing moving — and the air-cut → foam/MDF ' +
+  'coupon → real ply rungs are unclimbed.';
 
 const CNC_ABOUT_LINES: readonly string[] = [
   'Browser-first CAM for CNC routers: the same Rust core runs here (as WebAssembly), in the ' +
@@ -359,10 +373,18 @@ const CNC_ABOUT_LINES: readonly string[] = [
   'A CHECK THAT COULD NOT RUN REPORTS PENDING, AND PENDING IS NOT A PASS. An undeclared ' +
     'spoilboard thickness, an undeclared clamp and an unmeasured board position each leave a ' +
     'question unanswered rather than answering it favourably.',
+  /* ⚠ This said the offer was NOT DISCHARGED and that no public URL served the
+   * source. True when written, false from 2026-09-09 — and it went stale by MY
+   * OWN hand: I repointed the footer link an hour earlier and did not sweep the
+   * prose sitting beside it, so the page told the reader there was no public URL
+   * while offering them the working one. 🔴 And this file is IN the published
+   * mirror, so the Corresponding Source carried a sentence denying its own
+   * existence. */
   'AGPL-3.0-or-later. If you were served this page over a network, section 13 entitles you to ' +
-    'its Corresponding Source — and that offer is NOT DISCHARGED today: the repository the ' +
-    'footer link names is not published, so there is no public URL that serves it. That is ' +
-    'stated rather than papered over with a plausible link.',
+    'its Corresponding Source, and that offer is DISCHARGED: the footer link points at the ' +
+    'published mirror at github.com/2hives-ai/2bee.app-source, which answers anonymously. It ' +
+    'carries software/2bee.app/ per legal’s ruling, minus AGENTS.md — the fleet’s internal ' +
+    'operating manual, which is not source needed to generate, install or run this work.',
 ];
 
 /**
