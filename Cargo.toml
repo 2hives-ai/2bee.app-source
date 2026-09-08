@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = ["core", "cli", "wasm"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+# 🔴 NO `repository` KEY, AND ITS ABSENCE IS THE POINT (2026-08-11).
+#
+# It read `https://github.com/2bee-farm/2bee.slicer` until today. That repo does
+# not exist — re-measured 2026-08-11, anonymous HEAD -> 404, with github.com ->
+# 200 as the control, so the box was online and the 404 was real. Wrong org
+# (`2bee-farm` vs `2hives-ai`), wrong repo name, and the lane was renamed to
+# `2bee.app` on 2026-08-09 without this line moving.
+#
+# ⚠ IT WAS NOT REPLACED, because there is nothing true to replace it with. The
+# only repository holding this source is `2hives-ai/2bee.farm`, which is
+# `private: true` (authenticated `gh api`, 2026-08-11) and returns 404 to anyone
+# who is not us. Writing it here would swap a URL that is visibly broken for one
+# that is invisibly broken — and `repository` is PUBLISHED VERBATIM by cargo, so
+# the wrong value travels to crates.io and to every AGPL §13 recipient reading
+# the manifest for the source location.
+#
+# 🔴 AND NOTHING WATCHED THIS COPY. Gate `AGPL` reads `web/src/App.tsx` and only
+# that, so this line was outside its field of view entirely: correcting the
+# footer alone would have turned the gate GREEN with the dead URL still sitting
+# in the manifest. **One offer, two copies, one of them unwatched** — which is
+# why this was removed in the same pass as the finding rather than left for the
+# footer's fix to sweep up.
+#
+# No member inherits this key (`core`, `cli` and `wasm` take only
+# `version`/`edition`/`license` from the workspace), so removing it changes no
+# build — `cargo metadata --no-deps` re-run clean after the removal.
+#
+# Restore it — **do not invent it** — when `legal` names the public location that
+# serves the Corresponding Source. That decision is `legal`'s open ruling and is
+# tracked with the §13 footer link in
+# `docs/audit/2026-08-10-licence-and-deps.md` §7.2. The two must be given the
+# SAME value: two source offers that disagree is worse than one that is merely
+# wrong, and this copy is the one no gate will contradict.
+
+# Determinism is a gate requirement, not a preference: the golden-file tests
+# compare G-code byte for byte, so an optimisation that reorders float ops
+# would show up as a spurious gate failure and train people to ignore it.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

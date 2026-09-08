@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!--
+  2bee.app favicon.
+
+  🔴 A COPY, NOT AN ORIGINAL. The geometry below is copied verbatim from
+  brand/logo/2bee-farm-mark-full-color.svg (copied 2026-08-11). `brand` owns the
+  mark; this lane owns nothing about it and must not redraw it here.
+
+  A copy in a second place is exactly the defect this lane keeps finding, so it is
+  made DETECTABLE rather than trusted: web/tests/favicon.test.ts compares the
+  drawing elements of this file against the brand source and fails when they
+  diverge. If that test goes red, the brand mark moved and this file is stale —
+  re-copy it, do not edit it to match.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 300 300"
+     width="300"
+     height="300"
+     version="1.1">
+  <!-- 2bee.farm master mark — full colour (gradient) variant.
+       Canonical source: software/frontend/public/logo.svg (style-guide-v1.md §2.1, §2.2).
+       Pointy-top regular hexagon centred in a 300x300 square viewBox.
+       Centre (150,150), vertex radius 110. Rect-based "II" (no font dependency).
+       Background transparent — do not add a background rect (style-guide §2.5).
+       Use on: dark surfaces #070d08–#1A3C2C, Forest Black #1A1A1A, dark photography.
+       Do NOT use on backgrounds lighter than #3A3A3A — use
+       2bee-farm-mark-mono-black.svg or 2bee-farm-mark-reversed-white.svg instead. -->
+  <defs>
+    <linearGradient id="hexGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"   stop-color="#F7DC6F" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#F5A623" stop-opacity="1"/>
+    </linearGradient>
+  </defs>
+  <polygon
+     points="150,40 245.26,95 245.26,205 150,260 54.74,205 54.74,95"
+     fill="none"
+     stroke="url(#hexGrad)"
+     stroke-width="11"
+     stroke-linejoin="round"/>
+  <!-- II — two rectangles, centred at (150,150) -->
+  <rect x="117" y="95" width="22" height="110" rx="4" fill="url(#hexGrad)"/>
+  <rect x="161" y="95" width="22" height="110" rx="4" fill="url(#hexGrad)"/>
+</svg>

@@ -1,0 +1,14 @@
+[package]
+name = "twobee-slice"
+description = "Headless CAM harness — the same core the browser runs, on the command line"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "2bee-slice"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1.0.151"
+twobee-cam = { path = "../core" }

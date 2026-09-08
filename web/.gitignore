@@ -1,0 +1,5 @@
+
+# Generated at build time from hardware/cad by scripts/build-shop-catalogue.ts.
+# Deliberately NOT committed: a copy of cad's designs in this lane's git would
+# be a second source of truth and would drift silently. See that file's header.
+public/shop/

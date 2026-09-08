@@ -1,0 +1,40 @@
+// The project's typecheck. `tsc --noEmit` run from `web/` reads THIS file, which
+// is why the `include` below is the whole tree and not just `src`.
+//
+// 🔴 IT USED TO BE `"include": ["src"]`, AND THAT IS THE DEFECT THIS COMMENT
+// EXISTS FOR. Everything under `tests/` and `e2e/` was invisible to the
+// compiler, so "tsc --noEmit is clean" meant "src is clean" — a true statement
+// about a smaller subject than every reader took it for. Roughly fifteen agents
+// reported it in one day alongside test files they had just written; the
+// narrowing was found only when a runtime run caught a type error that `tsc` had
+// waved through. A green that is true about a smaller subject than its name
+// suggests is the failure mode, not the typo.
+//
+// ⚠ A COMMENT IS NOT A CONTROL. This one records the reason; the thing that
+// stops the `include` narrowing again is `tests/typecheck-coverage.test.ts`,
+// which enumerates the `.ts`/`.tsx` files on disk, asks `tsc` which files are
+// actually in its program, and FAILS naming any file the compiler never sees.
+// If you widen or narrow this list, that test is what will tell you.
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "allowJs": true
+  },
+  // `src` — the app. `tests` — the node suite. `e2e` — the Playwright suite.
+  // `*.ts` — `vite.config.ts` and `playwright.config.ts`, which decide how the
+  // app is built and how the browser suite runs, and were checked by nothing.
+  "include": ["src", "tests", "e2e", "scripts", "*.ts"]
+}

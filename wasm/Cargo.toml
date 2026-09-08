@@ -1,0 +1,19 @@
+[package]
+name = "twobee-cam-wasm"
+description = "Browser bindings — the same CAM core the CLI and the gates run"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+# 🔴 This crate must contain NO machining logic. Its only job is to move data
+# across the JS boundary. Anything decided here would be a decision the CLI and
+# the gates never see, and browser-vs-CLI parity (gate I1) would be asserting
+# that two different programs agree.
+[dependencies]
+twobee-cam = { path = "../core" }
+wasm-bindgen = "=0.2.100"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

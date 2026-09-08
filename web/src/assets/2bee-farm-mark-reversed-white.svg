@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!--
+  🔴 THIS IS A COPY. IT WILL NOT FOLLOW BRAND'S CHANGES.
+
+  Copied 2026-08-08 from:  brand/brand-kit/logos/2bee-farm-mark-reversed-white.svg
+  Source sha256:           838c8853852ad51d2d9fae804e331dac894c6f4d8172676c5e9baa83c784007f
+  Owner:                   the `brand` session. This lane does not edit the source
+                           and must not edit the artwork below.
+
+  If brand revises the mark, THIS FILE GOES STALE SILENTLY — nothing warns. To
+  check, re-hash the source and compare to the sha256 above:
+      sha256sum brand/brand-kit/logos/2bee-farm-mark-reversed-white.svg
+  A mismatch means brand moved and this copy did not. Re-copy, keep this header,
+  and update the hash in the same commit.
+
+  WHY A COPY AND NOT A CROSS-DIRECTORY IMPORT — measured, not assumed.
+  Referencing brand's file directly as
+      url('../../../../brand/brand-kit/logos/…svg')
+  BUILDS FINE (Vite inlines it as a data URI) and then 403s under `vite dev`:
+      403 Restricted — "…is outside of Vite serving allow list"
+  because Vite rewrites a CSS url() to a runtime /@fs/ request governed by
+  `server.fs.allow`, whose only entry is web/. The sibling
+  `@import '../../../../brand/tokens.css'` at the top of styles.css DOES work
+  across the same boundary, which is the trap: @import is inlined at transform
+  time and never becomes a request, so "tokens.css crosses fine, so this will
+  too" is a reasonable inference and a wrong one. Green build, dead dev server —
+  the same split that once broke this lane when the wasm glue sat in public/.
+  Widening `server.fs.allow` would fix it in vite.config.ts, which is not this
+  change's to touch and is a broader decision (it exposes repo paths to the dev
+  server) than placing a 1.2 kB logo.
+
+  Artwork below is brand's, verbatim, including their usage header.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 300 300"
+     width="300"
+     height="300"
+     version="1.1">
+  <!-- 2bee.farm master mark — reversed white variant (style-guide-v1.md §2.2).
+       Same geometry as 2bee-farm-mark-full-color.svg: pointy-top hexagon,
+       centre (150,150), vertex radius 110. Rect-based "II". Solid fill, no gradient.
+       Background transparent.
+       Use on: Hive Gold (#F5A623) solid fields, dark colour-blocked surfaces, and
+       dark/mixed photography where the full-colour gradient would compete with the
+       image (style-guide §2.2, §2.6). Do not use on white/light backgrounds — the
+       mark will be invisible; use 2bee-farm-mark-mono-black.svg there instead. -->
+  <polygon
+     points="150,40 245.26,95 245.26,205 150,260 54.74,205 54.74,95"
+     fill="none"
+     stroke="#FFFFFF"
+     stroke-width="11"
+     stroke-linejoin="round"/>
+  <!-- II — two rectangles, centred at (150,150) -->
+  <rect x="117" y="95" width="22" height="110" rx="4" fill="#FFFFFF"/>
+  <rect x="161" y="95" width="22" height="110" rx="4" fill="#FFFFFF"/>
+</svg>

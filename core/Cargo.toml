@@ -1,0 +1,25 @@
+[package]
+name = "twobee-cam"
+description = "2.5D subtractive CAM core — geometry to controller-agnostic toolpath"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+# Dependency policy: every dep must build for wasm32-unknown-unknown with no
+# shims, and each one is a recorded decision.
+#
+#   cavalier_contours - arc-preserving polyline offsetting. Chosen over a
+#   Clipper binding because Clipper works in scaled integers and returns
+#   polygons, so every curve comes back as a polyline. That is the exact defect
+#   we are fixing: polylined curves flood the planner (gate G10). This keeps
+#   arcs as arcs through the offset, so the post can emit real G2/G3.
+[dependencies]
+ab_glyph = "0.2.32"
+cavalier_contours = "0.7"
+ruststep = { version = "0.4.0", features = ["ap203"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

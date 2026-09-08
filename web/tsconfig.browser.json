@@ -1,0 +1,29 @@
+// The SECOND leg of the typecheck: `src` on its own, with NO ambient @types.
+//
+// 🔴 WHY THIS FILE EXISTS — it restores a check that widening `tsconfig.json`
+// would otherwise have deleted without a diff.
+//
+// `tests/` and `e2e/` import `node:test`, `node:fs`, `node:path`; bringing them
+// under the compiler required `@types/node`. TypeScript has no way to scope a
+// types package to a subdirectory: once `@types/node` is in the program it
+// declares `process`, `Buffer`, `__dirname`, `setTimeout`-returns-`Timeout` and
+// the rest as GLOBALS, visible to `src` as well. So the moment the tests became
+// checkable, `src` quietly stopped being told that `process.env` does not exist
+// in a browser — an error TypeScript used to give for free, that would now
+// survive the compiler and fail at runtime in the operator's browser.
+//
+// `"types": []` switches off automatic @types inclusion. `@types/react`,
+// `@types/react-dom` and `@types/three` are unaffected: those are reached
+// through `import` statements, not through the global types list — only the
+// ambient globals go away, which is exactly the property under test.
+//
+// ⚠ THE SCOPE OF ITS GREEN, stated so nobody quotes it wider: this leg says
+// "src uses no Node global". It does NOT typecheck `tests/`, `e2e/` or the root
+// config files — `tsconfig.json` does that, and `npm run typecheck` runs both.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": []
+  },
+  "include": ["src"]
+}

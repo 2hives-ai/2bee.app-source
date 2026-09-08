@@ -1,0 +1,15 @@
+# The repo root ignores `*.stl` wholesale ("large binary meshes, regenerated
+# from .scad sources"). That is right for `hardware/cad/stl/`, where the files
+# ARE build output — and wrong here, where three of them are VENDORED SAMPLES
+# the app imports by name. An ignored sample is not a small problem: the tree
+# builds for whoever copied the files in and fails for everyone else, with a
+# module-not-found that says nothing about `.gitignore`.
+#
+# A nested rule is used deliberately instead of a negation in the root file:
+# the root `.gitignore` is shared with every other lane, and this exception is
+# ours alone. Git gives the deeper file precedence, and the root pattern is a
+# FILE pattern (`*.stl`), not an excluded directory — so the negation below
+# actually takes effect. (A negation cannot resurrect a file under an ignored
+# directory; that is the case this would silently fail in, and it is not this
+# case.)
+!*.stl

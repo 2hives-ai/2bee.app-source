@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!--
+  🔴 THIS IS A COPY. IT WILL NOT FOLLOW BRAND'S CHANGES.
+
+  Copied 2026-08-08 from:  brand/brand-kit/logos/2bee-farm-mark-mono-black.svg
+  Source sha256:           f6505e373e7644ebe6c15878e83097da58d92b27bf65766902ae67d3059bbd66
+  Owner:                   the `brand` session. This lane does not edit the source
+                           and must not edit the artwork below.
+
+  If brand revises the mark, THIS FILE GOES STALE SILENTLY — nothing warns. To
+  check, re-hash the source and compare to the sha256 above:
+      sha256sum brand/brand-kit/logos/2bee-farm-mark-mono-black.svg
+  A mismatch means brand moved and this copy did not. Re-copy, keep this header,
+  and update the hash in the same commit.
+
+  WHY A COPY AND NOT A CROSS-DIRECTORY IMPORT — see the twin header in
+  2bee-farm-mark-reversed-white.svg. Short form: a cross-boundary CSS url()
+  builds green and 403s under `vite dev` ("outside of Vite serving allow list"),
+  because url() becomes a runtime /@fs/ request bound by `server.fs.allow`,
+  while the `@import` of brand/tokens.css is inlined at transform time and so
+  crosses the same boundary fine. The working sibling is what makes the broken
+  case look safe.
+
+  WHY THIS VARIANT IS THE LIGHT-THEME MARK — and why it is not the one the
+  ticket named. `handover/2bee_slicer/2026-08-08-brand-review-decisions-
+  implement.md` maps light surfaces to 2bee-farm-mark-full-color.svg. Brand's
+  own canon says the opposite in three places: style-guide-v1.md §2.2 ("Do not
+  use the full-colour gradient mark on backgrounds lighter than #3A3A3A. The
+  amber gradient disappears against white and pale surfaces."), the full-colour
+  SVG's own header ("Do NOT use on backgrounds lighter than #3A3A3A"), and this
+  file's header below ("Use on: White/Cream (#FAFAF0, #FFFFFF)"). This app's
+  light header surface is the `color-bg-header` token, #FFFFFF — squarely the
+  named case. Raised with brand; if they rule for the gradient on white anyway
+  it is a one-line change in styles.css.
+
+  ⚠ EDITING THIS HEADER: an XML comment may not contain a double hyphen, and a
+  CSS custom property is spelled with one. Writing the token name in full here
+  makes the SVG unparseable — the browser then renders NOTHING while the file
+  still serves HTTP 200 and the computed background-image looks correct, so it
+  fails silently and looks fine from CSS. That exact typo happened on the first
+  draft of this file and was caught only by drawing the mark to a canvas and
+  counting opaque pixels. Name CSS tokens without their leading dashes here.
+
+  Artwork below is brand's, verbatim, including their usage header.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 300 300"
+     width="300"
+     height="300"
+     version="1.1">
+  <!-- 2bee.farm master mark — monochrome black variant (style-guide-v1.md §2.2, §2.6).
+       Same geometry as 2bee-farm-mark-full-color.svg: pointy-top hexagon,
+       centre (150,150), vertex radius 110. Rect-based "II" — NOT text-element-based
+       (corrects the legacy text-based approach in software/frontend/public/logo_black.svg,
+       which style-guide §2.5 flags as non-conforming for new production SVGs).
+       Solid fill, no gradient. Background transparent.
+       Use on: White/Cream (#FAFAF0, #FFFFFF), single-colour print, embossing,
+       light or mixed photography (style-guide §2.6). -->
+  <polygon
+     points="150,40 245.26,95 245.26,205 150,260 54.74,205 54.74,95"
+     fill="none"
+     stroke="#1A1A1A"
+     stroke-width="11"
+     stroke-linejoin="round"/>
+  <!-- II — two rectangles, centred at (150,150) -->
+  <rect x="117" y="95" width="22" height="110" rx="4" fill="#1A1A1A"/>
+  <rect x="161" y="95" width="22" height="110" rx="4" fill="#1A1A1A"/>
+</svg>

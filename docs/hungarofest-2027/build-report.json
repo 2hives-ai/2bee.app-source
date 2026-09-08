@@ -1,0 +1,200 @@
+{
+  "source": "Copernicus DEM GLO-30 (COP-DEM_GLO-30-DGED), local mirror",
+  "crs": "EPSG:23700 HD72 / EOV",
+  "elev_clamp": [
+    76.0,
+    1014.0
+  ],
+  "breaks": [
+    76.0,
+    100.0,
+    130.0,
+    180.0,
+    280.0,
+    480.0,
+    1014.0
+  ],
+  "step_mm": 1.5,
+  "total_relief_mm": 7.5,
+  "plaque_mm": [
+    570.0,
+    420.0
+  ],
+  "map_field_mm": [
+    511.25,
+    316.0
+  ],
+  "map_scale": 1000000,
+  "cutter_mm": 3.0,
+  "rough_mm": 6.0,
+  "stock_mm": 18.0,
+  "min_island_mm2": 7.069,
+  "simplify_mm": 0.375,
+  "bands": [
+    {
+      "band": 1,
+      "lo": 76.0,
+      "hi": 100.0,
+      "depth_mm": 7.5,
+      "dropped_islands": 150,
+      "dropped_mm2": 139.44,
+      "reach_d3_pct": 98.62,
+      "reach_d6_pct": 96.51,
+      "area_mm2": 28026.8,
+      "ledge_w_mm": 24.617,
+      "pass_reach_d3_pct": 98.62,
+      "pass_reach_d6_pct": 96.51,
+      "pass_area_mm2": 28026.8,
+      "area_pct": 30.04,
+      "interval_m": 24.0,
+      "true_relief_mm": 0.024,
+      "vert_exag": 62.5
+    },
+    {
+      "band": 2,
+      "lo": 100.0,
+      "hi": 130.0,
+      "depth_mm": 6.0,
+      "dropped_islands": 244,
+      "dropped_mm2": 224.04,
+      "reach_d3_pct": 91.45,
+      "reach_d6_pct": 80.62,
+      "area_mm2": 23157.0,
+      "ledge_w_mm": 6.31,
+      "pass_reach_d3_pct": 97.83,
+      "pass_reach_d6_pct": 94.27,
+      "pass_area_mm2": 51164.3,
+      "area_pct": 24.82,
+      "interval_m": 30.0,
+      "true_relief_mm": 0.03,
+      "vert_exag": 50.0
+    },
+    {
+      "band": 3,
+      "lo": 130.0,
+      "hi": 180.0,
+      "depth_mm": 4.5,
+      "dropped_islands": 424,
+      "dropped_mm2": 233.23,
+      "reach_d3_pct": 82.53,
+      "reach_d6_pct": 61.22,
+      "area_mm2": 20557.4,
+      "ledge_w_mm": 3.84,
+      "pass_reach_d3_pct": 97.43,
+      "pass_reach_d6_pct": 93.52,
+      "pass_area_mm2": 71669.3,
+      "area_pct": 22.03,
+      "interval_m": 50.0,
+      "true_relief_mm": 0.05,
+      "vert_exag": 30.0
+    },
+    {
+      "band": 4,
+      "lo": 180.0,
+      "hi": 280.0,
+      "depth_mm": 3.0,
+      "dropped_islands": 584,
+      "dropped_mm2": 228.84,
+      "reach_d3_pct": 83.7,
+      "reach_d6_pct": 53.3,
+      "area_mm2": 15726.6,
+      "ledge_w_mm": 3.963,
+      "pass_reach_d3_pct": 99.01,
+      "pass_reach_d6_pct": 96.97,
+      "pass_area_mm2": 87358.6,
+      "area_pct": 16.85,
+      "interval_m": 100.0,
+      "true_relief_mm": 0.1,
+      "vert_exag": 15.0
+    },
+    {
+      "band": 5,
+      "lo": 280.0,
+      "hi": 480.0,
+      "depth_mm": 1.5,
+      "dropped_islands": 206,
+      "dropped_mm2": 202.08,
+      "reach_d3_pct": 81.86,
+      "reach_d6_pct": 46.2,
+      "area_mm2": 5077.3,
+      "ledge_w_mm": 3.4,
+      "pass_reach_d3_pct": 99.31,
+      "pass_reach_d6_pct": 97.71,
+      "pass_area_mm2": 92405.7,
+      "area_pct": 5.44,
+      "interval_m": 200.0,
+      "true_relief_mm": 0.2,
+      "vert_exag": 7.5
+    },
+    {
+      "band": 6,
+      "lo": 480.0,
+      "hi": 1014.0,
+      "depth_mm": 0.0,
+      "dropped_islands": 52,
+      "dropped_mm2": 70.7,
+      "reach_d3_pct": 79.73,
+      "reach_d6_pct": 55.04,
+      "area_mm2": 768.4,
+      "ledge_w_mm": 3.055,
+      "pass_reach_d3_pct": 99.36,
+      "pass_reach_d6_pct": 97.72,
+      "pass_area_mm2": 93162.3,
+      "area_pct": 0.82,
+      "interval_m": 534.0,
+      "true_relief_mm": 0.534,
+      "vert_exag": 2.8
+    }
+  ],
+  "text": {
+    "string": "Hungarofest 2027",
+    "font": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "cap_mm": 38.0,
+    "reach_d3_pct": 99.55,
+    "reach_d1_pct": 99.95,
+    "bounds_mm": [
+      24.96,
+      26.0,
+      545.04,
+      76.85
+    ]
+  },
+  "legend": {
+    "origin_mm": [
+      391.38,
+      86.0
+    ],
+    "cap_mm": 4.5,
+    "auto_placed": true,
+    "size_mm": [
+      107.99,
+      48.0
+    ],
+    "measured_gap_to_relief_mm": 6.14,
+    "required_clearance_mm": 5.0,
+    "note": "LEGEND_TEXT is for V-CARVE/ENGRAVE, not a 3 mm pocket",
+    "reach_d0p5_pct": 99.26,
+    "bounds_mm": [
+      391.38,
+      86.0,
+      499.37,
+      134.0
+    ]
+  },
+  "polylines_per_file": {
+    "band01_76-100m_depth7.5mm": 14,
+    "band02_100-130m_depth6.0mm": 26,
+    "band03_130-180m_depth4.5mm": 43,
+    "band04_180-280m_depth3.0mm": 54,
+    "band05_280-480m_depth1.5mm": 45,
+    "band06_480-1014m_depth0.0mm": 15,
+    "pass01_below100m_to_depth7.5mm": 14,
+    "pass02_below130m_to_depth6.0mm": 77,
+    "pass03_below180m_to_depth4.5mm": 260,
+    "pass04_below280m_to_depth3.0mm": 437,
+    "pass05_below480m_to_depth1.5mm": 625,
+    "text_hungarofest_2027": 20,
+    "legend": 125,
+    "ALL_hungarofest_2027_plaque": 343
+  }
+}

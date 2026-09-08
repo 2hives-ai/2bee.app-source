@@ -1,0 +1,25 @@
+{
+  "_why": "🔴 ONE TABLE, TWO LANGUAGES. `core/src/feeds.rs::word_value_at` and `web/src/RunTab.tsx::words` scan the same dialect and cannot share code — this file is what they share instead. A census in feeds.rs claimed 'a test comparing the two' existed for a day before this file did; it did not, and on 2026-08-28 the two readers were measured disagreeing on every case below marked `wasDivergent`. Add a case here and BOTH readers are tested against it.",
+  "_shape": "letter/value pairs the scan must produce for the given line, in order. `null` value = the reader must produce a value it cannot use (NaN in both languages) — a NAMED word, never a silently dropped one.",
+  "cases": [
+    { "line": "G1 X10 F600",   "words": [["G",1],["X",10],["F",600]] },
+    { "line": "G1X1F1200",     "words": [["G",1],["X",1],["F",1200]], "note": "whitespace is not significant to grblHAL" },
+    { "line": "F 600",         "words": [["F",600]], "note": "a spaced value is one word" },
+    { "line": "Z-2.5",         "words": [["Z",-2.5]] },
+    { "line": "Z+5",           "words": [["Z",5]], "note": "grbl's own read_float accepts a leading +" },
+    { "line": "G38.2 Z-30",    "words": [["G",38.2],["Z",-30]], "note": "G38.2 is ONE word" },
+    { "line": "X10Y20",        "words": [["X",10],["Y",20]] },
+
+    { "line": "X1.2.3",        "words": [["X",null]], "wasDivergent": "browser read 1.2 — a confident, plausible depth; the core read NaN and refused" },
+    { "line": "X10-20",        "words": [["X",null]], "wasDivergent": "both read 10 and discarded -20; grblHAL answers error:20 and runs no part of the block" },
+    { "line": "XY10",          "words": [["X",null],["Y",10]], "wasDivergent": "browser dropped X entirely, so a block it could not read looked like a block with fewer words" },
+    { "line": "X-",            "words": [["X",null]], "wasDivergent": "browser dropped it entirely" },
+    { "line": "X",             "words": [["X",null]], "wasDivergent": "browser dropped it entirely" },
+
+    { "line": "G1 X10 ( Z-5 ) Y2",   "words": [["G",1],["X",10],["Y",2]], "note": "a Z inside a comment is not a Z word" },
+    { "line": "G1 X10 ( a ( b ) c )","words": [["G",1],["X",10]], "note": "( NESTS — a non-counting stripper leaves `c )` standing as code" },
+    { "line": "G1 X10 ( unterminated","words": [["G",1],["X",10]], "note": "an unclosed ( swallows the rest of the line and no more" },
+    { "line": "G1 X10 ; Z-5",        "words": [["G",1],["X",10]], "note": "; only counts at depth 0" },
+    { "line": "G1 X10 ( ; ) Y2",     "words": [["G",1],["X",10],["Y",2]], "note": "a ; INSIDE a comment does not truncate the line" }
+  ]
+}

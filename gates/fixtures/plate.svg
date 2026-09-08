@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="900">
+  <rect x="50" y="730" width="200" height="120"/>
+  <circle cx="80" cy="820" r="3"/>
+  <circle cx="220" cy="820" r="3"/>
+  <circle cx="220" cy="760" r="3"/>
+  <circle cx="80" cy="760" r="3"/>
+</svg>

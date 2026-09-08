@@ -1,0 +1,865 @@
+/* 2bee.app UI theme.
+ *
+ * Brand tokens are the canonical palette for every 2bee.farm web surface and
+ * are owned by the brand session. This file consumes them; it does not restate
+ * their values. A per-app copy is exactly what `brand/tokens.css` forbids, and
+ * a copy is how two surfaces end up "both amber" in two different ambers.
+ */
+@import '../../../../brand/tokens.css';
+
+/* ── CHOSEN: OPTION (a). Brand tokens drive EVERY colour; this file keeps no
+ *    palette of its own. The theme toggle is KEPT, because brand made that
+ *    possible on 2026-08-08 — it is not the (a) written in the ticket. ───────
+ *
+ * WHY (a) AND NOT (b).  The ticket's premise — that `@media (prefers-color-
+ * scheme)` and `[data-theme]` cannot both drive one token set — was true when
+ * the ticket was written and is no longer true. Brand answered it in their own
+ * file: commit `aded4ab9e` ("brand: add [data-theme] support to tokens.css")
+ * added a `[data-theme='light']` block mirroring the media-query values, so
+ * `brand/tokens.css` now serves both mechanisms from one source. The reason to
+ * keep local neutrals therefore no longer exists, and (b) would buy a permanent
+ * duplication that brand's own header bans in order to paper over a gap that is
+ * one block long in the file that owns it.
+ *
+ * HOW THE THEME RESOLVES — brand's FOUR selectors, in cascade order:
+ *   :root                                 -> dark values   (brand default)
+ *   @media (prefers-color-scheme: light)  -> light values
+ *   [data-theme='light']                  -> light values  (beats the media
+ *                                            block: equal specificity, later)
+ *   [data-theme='dark']                   -> dark values   (same)
+ * Only one [data-theme] value can be live, so the last two never race.
+ *
+ * ✅ THE RESIDUAL THIS COMMENT USED TO NAME IS CLOSED — corrected 2026-08-08.
+ * It read: "There is no `[data-theme='dark']` block in `brand/tokens.css` …
+ * OS LIGHT: the toggle can go light, but CANNOT force dark", and called that a
+ * defect in brand's file. That was TRUE when written and is FALSE now: brand
+ * landed the block in `1deaf689b` ("brand: add [data-theme='dark'] to
+ * tokens.css + fix AA contrast"), which is the one-block fix this comment asked
+ * for. Verified at the artefact, not inferred from the commit subject —
+ * `brand/tokens.css` carries a `[data-theme='dark']` rule mirroring :root's
+ * dark values. The toggle now forces BOTH directions on any OS preference.
+ *
+ * Left visible rather than deleted, because the stale text was load-bearing:
+ * anything below that mirrors "brand's selectors" must now mirror four, not
+ * three, and a reader who trusted the old paragraph would call the fourth
+ * selector unfounded. A stale RED lies exactly like a stale green.
+ *
+ * NO BARE HEX BELOW THIS LINE. Two values are `color-mix()` of a brand token,
+ * for the WCAG reason stated at each one; everything else is a token.
+ */
+
+/* Native widgets (scrollbars, select popups, range thumbs, focus rings) follow
+ * the same FOUR selectors as the palette, so a widget never disagrees with the
+ * surface behind it.
+ *
+ * The fourth line is new (2026-08-08) and is not cosmetic: when brand's
+ * `[data-theme='dark']` block landed, the PALETTE gained the ability to force
+ * dark on an OS-light box while this rule set still could not — so that box
+ * would have rendered a dark UI with light scrollbars and light select popups.
+ * Brand closing their gap OPENED one here. A mechanism copied "the same way"
+ * stops matching the moment the thing it mirrors is fixed. */
+:root { color-scheme: dark; }
+@media (prefers-color-scheme: light) { :root { color-scheme: light; } }
+:root[data-theme='light'] { color-scheme: light; }
+:root[data-theme='dark'] { color-scheme: dark; }
+
+/* ── Brand mark (header logo) ───────────────────────────────────────────────
+ * The 2bee.farm master mark, swapped per theme by the SAME four selectors as
+ * the palette and the widgets above. No JavaScript: the mark is not a piece of
+ * app state, it is a property of the surface it sits on, and resolving it the
+ * way every other colour in this app resolves is what stops it disagreeing
+ * with the background. `App.tsx` already writes [data-theme]; nothing new is
+ * wired, and there is no theme branch in the component to keep in sync.
+ *
+ * 🔴 COPIED INTO `src/assets/`, NOT referenced across the directory boundary —
+ * and the copy is a MEASURED decision, not a preference. Pointing url() at
+ * `../../../../brand/brand-kit/logos/…svg` was tried first and it BUILDS GREEN
+ * (Vite inlines it as a data URI) while `vite dev` serves it as:
+ *     HTTP 403 — "…is outside of Vite serving allow list  - …/2bee.slicer/web"
+ * Vite rewrites a CSS url() into a runtime `/@fs/` request bound by
+ * `server.fs.allow`; the `@import` of brand/tokens.css eight lines above is
+ * inlined at transform time and never becomes a request, so it crosses the very
+ * same boundary happily. THAT is the trap — the working sibling makes the
+ * broken case look proven, and the failure only appears in dev, which no gate
+ * exercises (Playwright runs against `preview`). Same green-build/dead-dev
+ * split that once put the wasm glue in public/.
+ * The cost is real and is written on the copies: they do NOT follow brand's
+ * changes. Each carries the source path, its sha256 and the re-check command,
+ * because a silent stale duplicate is exactly what this file's header warns
+ * about. Widening `server.fs.allow` is the alternative and belongs in
+ * vite.config.ts as its own decision — it exposes repo paths to the dev server,
+ * which is a bigger question than where a 1.2 kB logo lives.
+ *
+ * WHICH MARK ON WHICH SURFACE — three brand sources, not the ticket's summary.
+ * `handover/2bee_slicer/2026-08-08-brand-review-decisions-implement.md` maps
+ * light surfaces to `2bee-farm-mark-full-color.svg`. That contradicts brand's
+ * own canon in three places, so it is NOT what is implemented here:
+ *   - style-guide-v1.md §2.2: "Do not use the full-colour gradient mark on
+ *     backgrounds lighter than #3A3A3A. The amber gradient disappears against
+ *     white and pale surfaces. Use the reversed or monochrome variant instead."
+ *   - the full-colour SVG's own header: "Do NOT use on backgrounds lighter
+ *     than #3A3A3A".
+ *   - the mono-black SVG's own header: "Use on: White/Cream (#FAFAF0,
+ *     #FFFFFF) … light or mixed photography".
+ * This header is `--header: var(--color-bg-card)`, which brand's light tokens
+ * set to #FFFFFF — the exact case named. So light gets the MONO-BLACK mark.
+ * Dark gets reversed-white, where ticket and canon agree. Raised with brand;
+ * if they rule for the gradient on white anyway, it is a one-line change here.
+ */
+:root { --brand-mark: url('./assets/2bee-farm-mark-reversed-white.svg'); }
+@media (prefers-color-scheme: light) {
+  :root { --brand-mark: url('./assets/2bee-farm-mark-mono-black.svg'); }
+}
+:root[data-theme='light'] { --brand-mark: url('./assets/2bee-farm-mark-mono-black.svg'); }
+:root[data-theme='dark'] { --brand-mark: url('./assets/2bee-farm-mark-reversed-white.svg'); }
+
+/* App-level semantic names, aliased onto brand tokens. These are names for
+ * ROLES in this UI ("the panel", "a line"); the values are brand's. */
+:root {
+  /* Surfaces.
+   *
+   * 🔴 GREEN, NOT BLACK — founder, 2026-08-08, looking at the running app.
+   * Brand's `--color-bg` (#070d08) and `--color-bg-card` (#0d1a0e) read as
+   * BLACK on screen: the green is there in the numbers and invisible to the
+   * eye. The 2bee.farm surfaces people recognise are the deeper GREENS, so the
+   * page and the panels take those instead.
+   *
+   * Still brand's own values, not a local palette: `--color-bg-secondary`
+   * (#0f2318) and `--color-bg-card-raised` (#1a3c2c) are tokens in the same
+   * file. And card-raised is the RIGHT choice on contrast rather than a lucky
+   * one: brand's header comment records that the muted text tiers were lifted
+   * to clear WCAG AA "on the worst bg (card-raised: 7.18 / 5.53 / 4.68)", so
+   * this is the surface those ratios were measured against. */
+  --bg: var(--color-bg-secondary);       /* page + recessed fields (inputs, G-code) */
+  --panel: var(--color-bg-card-raised);  /* side/report panels, cards, scrub bar */
+  --header: var(--color-bg-card);        /* top bar + footer chrome — the darkest, so
+                                          * the chrome still reads as chrome */
+
+  /* Text */
+  --ink: var(--color-text-primary);
+  --muted: var(--color-text-muted);
+
+  /* Lines */
+  --line: var(--color-border);
+
+  /* Brand, not decoration: the accent is the 2bee.farm amber in both themes. */
+  --accent: var(--color-amber);
+  /* Links use Deep Amber, which style-guide §3.1 assigns to "typography on
+     light" — and it is the only amber that clears AA as TEXT in both themes.
+     Plain --color-amber is 3.42:1 on the light card (#C47A14 on #FFFFFF);
+     --color-amber-deep is 6.01:1 light / 5.24:1 dark. */
+  --link: var(--color-amber-deep);
+
+  /* Status.
+     --ok is brand's token unmodified: 6.66:1 dark / 5.02:1 light on --panel.
+     --warn and --bad each MISS AA (4.5:1) against brand's own card surface in
+     one theme, measured 2026-08-08:
+       light --color-status-warn  #B56800 on #FFFFFF -> 4.25:1  ✗
+       dark  --color-status-error #c94040 on #0d1a0e -> 3.66:1  ✗
+     Rather than restate a colour, each is mixed 25% toward --color-text-high,
+     which is near-black in light and near-white in dark — so the mix always
+     moves AWAY from the surface, in whichever theme is live, without this file
+     knowing which one that is. Result: warn 8.13:1 dark / 6.50:1 light,
+     bad 4.98:1 dark / 10.73:1 light. Filed to brand; delete the two mixes and
+     go back to the bare token the day those two tiers are lifted. */
+  --ok: var(--color-status-success);
+  --warn: color-mix(in srgb, var(--color-status-warn) 75%, var(--color-text-high));
+  --bad: color-mix(in srgb, var(--color-status-error) 75%, var(--color-text-high));
+
+  --radius: var(--radius-sm);
+  --mono: var(--font-mono);
+  --sans: var(--font-primary);
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 13px/1.45 var(--sans);
+}
+
+.app { display: flex; flex-direction: column; height: 100%; }
+
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 8px 14px;
+  background: var(--header); border-bottom: 1px solid var(--line);
+}
+/* Mark + product name. Two flex children only — the mark, and a `.name` span
+ * wrapping the existing <strong>/<span class="sub">, so those two keep their
+ * inline baseline relationship instead of becoming flex items themselves. */
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand .mark {
+  /* 24px is brand's stated minimum rendered width for the mark-only lockup
+   * (style-guide-v1.md §2.5) — at the floor, not below it. The 10px gap above
+   * clears the 1X clearspace rule at this size. */
+  width: 24px; height: 24px; flex: none;
+  background-image: var(--brand-mark);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+  /* Decorative BY CONSTRUCTION, and that is the point of using a background
+   * rather than an <img>: the accessible name of this header is the real text
+   * beside it ("2bee.app"), which a mark alone could never supply. The span
+   * is aria-hidden in App.tsx so it is not announced as an unlabelled image. */
+}
+.brand strong { font-size: 15px; letter-spacing: .2px; }
+.brand .sub { color: var(--muted); margin-left: 8px; }
+.topright { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+label.inline { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+
+/* THE TAB STRIP — 2bee.cad | 2bee.cnc | Run (founder 2026-08-11, TODO #76).
+ *
+ * The buttons keep the app's own `button` rule for type and hit area and only
+ * override what makes a tab a tab: no rounded box, and a 2px bottom edge that
+ * carries the selection. The selected edge is `--accent`; every unselected one
+ * is `transparent` AT THE SAME THICKNESS, so nothing shifts by two pixels when
+ * the selection moves — a row that jiggles reads as a bug in a UI where the
+ * other panels do not move.
+ *
+ * 🔴 SELECTION IS NOT CARRIED BY COLOUR ALONE. The underline is a second,
+ * non-colour channel, and `aria-selected` is the third, which is the one a
+ * screen reader announces. Colour alone would fail anyone who cannot separate
+ * the accent from the muted text — in a workshop, on a screen at an angle, in
+ * daylight. */
+/* 🔴 THE ROW THE TABS SIT IN — founder 2026-08-11: *"move the dark/light to the
+ * 2bee.cad, 2bee.cnc, Run row; add the logo to this row"*.
+ *
+ * The mark and the theme toggle are SIBLINGS of the tablist, never children of
+ * it: `role="tablist"` must contain tabs and nothing else, and `Tabs.tsx` counts
+ * `TABS` for its arrow keys rather than its own children.
+ *
+ * ⚠ THE BOTTOM EDGE MOVED FROM `.tabbar` TO HERE, and it had to. Left on
+ * `.tabbar`, the line would have run under the three tabs and stopped — the mark
+ * on one side and the toggle on the other would have sat over a gap in the rule
+ * that separates the row from the app. One border, on the element that spans the
+ * whole width. */
+.tabrow {
+  display: flex; align-items: stretch; gap: 10px;
+  padding-left: 12px;
+  background: var(--header);
+  border-bottom: 1px solid var(--line);
+}
+/* The tablist takes the middle and pushes the toggle to the far edge.
+ *
+ * 🔴 `min-width: 0` AND `overflow-x: auto` ARE NO LONGER OPTIONAL — a FOURTH tab
+ * (`Designs`, 2026-08-31) pushed the row past 360px and the whole PAGE scrolled
+ * sideways, which `e2e:"no horizontal page scroll at 360px"` caught. A flex item
+ * defaults to `min-width: auto`, so the tablist refuses to shrink below its
+ * content and hands the overflow to the body. The rule this lane already had
+ * (AGENTS.md) is that wide content scrolls INSIDE its own container and the body
+ * never does; this is that rule applied to the tab bar. */
+.tabrow .tabbar { flex: 1 1 auto; padding-left: 0; min-width: 0; overflow-x: auto; }
+.tabrow .mark { align-self: center; }
+.tabrow-right { display: flex; align-items: center; gap: 8px; padding-right: 12px; }
+
+.tabbar {
+  display: flex; align-items: stretch; gap: 2px;
+  padding: 0 10px;
+  background: var(--header);
+}
+.tabbar .tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 7px 12px;
+  color: var(--muted);
+}
+.tabbar .tab:hover { color: var(--ink); border-bottom-color: var(--line); }
+.tabbar .tab[aria-selected='true'] {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+/* The focus ring must survive the transparent background — a keyboard user
+ * moving with the arrow keys has nothing else to go on. */
+.tabbar .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* FOUR columns: panels, stage, the splitter, the report.
+ *
+ * `--report-w` is set by App.tsx from the remembered width; the fallback here is
+ * the value this app shipped with, so the layout still holds if the variable is
+ * ever missing — a grid track of `` is not "the default", it is a broken rule.
+ * The splitter is a real track rather than an overlay so it cannot drift out of
+ * alignment with the edge it moves. */
+.body { display: grid; grid-template-columns: 290px 1fr 6px var(--report-w, 320px); flex: 1; min-height: 0; }
+.side, .report { overflow: auto; background: var(--panel); border-right: 1px solid var(--line); }
+.report { border-right: none; border-left: 1px solid var(--line); }
+
+/* The report panel's drag handle. 6px is narrow, so the cursor and a visible
+ * hover/focus state are the whole affordance — a handle nobody can find is a
+ * feature that is not there. `touch-action: none` stops a touch drag being
+ * stolen by the page's own scrolling before the pointer events arrive. */
+.vsplit {
+  cursor: col-resize;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  touch-action: none;
+  /* The visible grip: a short centred bar, so the strip does not read as a
+   * second border. */
+  background-image: linear-gradient(var(--line), var(--line));
+  background-repeat: no-repeat;
+  background-size: 2px 28px;
+  background-position: center;
+}
+.vsplit:hover, .vsplit:focus-visible { background-color: var(--bg); outline: none; }
+.vsplit:hover { background-size: 2px 56px; }
+.vsplit:focus-visible { background-image: linear-gradient(var(--accent), var(--accent)); background-size: 2px 56px; }
+.stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.viewport { flex: 1; min-height: 240px; }
+.viewport canvas { display: block; width: 100%; height: 100%; }
+
+.panel { border-bottom: 1px solid var(--line); }
+/* 🔴 THE HEADER IS A ROW OF TWO SIBLING BUTTONS, not one button with another
+   inside it. The collapse control and the show/hide eye are separate actions on
+   the same line, and nesting them would be invalid HTML AND would open the
+   panel every time somebody hid its layer. */
+.panel-head-row { display: flex; align-items: center; }
+.panel-head {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 9px 4px 9px 12px; background: none; border: 0; color: var(--ink);
+  font-weight: 600; cursor: pointer; font-size: 12.5px;
+}
+.chev { color: var(--muted); }
+/* The title and its badge travel together on the left of the header; the
+   chevron stays pinned right by `.panel-head`'s space-between. */
+.panel-title { display: inline-flex; align-items: baseline; gap: 7px; min-width: 0; }
+/* 🔴 What a SHUT panel still says about its contents. Not decoration: with the
+   open/closed state now surviving a refresh, this is the only thing standing
+   between a collapsed warnings panel and a warning nobody ever reads. */
+.badge {
+  font-weight: 500; font-size: 10.5px; line-height: 1.4;
+  padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+  border: 1px solid currentColor;
+}
+.badge-bad { color: var(--bad); }
+.badge-warn { color: var(--warn); }
+.badge-muted { color: var(--muted); }
+/* Reserved whether or not there is an eye in it, so the chevrons line up down
+   the whole sidebar — a panel that owns no LIVE layer renders nothing here, and
+   a column of chevrons that jumps sideways at those panels reads as a defect. */
+.eye-slot { flex: 0 0 auto; min-width: 34px; display: flex; justify-content: flex-end; padding-right: 12px; }
+/* 🔴 THE GLOBAL EYE'S ROW HAS NO GEOMETRY OF ITS OWN. It was `.layers-all` +
+   `.layers-all-title`, whose padding was a hand-copy of `.panel-head`'s — two
+   rules describing one column, and nothing on this box tests pixel alignment,
+   so the drift would have been invisible until somebody noticed the top eye
+   sitting a few pixels off the other eight. The row now uses `.panel-head-row`,
+   `.panel-head` and `.eye-slot` directly; the ONLY thing it adds is what it must
+   NOT inherit — the header's pointer and its full-strength ink, because this row
+   does not collapse and its label is a scope, not a control. */
+.panel-head-static { cursor: default; color: var(--muted); }
+.eye {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 3px 4px; background: none; border: 0; color: var(--muted);
+  cursor: pointer; line-height: 0;
+}
+.eye:hover { color: var(--ink); }
+.eye[aria-pressed='false'], .eye[aria-pressed='mixed'] { color: var(--warn); }
+.eye-count { font-size: 10px; line-height: 1; font-variant-numeric: tabular-nums; }
+.panel-body { padding: 4px 12px 12px; display: flex; flex-direction: column; gap: 7px; }
+
+/* The per-layer controls, at the foot of the panel that owns them. Set apart
+   from the machining settings above by a rule, because they are the only
+   controls in the panel that change NOTHING about the program. */
+.layer-list {
+  display: flex; flex-direction: column; gap: 2px;
+  margin-top: 4px; padding-top: 6px; border-top: 1px dashed var(--line);
+}
+.layer-row {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  padding: 3px 6px; background: none; border: 0; color: var(--ink);
+  font: inherit; font-size: 11.5px; text-align: left; cursor: pointer;
+}
+.layer-row:hover { background: var(--panel); }
+.layer-row i { width: 10px; height: 10px; border-radius: 2px; flex: 0 0 auto; }
+.layer-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.layer-row[aria-pressed='false'] { color: var(--muted); }
+.layer-row[aria-pressed='false'] .layer-name { text-decoration: line-through; }
+.layer-row[aria-pressed='false'] i { opacity: 0.4; }
+
+.field { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.field > span { color: var(--muted); }
+.numwrap { display: inline-flex; align-items: center; gap: 4px; }
+.numwrap em { color: var(--muted); font-style: normal; font-size: 11px; width: 26px; }
+input[type='number'], input[type='text'], select, .clamp input {
+  background: var(--bg); color: var(--ink);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 3px 6px; font: inherit; width: 92px;
+}
+select { width: 148px; }
+.check { display: flex; align-items: center; gap: 7px; color: var(--muted); }
+.check input { accent-color: var(--accent); }
+
+button {
+  background: var(--bg); color: var(--ink); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 4px 9px; cursor: pointer; font: inherit;
+}
+button:hover { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+.add { align-self: flex-start; }
+.row { display: flex; gap: 8px; }
+
+.note { color: var(--muted); font-size: 11.5px; margin: 2px 0 0; }
+.warn { color: var(--warn); font-size: 11.5px; margin: 4px 0 0; }
+/* mm ONLY — prominent badge for fields that stay in mm regardless of display unit */
+em.warn[data-testid="mm-only-slot"] {
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-style: normal;
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.03em;
+}
+.bad { color: var(--bad); }
+.ok { color: var(--ok); }
+/* 🔴 PENDING — "nothing measured this", and it is NOT `.ok` with a quieter
+ * colour. It exists because the Simulation panel had a counter that reads 0 on
+ * every real job because the check cannot run, and 0 in the `.ok` green is a
+ * pass nobody earned. `--muted` deliberately: it is the same colour this app
+ * uses for a fact it does not have, and it must never be mistaken for `--ok`.
+ * Do not add a background or a border — a PENDING that looks like a badge reads
+ * as a verdict. See SLICER-GATES.md: a check that cannot run reports PENDING,
+ * never PASS. */
+.pending { color: var(--muted); }
+/* 🔴 A VALUE that is a warning, as opposed to `.warn`, which is a PARAGRAPH.
+ * Colour only: no font-size, no margin. It exists because the spoilboard panel
+ * has to flag a measured number inside a `.grid2` row — the reach a declared
+ * board leaves BARE — and reusing `.warn` there shrinks the value and pushes it
+ * off the baseline of the label beside it, so the one row that says "the cutter
+ * can get somewhere with no sacrificial material under it" would be the row
+ * that looks like an afterthought. Never use it on a block. */
+.warnval { color: var(--warn); }
+
+.grid2 { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; align-items: baseline; }
+.grid2 span { color: var(--muted); }
+
+.toolcard { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px; }
+.caps { display: flex; gap: 6px; margin-top: 6px; }
+.caps span {
+  font-size: 11px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--line);
+}
+.caps .yes { color: var(--ok); border-color: var(--ok); }
+/* The strike-through carries the "not supported" meaning. The old `opacity:.55`
+ * dropped this to 3.3:1 on the dark card — and "grblHAL has no cutter comp" is
+ * a fact about the machine, not chrome. Readable is the safe default here. */
+.caps .no { color: var(--muted); text-decoration: line-through; }
+
+.clamps { display: flex; flex-direction: column; gap: 5px; }
+/* 🔴 IT WRAPS, and it used to run off the panel. `1fr repeat(5, 52px) 26px` with
+ * 4px gaps needs 310px before the name gets a pixel, and the sidebar's content
+ * box is 250px: measured on the running app 2026-08-10, the height field ended
+ * at x=306 and the ✕ at x=336 against a panel edge at 290 — 46px of a clamp row,
+ * including the control that REMOVES the clamp, outside the panel. The row above
+ * it says in as many words that the control taking an object back out must never
+ * be the thing that overflows; this one did.
+ *
+ * Same rule as `.place`, for the same reason: `auto-fit` + `minmax` gives as many
+ * columns as the panel can hold at a typeable width and re-flows at any other
+ * width, with no breakpoint to go stale. The NAME spans the row — it is prose,
+ * the other five are millimetres, and a name sharing a line with the numbers is
+ * what forced them narrow in the first place. */
+.clamp {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(52px, 1fr));
+  gap: 4px;
+  align-items: center;
+}
+.clamp > input:first-child { grid-column: 1 / -1; }
+.clamp input { width: 100%; min-width: 0; }
+.clamp button { padding: 4px 0; }
+
+/* ---- Selected objects, row by row (TODO #58) ------------------------------
+ *
+ * Founder, 2026-08-09: *"similar to clamps show the selected Tools (like a
+ * table, row by row); Drawings (row by row)"*.
+ *
+ * 🔴 DELIBERATELY NOT `.clamp`'s GRID, and the difference is not decorative. A
+ * clamp row is SIX INPUT BOXES in a fixed grid because every one of its numbers
+ * is an operator declaration being typed. A tool row and a drawing row hold the
+ * CORE'S ANSWERS — a fit verdict, a chipload window, a section Z the core chose
+ * — so they are laid out as label/value pairs and there is no input box for a
+ * grid to size. Reusing the clamp grid would have made the two look
+ * interchangeable at exactly the moment the difference decides whether a value
+ * may be typed over. Same idea, different shape, on purpose. */
+.objrows { display: flex; flex-direction: column; gap: 6px; }
+.objrow {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 7px;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--bg);
+}
+/* ---- The per-drawing placement row (Offset X / Offset Y / Turn) ------------
+ *
+ * 🔴 IT IS NOT `.row`. `.row` is `display: flex` with no wrap, and three
+ * label+input+unit fields are ~170px each: measured on the running app
+ * 2026-08-10, the list was **250px wide holding 517px of content**, with `Turn`
+ * starting at x=407 — off the panel entirely, reachable only by scrolling the
+ * whole sidebar sideways. The founder reported it as clipped, which is what it
+ * was.
+ *
+ * 🔴 THE CURE IS NOT SMALLER BOXES. These three are machining numbers an
+ * operator types and reads back; shrinking them to fit is how a placement gets
+ * mis-keyed. `auto-fit` + `minmax` wraps into as many columns as the panel can
+ * give a legible input, so the same markup fits the 290px sidebar (two columns,
+ * then one) and spreads out if the column is ever widened — no breakpoint to go
+ * stale, and nothing to re-tune when the panel is resized.
+ *
+ * The label sits ABOVE its input rather than beside it, which is what buys the
+ * width back: `.field`'s side-by-side layout spends ~70px of every cell on a
+ * word that a 100px-wide input does not need to share a line with. */
+.place {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 6px 8px;
+}
+.place .field { flex-direction: column; align-items: stretch; gap: 2px; }
+.place .field > span { font-size: 11.5px; }
+.place .numwrap { display: flex; }
+/* The input takes the cell; the unit keeps its fixed width so `mm` and `deg`
+ * line up down the column instead of each box ending somewhere different. */
+.place input[type='number'] { width: 100%; min-width: 0; }
+.place .numwrap em { flex: 0 0 auto; }
+
+.objrow-head { display: flex; align-items: center; gap: 6px; }
+.objrow-icon { flex: 0 0 auto; display: flex; align-items: center; }
+/* `min-width: 0` so a long tool id ellipsises instead of pushing the ✕ off the
+   290px panel — the control that takes the object back OUT must never be the
+   thing that overflows. */
+.objrow-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.objrow-name em { display: block; font-style: normal; font-size: 11px; color: var(--muted); }
+.objrow-x {
+  flex: 0 0 auto; padding: 0 6px; cursor: pointer; line-height: 1.6;
+  background: var(--bg); color: var(--muted);
+  border: 1px solid var(--line); border-radius: var(--radius);
+}
+.objrow-x:hover { color: var(--bad); border-color: var(--bad); }
+.objrow-facts { display: flex; flex-direction: column; gap: 2px; font-size: 11.5px; color: var(--muted); }
+.objrow .grid2 { font-size: 11.5px; }
+
+/* A control that is a MECHANISM, not an affordance: the two file inputs the
+ * lists drive through a ref (`+ open a file…`, `+ import a tool file…`).
+ *
+ * 🔴 Off screen rather than `display: none`, and that is the whole point of the
+ * class existing. A `display: none` element has no box, and a driver — or an
+ * assistive tool, or anything else that reaches an element by geometry — cannot
+ * act on it. Keeping a 1px box means the import path stays reachable to
+ * everything, while the panel shows no file control, which is what the founder
+ * asked to have removed. */
+.offscreen {
+  position: absolute; width: 1px; height: 1px;
+  opacity: 0; pointer-events: none;
+  left: -9999px;
+}
+
+/* A COLUMN since TODO #24: the bar now stacks the coloured program map, the
+ * scrubber and the transport row. It was a single flex ROW when it held one
+ * slider and a `100%`.
+ *
+ * 🔴 EVERY PIXEL HERE IS TAKEN OFF THE 3D CANVAS, which is why this block is
+ * tight to the point of looking fussy. Measured at 1280x720: the old one-slider
+ * bar was 57px and left the canvas 587px; a comfortable first version of the new
+ * bar was 106px, left the canvas 538px, and that 49px was enough to stop the
+ * sheet's ROTATE HANDLE settling on a quarter turn under a drag (`the sheet can
+ * be turned by its handle` went red). The bottom bar is not free real estate —
+ * it is borrowed from the thing the operator is actually looking at. */
+.scrub {
+  display: flex; flex-direction: column; align-items: stretch; gap: 4px;
+  padding: 4px 12px; border-top: 1px solid var(--line); background: var(--panel);
+}
+.scrub input[type='range'] { width: 100%; height: 14px; margin: 0; accent-color: var(--accent); }
+.pct { width: 40px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* ---- Transport: play, speed, clock, and the estimate ---------------------
+ * Wraps rather than scrolls: at 360px the estimate drops onto its own line and
+ * stays readable. A bar that scrolls sideways hides the number it exists for. */
+.transport {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 11.5px; color: var(--muted);
+}
+.tbtn {
+  min-width: 30px; padding: 1px 7px; line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+.tbtn[aria-pressed='true'] { border-color: var(--accent); color: var(--ink); }
+.speeds { display: flex; gap: 2px; }
+.speeds button { padding: 1px 6px; font-size: 11px; }
+/* The live multiplier is the ACCENT, not merely "not grey": at x10 the playhead
+ * and the wall clock disagree by an order of magnitude, and which one is in
+ * force has to be readable at a glance from across a workshop. */
+.speeds button.on {
+  background: var(--accent); border-color: var(--accent); color: #1a1a1a; font-weight: 600;
+}
+.clock { font-variant-numeric: tabular-nums; }
+/* Pushed to the far end: it is the number an operator plans a day around, so it
+ * gets the position the eye lands on last and stays on. */
+.estimate {
+  margin-left: auto; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+.estimate b { color: var(--ink); font-variant-numeric: tabular-nums; }
+/* 🔴 The word "estimate" is NOT decoration and is not allowed to recede into
+ * the background — it is the difference between a figure and a promise. Same
+ * size and weight as the rest of the row, never smaller. */
+.estimate em { font-style: normal; color: var(--warn); }
+
+/* Lives INSIDE `.transport`. Closed it is one inline item and costs the canvas
+ * nothing; open, it claims the whole width so the sentences are readable rather
+ * than squeezed into a column beside the buttons. */
+.estwhy { font-size: 11px; color: var(--muted); }
+.estwhy > summary { cursor: pointer; white-space: nowrap; }
+.estwhy[open] { flex-basis: 100%; }
+.estwhy ul { margin: 6px 0 2px; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
+.estwhy b { color: var(--ink); }
+.estwhy code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* Visually hidden, still read aloud. The transport buttons are glyphs — a
+ * screen reader announcing "▶" announces nothing. */
+.sr {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.legend { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
+/* The swatch COLOUR is set inline by the toolpath legend, not here — those are
+ * move-class colours (rapid/cut/plunge), an open question with brand. */
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+.block {
+  margin: 10px 12px; padding: 10px; border: 1px solid var(--bad);
+  border-left-width: 3px; border-radius: var(--radius); color: var(--bad);
+}
+.block ul { margin: 6px 0 0; padding-left: 18px; }
+.busy { padding: 8px 12px; color: var(--muted); }
+.notes { margin: 0; padding-left: 16px; color: var(--muted); }
+.notes li { margin-bottom: 4px; }
+
+.gcode {
+  font: 11.5px/1.4 var(--mono); background: var(--bg); color: var(--ink);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 8px; max-height: 320px; overflow: auto; white-space: pre;
+}
+
+.foot {
+  display: flex; gap: 16px; flex-wrap: wrap; justify-content: space-between;
+  padding: 6px 14px; border-top: 1px solid var(--line);
+  background: var(--header); color: var(--muted); font-size: 11.5px;
+}
+/* The AGPL §13 source offer lives in this footer. It is a licence obligation,
+   so it is held to the same AA bar as any other text — hence --link. */
+.foot a { color: var(--link); }
+.fatal { padding: 40px; max-width: 700px; }
+.fatal pre { background: var(--panel); padding: 12px; border-radius: var(--radius); overflow: auto; }
+
+/* Wide content scrolls inside its own box; the page never scrolls sideways. */
+@media (max-width: 1100px) {
+  .body { grid-template-columns: 1fr; grid-template-rows: auto 60vh auto; }
+  .side, .report { border: none; border-bottom: 1px solid var(--line); max-height: 42vh; }
+}
+
+/* Quarter-turn buttons in the workpiece panel. */
+.row-buttons {
+  /* ⚠ Was `var(--sp-2, 8px)`. `--sp-2` is defined by NOTHING — not here, not in
+   * `brand/tokens.css` (which has no spacing scale at all), and not set from
+   * TypeScript. So the fallback was the value on every render since the line
+   * was written, and the `var()` read as a token reference that would follow
+   * brand's spacing if brand changed it. There is no such token to follow.
+   * Written as the number it has always been; found 2026-08-28 by
+   * `tests/style-import-resolves.test.ts`, which is the check that a `var()`
+   * naming nothing paints nothing and logs nothing. */
+  display: flex;
+  gap: 8px;
+}
+.row-buttons button {
+  flex: 1;
+}
+
+/* Save / load / delete row shared by the machine, workpiece and drawing panels. */
+.saved { margin-bottom: 10px; }
+.saved .row { display: flex; gap: 6px; margin-bottom: 4px; }
+.saved input, .saved select { flex: 1; min-width: 0; }
+.saved .note { margin: 2px 0 0; }
+
+/* File-picker styled as a button, for the store import. */
+.filebtn {
+  flex: 1; text-align: center; cursor: pointer;
+  padding: 5px 8px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel); color: var(--ink);
+}
+.filebtn input { display: none; }
+
+/* The "no drawing yet" state. Deliberately looks like content, not like an
+   error: not having chosen a drawing is a normal place to be, and dressing it
+   in the refusal styling would cry wolf on the styling that means something. */
+.empty { padding: 14px 12px; color: var(--muted); }
+.empty strong { display: block; color: var(--ink); margin-bottom: 6px; }
+.empty p { margin: 0; }
+
+/* ── The program map: every move as a slice, in program order ───────────────
+   Colours are the toolpath legend's, which brand ruled out of the palette as
+   INSTRUMENT colours (a machining program's legend is a safety surface, not a
+   style choice). They live here once and are shared by the map and the legend
+   swatches, so a swatch cannot drift from the stripe it explains. */
+.progmap {
+  /* No bottom margin: `.scrub` is a flex column with its own gap, so a margin
+   * here was a second source of spacing and pure height off the canvas. */
+  display: flex; width: 100%; height: 9px; margin-bottom: 0;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  overflow: hidden; background: var(--bg);
+}
+.pm { min-width: 1px; }
+/* A tool change and a probe are ONE move each and would round to nothing.
+   They are the two a person most wants to find in a program, so they keep a
+   visible floor rather than being honest-but-invisible. */
+.pm-change, .pm-probe { min-width: 3px; }
+.pm-cut    { background: #2e7d32; }
+.pm-tab    { background: #e6a700; }
+.pm-drill  { background: #1565c0; }
+.pm-rapid  { background: #9e9e9e; }
+.pm-change { background: #c62828; }
+.pm-probe  { background: #6a1b9a; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; }
+
+/* ── Auth gate (Cognito OIDC login) ───────────────────────────────────────────
+   Full-screen overlay shown when auth is configured and the user has no valid
+   token. Uses brand tokens for consistency with the rest of the app.
+   When auth is not configured (env vars missing), this element is never rendered. */
+.auth-gate {
+  display: flex; align-items: center; justify-content: center;
+  position: fixed; inset: 0; z-index: 9999;
+  background: var(--bg);
+}
+.auth-gate-card {
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+  padding: 40px 48px; max-width: 360px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.auth-gate-brand { font-size: 18px; letter-spacing: .3px; }
+.auth-gate-status { color: var(--muted); text-align: center; margin: 0; font-size: 14px; }
+.auth-gate-btn {
+  padding: 8px 24px; font-size: 14px; font-weight: 500;
+  background: var(--accent); color: var(--bg); border: 1px solid var(--accent);
+  border-radius: var(--radius); cursor: pointer; font: inherit;
+}
+.auth-gate-btn:hover { opacity: .9; }
+.auth-gate-licence {
+  color: var(--muted); font-size: 11.5px; margin: 8px 0 0; text-align: center;
+}
+.auth-gate-licence a { color: var(--link); }
+
+/* ── The Designs tab (shop) ──────────────────────────────────────────────────
+ *
+ * Every colour here is a brand token, per AGENTS.md: this lane consumes
+ * `brand/tokens.css` and does not invent palette values. The ONE place a raw
+ * colour would have been tempting is the trust badges, and they reuse the
+ * status tokens (`--ok`/`--warn`/`--bad`) already defined above — a trust
+ * verdict is a status, not a new colour family.
+ */
+.shop { padding: 24px 28px 48px; max-width: 1400px; margin: 0 auto; }
+.shop-head h1 { margin: 0 0 4px; font-size: 1.6rem; }
+.shop-sub { margin: 0 0 8px; color: var(--muted); }
+.shop-caveat {
+  margin: 0 0 20px; color: var(--muted); font-size: 0.85rem;
+  border-left: 3px solid var(--line); padding-left: 10px; max-width: 90ch;
+}
+.shop-caveat-loud { border-left-color: var(--warn); color: var(--ink); }
+.shop-controls { display: flex; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
+.shop-search, .shop-family {
+  background: var(--bg); color: var(--ink); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 7px 10px; font: inherit;
+}
+.shop-search { flex: 1 1 240px; min-width: 180px; }
+.shop-search:focus-visible, .shop-family:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: -1px;
+}
+.shop-failed { color: var(--bad); margin: 0 0 12px; }
+.shop-empty, .shop-note { color: var(--muted); padding: 24px 28px; }
+.shop-note-warn { max-width: 80ch; }
+.shop-note-warn h2 { color: var(--warn); font-size: 1.1rem; }
+
+.shop-grid {
+  list-style: none; margin: 0; padding: 0; display: grid; gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+.shop-card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); overflow: hidden;
+}
+.shop-card-btn {
+  display: flex; flex-direction: column; width: 100%; height: 100%;
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: inherit; font: inherit; text-align: left;
+}
+.shop-card-btn:disabled { cursor: progress; opacity: 0.6; }
+.shop-card-btn:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.shop-card-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.shop-thumb {
+  display: block; background: var(--bg); border-bottom: 1px solid var(--line);
+  aspect-ratio: 3 / 2;
+}
+.shop-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.shop-thumb-none {
+  display: grid; place-items: center; height: 100%;
+  color: var(--muted); font-size: 0.8rem;
+}
+.shop-card-body { display: block; padding: 12px 14px 10px; }
+.shop-card-title { display: block; font-weight: 600; }
+.shop-card-family { display: block; color: var(--muted); font-size: 0.8rem; margin-top: 2px; }
+.shop-card-stats {
+  display: block; color: var(--muted); font-size: 0.78rem;
+  margin-top: 6px; font-family: var(--mono);
+}
+.shop-badge {
+  display: inline-block; margin-top: 9px; padding: 1px 7px;
+  border-radius: 999px; font-size: 0.7rem; text-transform: uppercase;
+  letter-spacing: 0.04em; border: 1px solid currentColor;
+}
+.shop-badge-trusted { color: var(--ok); }
+.shop-badge-suspect { color: var(--warn); }
+.shop-badge-untrusted, .shop-badge-nothing { color: var(--bad); }
+/* 🔴 THE CLAMP IS A CLICK-TARGET CONSTRAINT, NOT A TASTE ONE. Quoting the
+ * mesher's full verdict (correct — see `trustLine`) grew the card to 544px,
+ * and a card taller than the scroll region cannot be centred above the footer:
+ * `e2e:"the opened design's imports RESOLVE"` failed with `<footer class="foot">
+ * intercepts pointer events`. A 544px button is a real defect for a person too,
+ * not only for Playwright. Full text stays reachable via the `title` attribute
+ * and is never truncated in the DOM, so the warning is clipped on screen and
+ * intact for anyone reading it. */
+.shop-card-trust {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; margin-top: 6px; font-size: 0.76rem; color: var(--muted);
+}
+/* A non-trusted card is not a styling variant — it is the one carrying the
+ * reason its picture may be wrong, so it gets the room to say it. */
+.shop-card:not(.shop-trust-trusted) .shop-card-trust { -webkit-line-clamp: 4; }
+/* cad's sentence. NOT clamped: it is the only text on the card that says what
+ * the part IS, and truncating it mid-clause is how a description becomes a
+ * different claim. Every other line here is a measurement that survives a clip. */
+.shop-card-desc {
+  display: block; margin-top: 8px; font-size: 0.8rem;
+  line-height: 1.45; color: var(--ink);
+}
+.shop-card-desc-part {
+  display: block; font-family: var(--mono); font-size: 0.68rem;
+  color: var(--muted); text-transform: none;
+}
+/* A statement about the PART's fabricability, not a style variant — it sits with
+ * the trust line rather than the metadata, and is not clamped. */
+.shop-card-pcb {
+  display: block; margin-top: 8px; font-size: 0.76rem;
+  line-height: 1.4; color: var(--warn);
+}
+.shop-card-path {
+  display: block; margin-top: 8px; font-family: var(--mono);
+  font-size: 0.7rem; color: var(--muted); word-break: break-all;
+}
+.shop-card-cta {
+  display: block; margin-top: auto; padding: 9px 14px;
+  border-top: 1px solid var(--line); color: var(--link); font-size: 0.85rem;
+}
+.shop-foot { margin-top: 32px; color: var(--muted); font-size: 0.8rem; }
+.shop-foot code { font-family: var(--mono); }
+.shop-foot summary { cursor: pointer; }
+.shop-foot ul { max-height: 320px; overflow-y: auto; }
