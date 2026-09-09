@@ -265,7 +265,7 @@ silent, and silence in a roster reads as absence.**
 | # | Gate | Physical failure it guards | Negative control |
 |---|---|---|---|
 | DINV | Sim datum invariance | a verdict that changes when the workpiece is moved is an answer about a part nobody is cutting — an operator told a clean program is dirty, or worse, that a dirty one is clean | `--plant bed-anchored-sim`, driven at a MOVED datum because it is vacuous at 0 (where the machine-origin anchor and the placed geometry coincide), and the byte-identical-program half is asserted rather than assumed — if the plant ever starts changing the motion it has stopped being a control for the CHECK and become one for the cut |
-| AGPL | Source offer (§13) | This lane is **AGPL-3.0-or-later**, and `AGENTS.md` calls the network source offer *"a licence obligation, not a nice-to-have"*. The footer link IS that offer. Measured 2026-08-10: it points at `https://github.com/2bee-farm/2bee.slicer`, which returns **HTTP 404** (control: `github.com` → 200, so the box is online and the 404 is real) — wrong org, wrong repo, and the lane renamed to `2bee.app` without the link moving. The only real repository is **private**, so even a corrected link delivers nothing. ⚠ **STALE CLAIM REMOVED 2026-08-12:** this cell used to add *"The same URL is in `Cargo.toml`"* — it is not, and has not been since 2026-08-11, when the `repository` key was deleted; the string survives there only inside the comment explaining its own removal, where it asserts nothing. **The live copy is ONE**, `web/src/App.tsx`. ⚠ The gate does NOT choose the fix: naming the target IS the Corresponding Source mechanism (public mirror / tarball / open the monorepo) and that is `legal`'s open decision. It refuses only to let a broken offer ship **unnoticed** — and since 2026-08-12 it also refuses to let a link that merely CHANGED read as one that works | **Rebuilt 2026-08-12. SEVEN WITNESSED REDS BELOW**, plus the one PASS branch and two PENDING paths — ten branches, every one driven, in the section *AGPL — three defects, and the ten branches now witnessed*. 🔴 **The 2026-08-10 witnessed PASS is now UNPRODUCIBLE and that is the fix, not a loss:** *"Pointing it at a DIFFERENT url: PASS — proving the gate keys on the known-dead link"* was a green awarded for the link having **changed**, which a different 404 satisfies. That branch is now a **FAIL** (`NO RULING NAMES IT`). The green now requires a target `legal` has ruled on **and** a live answer from it, and the ruling table ships **empty**. 🔴 The *"must become a FAIL the day a deploy target exists"* obligation was carried **by this sentence and by a comment, in no code at all** — it is now a probe, watched red both by `--self-plant agpl-published` and by a copy pointed at a name that really resolves. It still PENDS today, budgeted, because nothing is served **yet** — and the probe says which of *served* / *not served* / *UNCHECKED* it measured, because an offline box must not be able to render as compliance. 🔴 **2026-08-14: the *yet* is a ruling, not a guess** — founder, verbatim *"@software/2bee.app/ will served here"*: the domain is served-intent, not defensive, so the broken offer is **live-duty** and this budgeted pending is a deadline, not a contingency. What the ruling is NOT: publish-now (no DNS/deploy without a further word), and not `legal`'s mechanism ruling, which still blocks the offer itself. The ruling changes no branch — published with a dead or unruled offer was already a FAIL in code; what changed is what the pending means. ⚠ **ROUTABILITY FILTER ADDED 2026-08-28** — the publish probe discards private/loopback/link-local/CGNAT/documentation answers on both the target and the control name, closing the false-red class a hijacking resolver produced. `--self-plant agpl-hijack-blind` is its control: **one witnessed red below**. 🔴 **CORRESPONDENCE LIMB ADDED 2026-09-09, AND THE CELL ABOVE IS STALE IN THREE PLACES — corrected here rather than rewritten, because each was true when written:** (a) *"the ruling table ships empty"* — `legal` RULED the mechanism 2026-09-04 and `SOURCE_OFFER_RULED` carries the mirror; (b) *"it still PENDS today, because nothing is served yet"* — `2bee.app` went live **08:20:02 on 2026-09-09** and the obligation has attached; (c) the footer no longer carries the known-dead link. 🔴 **And the gate PASSED that morning while §13 was in breach:** the mirror was **four commits behind the served build**, and link-present + link-200 were both true. §13 owes the Corresponding Source **of the work being served**, so the gate now also compares the mirror tree to this tree **blob-for-blob at a resolved commit sha** — never by ref name, which is a CDN answer about a cache. **One witnessed red below** (`--self-plant agpl-mirror-drift` → FAIL) and, beside it, a witnessed PENDING (`--self-plant agpl-mirror-unchecked`) — a limb that did not run is not a limb that held, and calling that second one a red would be the same over-claim this gate exists to stop. Section: *AGPL — an answering link is not a corresponding one* |
+| AGPL | Source offer (§13) | This lane is **AGPL-3.0-or-later**, and `AGENTS.md` calls the network source offer *"a licence obligation, not a nice-to-have"*. The footer link IS that offer. Measured 2026-08-10: it points at `https://github.com/2bee-farm/2bee.slicer`, which returns **HTTP 404** (control: `github.com` → 200, so the box is online and the 404 is real) — wrong org, wrong repo, and the lane renamed to `2bee.app` without the link moving. The only real repository is **private**, so even a corrected link delivers nothing. ⚠ **STALE CLAIM REMOVED 2026-08-12:** this cell used to add *"The same URL is in `Cargo.toml`"* — it is not, and has not been since 2026-08-11, when the `repository` key was deleted; the string survives there only inside the comment explaining its own removal, where it asserts nothing. **The live copy is ONE**, `web/src/App.tsx`. ⚠ The gate does NOT choose the fix: naming the target IS the Corresponding Source mechanism (public mirror / tarball / open the monorepo) and that is `legal`'s open decision. It refuses only to let a broken offer ship **unnoticed** — and since 2026-08-12 it also refuses to let a link that merely CHANGED read as one that works | **Rebuilt 2026-08-12. SEVEN WITNESSED REDS BELOW**, plus the one PASS branch and two PENDING paths — ten branches, every one driven, in the section *AGPL — three defects, and the ten branches now witnessed*. 🔴 **The 2026-08-10 witnessed PASS is now UNPRODUCIBLE and that is the fix, not a loss:** *"Pointing it at a DIFFERENT url: PASS — proving the gate keys on the known-dead link"* was a green awarded for the link having **changed**, which a different 404 satisfies. That branch is now a **FAIL** (`NO RULING NAMES IT`). The green now requires a target `legal` has ruled on **and** a live answer from it, and the ruling table ships **empty**. 🔴 The *"must become a FAIL the day a deploy target exists"* obligation was carried **by this sentence and by a comment, in no code at all** — it is now a probe, watched red both by `--self-plant agpl-published` and by a copy pointed at a name that really resolves. It still PENDS today, budgeted, because nothing is served **yet** — and the probe says which of *served* / *not served* / *UNCHECKED* it measured, because an offline box must not be able to render as compliance. 🔴 **2026-08-14: the *yet* is a ruling, not a guess** — founder, verbatim *"@software/2bee.app/ will served here"*: the domain is served-intent, not defensive, so the broken offer is **live-duty** and this budgeted pending is a deadline, not a contingency. What the ruling is NOT: publish-now (no DNS/deploy without a further word), and not `legal`'s mechanism ruling, which still blocks the offer itself. The ruling changes no branch — published with a dead or unruled offer was already a FAIL in code; what changed is what the pending means. ⚠ **ROUTABILITY FILTER ADDED 2026-08-28** — the publish probe discards private/loopback/link-local/CGNAT/documentation answers on both the target and the control name, closing the false-red class a hijacking resolver produced. `--self-plant agpl-hijack-blind` is its control: **one witnessed red below**. 🔴 **CORRESPONDENCE LIMB ADDED 2026-09-09, AND THE CELL ABOVE IS STALE IN THREE PLACES — corrected here rather than rewritten, because each was true when written:** (a) *"the ruling table ships empty"* — `legal` RULED the mechanism 2026-09-04 and `SOURCE_OFFER_RULED` carries the mirror; (b) *"it still PENDS today, because nothing is served yet"* — `2bee.app` went live **08:20:02 on 2026-09-09** and the obligation has attached; (c) the footer no longer carries the known-dead link. 🔴 **And the gate PASSED that morning while §13 was in breach:** the mirror was **four commits behind the served build**, and link-present + link-200 were both true. §13 owes the Corresponding Source **of the work being served**, so the gate now also compares the mirror tree to this tree **blob-for-blob at a resolved commit sha** — never by ref name, which is a CDN answer about a cache. **One witnessed red below** (`--self-plant agpl-mirror-drift` → FAIL) and, beside it, a witnessed PENDING (`--self-plant agpl-mirror-unchecked`) — a limb that did not run is not a limb that held, and calling that second one a red would be the same over-claim this gate exists to stop. Section: *AGPL — an answering link is not a corresponding one*. 🔴 **CORRECTED TWICE THE SAME DAY:** `MIRROR.md` moved from ALLOWED to **REQUIRED** (a one-directional allowance is a blind spot the moment a push is automated — `legal` found it by reading the recipe, not by any gate firing), and the red was narrowed to require drift in files that BUILD the served program **and** a served chunk this tree has built, because **the limb failed on a compliant state within an hour of landing, over three files no bundle contains**. **Two more witnessed branches** (`--self-plant agpl-mirror-undisclosed` → FAIL, `--self-plant agpl-served-elsewhere` → PENDING) in the section *AGPL — the limb red-flagged a COMPLIANT state within the hour* |
 | BRND | Vendored brand mark | `web/src/assets/2bee-farm-mark-*.svg` are COPIES of brand's masters. Each copy's header says so in capitals and records the source sha256 — an honest comment, and not a control: nothing compared the hash to the master again, so the day brand edits the mark this app renders the old one and the copy's own header is the only artefact claiming it is current | stripping the recorded `Source sha256` line. **Watched red, and the watching is what found the verdict defect**: it first turned the gate PENDING and the run still said `VERDICT: GO`, so the one edit that permanently disarms this check was the one edit it waved through. That branch now FAILs; the structural half is in `PENDING_BUDGET` |
 | CTRL | Controller acceptance | canned cycles are a compile-time option in grblHAL, so a build without them answers `error:20` to the `G83` gate G9 is proud of — and G9 stays green | **cannot pass from this box and is not written so that it can.** With no transcript in `gates/controller/` it reports PENDING, which is the true state of *"no controller has ever seen our output"*. It is the one gate budgeted PENDING `always`, so a full run here reads **INCOMPLETE**, never GO |
 
@@ -975,6 +975,76 @@ local side matches an empty mirror**, so the naive version of this probe would h
 green on nothing at all. The zero-blob guard turned it into a PENDING instead, and `--full-tree`
 is the fix. ⇒ ***A discovery-based comparison whose population can silently become empty passes
 by construction.***
+
+### AGPL — the limb red-flagged a COMPLIANT state within the hour (serving-drift partition + required disclosure, 2026-09-09)
+
+🔴 **Two corrections to the correspondence limb, both landed the same day it did, and the second
+is a defect I created.**
+
+**(1) `MIRROR.md` is REQUIRED, not merely allowed.** The probe shipped with `MIRROR.md` on an
+*allowance* list — a mirror-only file, so absent from the monorepo subtree and expected as an extra.
+⚠ **An allowance is one-directional.** `ceo`'s automated-push recipe builds the pushed tree from
+`git archive <sha> software/2bee.app`, which has no `MIRROR.md`, so **the first automated push would
+have deleted it** — and under the allowance the blob-for-blob comparison would still have said
+MATCH, because a mirror-only file being absent is indistinguishable from one that never existed.
+`backend`'s subtree-hash gate could not see it either. ⇒ ***Three gates, and the file fell through
+all of them; `legal` found it by reading the recipe, not by any gate firing.*** That file is the
+offer's own statement of its boundary — what is mirrored, at which revision, that `AGENTS.md` is
+excluded and why, and the `hardware/cad` completeness caveat. **Absent ⇒ FAIL, naming it**, and it
+is its own verdict rather than drift: the disclosure is a property of the mirror, so it does not
+depend on which commit is being served.
+
+**Witnessed red — `--self-plant agpl-mirror-undisclosed`:**
+
+```
+  SELF-PLANTED FAIL    AGPL  🔴 §13 HAS ATTACHED AND THE OFFER DOES NOT DISCLOSE WHAT IT
+  WITHHOLDS — … is MISSING MIRROR.md — the file that states this repository IS the §13
+  Corresponding Source offer …
+VERDICT: NO-GO — 1 gate(s) did not pass, and 6 could not run (CAD1H, RUN, I1, CTRL, DISC, SPLNT).
+```
+
+**(2) "Differs from `HEAD`" is NOT "differs from the source of what is served".** 🔴 **The limb
+FAILED on a fully compliant state within an hour of landing — on the commit that landed it.** The
+gate and two documents were committed here; the mirror still matched the **deployed** commit
+exactly, the served bundle was built from that commit, and §13 was intact. The gate called a licence
+breach over `gates/slicer_gate_check.mjs`, `README.md` and `SLICER-GATES.md` — **none of which any
+bundle contains.** ⚠ **The ordinary state of this lane is a commit landed here and not yet
+deployed**, so that red was not an edge case; it was the default.
+
+⇒ **`legal`, on why a false red is the worse error on THIS gate specifically:** *"a compliance gate
+that is red on correct states gets overridden, and an override on an AGPL control leaves a record of
+a deliberate bypass."* **Not an annoyance metric — it is the rate at which we manufacture evidence
+against ourselves.**
+
+**The red now needs BOTH:** the drifting paths must include files that can **build the served
+program** (`web/` minus tests and e2e, `core/`, `wasm/`, `Cargo.toml`, `Cargo.lock`), **and** the
+served entry chunk must be one this tree has built. ⚠ **The listing is deliberately UNDER-inclusive
+— gates, docs, tests, the CLI and tooling are not on it.** Under-listing downgrades a real breach to
+**PENDING** (visible, uncertified, never a pass); over-listing produces the false red. **The bias is
+chosen, and it is towards PENDING.**
+
+**Witnessed — the two plants differ in exactly ONE input**, which is what makes the guard
+load-bearing rather than merely present. Same serving-file drift in both; the second says the served
+bundle is a build this tree has never produced:
+
+```
+--self-plant agpl-mirror-drift        FAIL     VERDICT: NO-GO
+--self-plant agpl-served-elsewhere    PENDING  VERDICT: INCOMPLETE
+```
+
+⚠ **`agpl-served-elsewhere` drives BOTH probes on purpose.** Driving only the served-build probe
+would land on the same PENDING an already-drifted tree produces — **it would fire and prove
+nothing**, which is the difference between a plant that fires and a plant that fires *correctly*.
+
+**Clean run on this tree, same hour, after the fix** — the mirror is genuinely behind (three
+non-serving files) and the gate says so without calling it a breach:
+
+```
+  PENDING AGPL  ⚠ THE MIRROR DOES NOT MATCH THIS TREE, AND THIS GATE MAY NOT CALL THAT A BREACH
+  … 3 file(s) DIFFERING in content (README.md, SLICER-GATES.md, gates/slicer_gate_check.mjs)
+  … NONE of the 3 drifting path(s) can change the served program … ⚠ It is not a pass either:
+  the mirror IS behind this tree and the next deploy must re-mirror.
+```
 
 ### AGPL — a lying resolver is not a publication (routability filter, 2026-08-28)
 

@@ -414,6 +414,21 @@ const SELF_PLANTS = {
     '2026-09-09 state, in which the mirror answered 200 and was FOUR COMMITS BEHIND the served build and this gate ' +
     'went PASS on it. AGPL must go RED when 2bee.app is served and PEND when it is not; the one thing it may never ' +
     'do is pass. This is the control on the limb whose absence produced the green legal called "worse than no gate"',
+  'agpl-mirror-undisclosed':
+    'delete MIRROR.md from the mirror side of the correspondence probe while every other file still matches — the ' +
+    'state `ceo`\u2019s automated-push recipe would have created on its FIRST run, since that recipe builds the pushed ' +
+    'tree from the monorepo subtree alone and MIRROR.md is not in it. AGPL must go RED naming the file. \u26a0 Under the ' +
+    'ALLOWANCE this probe shipped with, the blob-for-blob comparison still MATCHED afterwards, because a mirror-only ' +
+    'file being absent is indistinguishable from one that never existed — `backend`\u2019s subtree-hash gate could not ' +
+    'see it either, and `legal` found it by reading the recipe rather than by any gate firing. This is the control on a ' +
+    'one-directional allowance, which is a permanent blind spot the moment anything automates the push',
+  'agpl-served-elsewhere':
+    'force the served-build probe to report that 2bee.app serves a chunk this tree has never built, while the ' +
+    'correspondence probe reports DRIFT. AGPL must go PENDING and NAME the reason, never FAIL: a mirror that ' +
+    'differs from HEAD while the SERVED build is some other commit is the ordinary state between a commit here and ' +
+    'a redeploy, and §13 owes the source of what is SERVED. This is the control on the false-red branch — `legal`: ' +
+    'an override on an AGPL control leaves a record of a deliberate bypass, so a red on a correct state is worse ' +
+    'here than on any other gate in this file',
   'agpl-mirror-unchecked':
     'force the correspondence probe to UNCHECKED — the enumerator could not run (no egress, rate limit, a mechanism ' +
     'that is not a GitHub repository). AGPL must report PENDING, never PASS: a limb that did not run is not a limb ' +
@@ -528,6 +543,8 @@ const SELF_PLANT_TARGETS = {
   'agpl-offline': { moves: ['AGPL'] },
   'agpl-mirror-drift': { moves: ['AGPL'] },
   'agpl-mirror-unchecked': { moves: ['AGPL'] },
+  'agpl-served-elsewhere': { moves: ['AGPL'] },
+  'agpl-mirror-undisclosed': { moves: ['AGPL'] },
   'splant-orphan': { moves: ['SPLNT'] },
 };
 
@@ -10573,9 +10590,35 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
   // the exclusion lapses — so this list is a quotation of a decision, and moving
   // it needs `legal`, not a commit here.
   const MIRROR_EXCLUDED = ['AGENTS.md', 'CLAUDE.md'];
-  // The mirror's own note about being a mirror. It exists only there, so it is
-  // an expected EXTRA, never a missing file.
-  const MIRROR_ADDED = ['MIRROR.md'];
+  // The mirror's own note about being a mirror. It exists only there, so it is an
+  // expected EXTRA rather than a missing file — but expected is not the same as
+  // optional.
+  //
+  // 🔴 REQUIRED, NOT MERELY ALLOWED — `legal`, 2026-09-09, and they are right
+  // that my allowance was a one-directional blind spot. `MIRROR.md` is the
+  // DISCLOSURE INSTRUMENT for the whole mechanism: it states that this is the
+  // §13 Corresponding Source offer for `https://2bee.app/`, which subtree is
+  // mirrored, at which source revision, and — in its own section — *what is
+  // deliberately NOT here, and why*. `legal`'s ruling record relies on it
+  // existing (Q1 verification: *"MIRROR.md states both the exclusion and the
+  // completeness caveat itself"*).
+  //
+  // ⚠ THE DEFECT THIS CLOSES IS THAT NOTHING WOULD HAVE NOTICED ITS DELETION.
+  // `ceo`'s automated-push recipe builds the pushed tree from the monorepo
+  // subtree alone, and `MIRROR.md` is not in that subtree — so the first
+  // automated push would DELETE it. Under an ALLOWANCE the blob-for-blob
+  // comparison still MATCHES afterwards, because a mirror-only file being absent
+  // is indistinguishable from one that never existed. `backend`'s gate compares
+  // subtree hashes and never sees it either. **Three gates and the file fell
+  // through all of them.** ⇒ ***A mirror that presents itself as the
+  // Corresponding Source while disclosing nothing about what was withheld is a
+  // worse position than the one being fixed, and it would have arrived by
+  // automation with nobody deciding it.***
+  //
+  // ⚠ Absence is its OWN verdict, not drift: it is a property of the mirror, so
+  // it does not depend on which commit is being served.
+  const MIRROR_REQUIRED = ['MIRROR.md'];
+  const MIRROR_ADDED = [...MIRROR_REQUIRED];
 
   const gitOut = (args) => {
     const r = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8', timeout: 30000 });
@@ -10599,12 +10642,29 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
   };
 
   const probeCorrespondence = (url) => {
-    if (selfPlanted('agpl-mirror-drift')) {
+    // 🔴 `agpl-served-elsewhere` DRIVES THIS PROBE TOO, and it has to. A control
+    // that only forced probe 4 would land on the same PENDING the clean tree
+    // already produces whenever anything here is uncommitted — it would fire and
+    // prove nothing, which is the difference between a plant that fires and a
+    // plant that fires CORRECTLY. Driving both probes makes the pair differ in
+    // exactly one input: same serving-file drift, served build elsewhere ⇒ the
+    // verdict must move from FAIL to PENDING, and that is the guard under test.
+    if (selfPlanted('agpl-mirror-drift') || selfPlanted('agpl-served-elsewhere')) {
       return {
         state: 'drift',
+        servingDrift: true,
+        servingDetail: 'SELF-PLANT: the drift is in files that build the served program (web/index.html, web/src/App.tsx), as it was on 2026-09-09',
         detail:
           `SELF-PLANT ${SELF_PLANT}: correspondence probe forced to DRIFT, modelling the 2026-09-09 state — ` +
           'the mirror answered 200 and was four commits behind the served build',
+      };
+    }
+    if (selfPlanted('agpl-mirror-undisclosed')) {
+      return {
+        state: 'undisclosed',
+        detail:
+          `SELF-PLANT ${SELF_PLANT}: the mirror is MISSING ${MIRROR_REQUIRED.join(' + ')} while the rest of the tree matches — ` +
+          'the state the first automated push would have created, and the one an ALLOWANCE could not see',
       };
     }
     if (selfPlanted('agpl-mirror-unchecked')) {
@@ -10724,6 +10784,35 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
       extra.push(p);
     }
 
+    // 🔴 WHICH DRIFTING FILES COULD HAVE CHANGED THE SERVED PROGRAM — and this
+    // partition decides FAIL vs PENDING, never FAIL vs PASS.
+    //
+    // ⚠ IT EXISTS BECAUSE THE FIRST VERSION OF THIS GATE FAILED ON A COMPLIANT
+    // STATE WITHIN AN HOUR OF LANDING, on my own commit. I committed the gate and
+    // two documents; the mirror still matched the DEPLOYED commit exactly, and
+    // §13 was intact — the mirror is a snapshot of a commit, and a served bundle
+    // built from that commit is fully corresponded. The gate red-flagged a
+    // licence breach over `gates/slicer_gate_check.mjs`, `README.md` and
+    // `SLICER-GATES.md`, none of which any bundle contains.
+    // ⇒ ***"differs from HEAD" is not "differs from the source of what is
+    // served", and the ordinary state of this lane is a commit landed here and
+    // not yet deployed.***
+    //
+    // 🔴 THE BIAS IS DELIBERATE AND IS TOWARDS PENDING. Under-listing a real
+    // build input downgrades a genuine breach to PENDING — visible, uncertified,
+    // and still not a pass. Over-listing produces a FALSE RED on a compliance
+    // control, which `legal` ruled is the worse error here: *"an override on an
+    // AGPL control leaves a record of a deliberate bypass"*. So tests, docs, the
+    // gates, the CLI and the tooling are NOT listed: none of them can change the
+    // bundle a visitor receives.
+    const servesTheProgram = (f) =>
+      (f.startsWith('web/') && !f.startsWith('web/tests/') && !f.startsWith('web/e2e/')) ||
+      f.startsWith('core/') ||
+      f.startsWith('wasm/') ||
+      f === 'Cargo.toml' ||
+      f === 'Cargo.lock';
+
+    const undisclosed = MIRROR_REQUIRED.filter((f) => !remote.has(f));
     const compared = local.size - [...excluded].filter((p) => local.has(p)).length;
     const localSha = (gitOut(['rev-parse', 'HEAD']) ?? 'HEAD-UNKNOWN').trim();
     const dirty = (gitOut(['status', '--porcelain', '--', '.']) ?? '').trim();
@@ -10731,17 +10820,37 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
       ? ` ⚠ THE WORKING TREE IS DIRTY (${dirty.split('\n').length} path(s)) — this limb compares the mirror to HEAD, which is what a commit publishes; uncommitted work is in neither`
       : '';
 
+    if (undisclosed.length) {
+      return {
+        state: 'undisclosed',
+        detail:
+          `${owner}/${repo}@${branch} = COMMIT ${mirrorSha} is MISSING ${undisclosed.join(' + ')} — the file that states this repository IS the §13 ` +
+          `Corresponding Source offer, which subtree it mirrors, at which revision, and what is deliberately not here. ` +
+          `Without it the mirror presents itself as the Corresponding Source while disclosing nothing about what was withheld` +
+          (missing.length || differ.length || extra.length
+            ? `. The tree ALSO drifts: ${missing.length} missing, ${differ.length} differing, ${extra.length} unexpected`
+            : `. The rest of the tree matches HEAD:${prefix} blob-for-blob across ${compared} file(s)`) +
+          dirtyNote,
+      };
+    }
     if (missing.length === 0 && differ.length === 0 && extra.length === 0) {
       return {
         state: 'match',
         detail:
           `${owner}/${repo}@${branch} = COMMIT ${mirrorSha} matches HEAD:${prefix} (local ${localSha}) blob-for-blob across ${compared} file(s), with ` +
-          `${MIRROR_EXCLUDED.join(' + ')} excluded per legal's ruling Q1 and ${MIRROR_ADDED.join(' + ')} allowed as mirror-only${dirtyNote}`,
+          `${MIRROR_EXCLUDED.join(' + ')} excluded per legal's ruling Q1 and ${MIRROR_REQUIRED.join(' + ')} present as REQUIRED mirror-only disclosure${dirtyNote}`,
       };
     }
     const say = (label, list) => (list.length ? `${list.length} ${label} (${list.slice(0, 6).join(', ')}${list.length > 6 ? `, +${list.length - 6} more` : ''})` : null);
+    const drifted = [...missing, ...differ, ...extra];
+    const serving = drifted.filter(servesTheProgram);
     return {
       state: 'drift',
+      servingDrift: serving.length > 0,
+      servingDetail:
+        serving.length > 0
+          ? `${serving.length} of the ${drifted.length} drifting path(s) CAN change the served program: ${serving.slice(0, 6).join(', ')}${serving.length > 6 ? `, +${serving.length - 6} more` : ''}`
+          : `NONE of the ${drifted.length} drifting path(s) can change the served program (${drifted.slice(0, 6).join(', ')}${drifted.length > 6 ? `, +${drifted.length - 6} more` : ''}) — they are gates, docs, tests or tooling, which no bundle contains`,
       detail:
         `${owner}/${repo}@${branch} = COMMIT ${mirrorSha} does NOT correspond to HEAD:${prefix} (local ${localSha}) — ` +
         [say('file(s) MISSING from the mirror', missing), say('file(s) DIFFERING in content', differ), say('UNEXPECTED file(s) in the mirror', extra)]
@@ -10749,6 +10858,64 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
           .join('; ') +
         ` (${compared} file(s) compared)${dirtyNote}`,
     };
+  };
+
+  // --- probe 4: is the SERVED bundle a build of THIS tree? ------------------
+  //
+  // 🔴 THIS EXISTS TO STOP MY OWN FAIL BRANCH FIRING ON A COMPLIANT STATE, and
+  // the hole was reachable within hours of writing it. Probe 3 compares the
+  // mirror to `HEAD`. §13 owes the source of the SERVED build. Those are the
+  // same thing only while nothing is in flight — and the normal state of this
+  // lane is an app-touching commit landed here and not yet deployed. In that
+  // window the mirror correctly matches the DEPLOYED commit, differs from
+  // `HEAD`, and probe 3 alone would call a fully compliant deploy a §13 breach.
+  //
+  // ⚠ THAT IS THE FAILURE THREE LANES SPENT THIS MORNING RULING AGAINST, one
+  // gate along: `legal` — *"a compliance gate that is red on correct states gets
+  // overridden, and an override on an AGPL control leaves a record of a
+  // deliberate bypass"*. A false red here does not merely annoy; it manufactures
+  // the evidence.
+  //
+  // WHAT IT MEASURES, and it is deliberately the CHEAPEST fact that separates
+  // the two cases: the served `index.html` names its entry chunk by Vite's
+  // CONTENT HASH (`index-<hash>.js`). If a file of that exact name exists in
+  // this tree's `web/dist/assets/`, the served bundle is a build of THIS working
+  // tree, and a mirror that does not match this tree is a mirror that does not
+  // match what is being served — the 2026-09-09 breach. If it names a chunk this
+  // tree has never built, the served build is something else (very likely the
+  // mirror's own commit), and this gate MAY NOT call that a breach.
+  //
+  // ⚠ THREE LIMITS, SAID RATHER THAN LEFT TO BE FOUND:
+  //   1. It is a FILENAME comparison, i.e. the bundler's hash of the entry chunk
+  //      — not a byte comparison, and not of every chunk. It is evidence about
+  //      which build is served, never proof that `web/dist/` was built from
+  //      `HEAD` (`dist/` is gitignored and this gate does not rebuild).
+  //   2. A `web/dist/` that has never been built makes this UNCHECKED, which
+  //      degrades the drift verdict to PENDING — never to a pass, and never to
+  //      a fail.
+  //   3. It does NOT become the tree-vs-served comparator. That is
+  //      `scripts/shipped_string_check.py` and `ceo`'s, and this reads one
+  //      filename rather than following chunk references.
+  const curlText = (u) => {
+    const r = spawnSync('curl', ['-sS', '-m', '15', '--connect-timeout', '6', '--retry', '0', u], { encoding: 'utf8', timeout: 25000 });
+    return r.status === 0 && typeof r.stdout === 'string' && r.stdout.length ? r.stdout : null;
+  };
+  const probeServedBuild = () => {
+    if (selfPlanted('agpl-served-elsewhere')) {
+      return { state: 'other', detail: `SELF-PLANT ${SELF_PLANT}: the served bundle names a chunk this tree has never built` };
+    }
+    const html = curlText('https://2bee.app/');
+    if (html === null) return { state: 'unchecked', detail: 'https://2bee.app/ returned no body to this box, so which build is served was not measured' };
+    const m = /src="\/assets\/(index-[A-Za-z0-9_-]+\.js)"/.exec(html);
+    if (!m) return { state: 'unchecked', detail: 'the served index.html names no /assets/index-<hash>.js entry chunk this probe can read — it was NOT read as "no build"' };
+    const chunk = m[1];
+    if (!existsSync(join(ROOT, 'web/dist/assets'))) {
+      return { state: 'unchecked', detail: `the served entry chunk is ${chunk} and this tree has no web/dist/assets/ to compare it against (dist/ is gitignored and this gate does not rebuild)` };
+    }
+    if (existsSync(join(ROOT, 'web/dist/assets', chunk))) {
+      return { state: 'this-tree', detail: `the served entry chunk ${chunk} EXISTS in this tree's web/dist/assets/ — Vite names it by content hash, so the served bundle is a build of this working tree` };
+    }
+    return { state: 'other', detail: `the served entry chunk ${chunk} is NOT in this tree's web/dist/assets/, so the served bundle is a build of some other commit — plausibly the mirror's own` };
   };
 
   // --- the offer link, read WITHOUT presupposing its host --------------------
@@ -10990,6 +11157,22 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
         '(ceo owns it, and it follows chunk references out of the main bundle). Two hops, and this one names which it holds';
       if (corr.state === 'match') {
         pass('AGPL', `the source offer points at ${url}, ${ruling}, it ANSWERS: ${off.detail}, and it CORRESPONDS: ${corr.detail}. ${premise}. ${heldEnd}`);
+      } else if (corr.state === 'undisclosed') {
+        // 🔴 ITS OWN VERDICT, NOT DRIFT, AND NOT SUBJECT TO PROBE 4. Whether the
+        // served build is this tree decides who is owed WHICH source; it does not
+        // decide whether the offer discloses what was withheld from it. The
+        // disclosure is a property of the mirror, so a served work with an
+        // undisclosed exclusion is a bad offer whatever commit produced the
+        // bundle. `legal` 2026-09-09: absent ⇒ FAIL, naming it.
+        if (served) {
+          fail('AGPL', `🔴 §13 HAS ATTACHED AND THE OFFER DOES NOT DISCLOSE WHAT IT WITHHOLDS — ${url} is ${ruling} and ANSWERS (${off.detail}), but ${corr.detail}. ${premise}`);
+        } else {
+          results.push({
+            id: 'AGPL',
+            state: 'PENDING',
+            msg: `⚠ THE OFFER ANSWERS AND DOES NOT DISCLOSE WHAT IT WITHHOLDS — ${url} is ${ruling} (${off.detail}), and ${corr.detail}. §13 has not attached, so this is not a breach today. ${premise}. ${heldEnd}`,
+          });
+        }
       } else if (corr.state === 'drift') {
         // 🔴 SERVED + NON-CORRESPONDING IS THE BREACH ITSELF, not a warning.
         // §13 owes the source OF THE WORK BEING SERVED; a user who accepts an
@@ -10997,8 +11180,37 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
         // licence asks for. Unserved, the duty has not attached and the drift is
         // still a real defect that must not read as clean — so it PENDS rather
         // than passing, and it never passes.
-        if (served) {
-          fail('AGPL', `🔴 §13 HAS ATTACHED AND THE OFFER DOES NOT CORRESPOND — ${url} is ${ruling} and ANSWERS (${off.detail}), but ${corr.detail}. A user who accepts this offer gets source that does not build the program they were served. ${premise}`);
+        //
+        // 🔴 BUT "DIFFERS FROM HEAD" IS NOT "DIFFERS FROM WHAT IS SERVED", and
+        // conflating them would red this gate on the lane's most ordinary state:
+        // an app-touching commit landed here and not yet deployed, where the
+        // mirror correctly matches the DEPLOYED commit. Probe 4 separates them,
+        // and the fail branch now requires it to say the served bundle is a
+        // build of THIS tree. Anything else PENDS — see probe 4's header for why
+        // a false red on an AGPL control is worse than a missing one.
+        const build = probeServedBuild();
+        // TWO conditions on the red, and each one has already been the difference
+        // between a true and a false verdict on this gate: the drift has to be in
+        // files that BUILD the served program, and the served bundle has to be a
+        // build of THIS tree. Either one absent and the mirror may correspond to
+        // the deployed commit exactly.
+        if (served && corr.servingDrift && build.state === 'this-tree') {
+          fail(
+            'AGPL',
+            `🔴 §13 HAS ATTACHED AND THE OFFER DOES NOT CORRESPOND — ${url} is ${ruling} and ANSWERS (${off.detail}), but ${corr.detail}. ` +
+              `THE DRIFT REACHES THE PROGRAM: ${corr.servingDetail}. AND THE SERVED BUILD IS THIS TREE: ${build.detail}. ` +
+              `A user who accepts this offer gets source that does not build the program they were served. ${premise}`
+          );
+        } else if (served) {
+          results.push({
+            id: 'AGPL',
+            state: 'PENDING',
+            msg:
+              `⚠ THE MIRROR DOES NOT MATCH THIS TREE, AND THIS GATE MAY NOT CALL THAT A BREACH — ${url} is ${ruling} and ANSWERS (${off.detail}); ${corr.detail}. ` +
+              `WHY THIS IS NOT A FAIL: ${corr.servingDrift ? corr.servingDetail : corr.servingDetail}${corr.servingDrift ? `, but ${build.detail}` : `; ${build.detail}`}. ` +
+              `§13 owes the source of the SERVED build, not of this working tree: the mirror is a snapshot of a COMMIT, and a bundle built from that commit is fully corresponded even while this tree has moved on — the ordinary state between a commit here and a redeploy. ` +
+              `⚠ It is not a pass either: the mirror IS behind this tree and the next deploy must re-mirror. ${heldEnd}`,
+          });
         } else {
           results.push({
             id: 'AGPL',
