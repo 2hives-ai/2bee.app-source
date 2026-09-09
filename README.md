@@ -8,10 +8,25 @@ OrcaSlicer, itself AGPL. **§13 obligation: if this is served over a network, it
 source must be offered to every user.** That is a link in the UI footer, not an
 afterthought.
 
-> 🔴 **THE §13 OFFER IS NOT CURRENTLY DISCHARGED, AND CANNOT BE UNTIL SOMEONE
-> PUBLISHES THE SOURCE.** The paragraph above says what the obligation is; this
-> block says what is actually true, because those were different facts for as
+> 🟢 **§13 IS DISCHARGED AS OF 2026-09-09.** The paragraph above says what the obligation
+> is; this block says what is actually true, because those were different facts for as
 > long as the link has been wrong and nothing said so.
+>
+> 🔴 **THIS HEADING READ *"THE §13 OFFER IS NOT CURRENTLY DISCHARGED, AND CANNOT BE UNTIL
+> SOMEONE PUBLISHES THE SOURCE"* UNTIL 2026-09-09**, three lines above a 🟢 RESOLVED row that
+> already contradicted it. **A stale 🔴 costs as much as a stale ✅ and is harder to find**:
+> nobody re-tests a blocker that names a reason, and this one is the first thing a reader of
+> this file sees. Corrected in place rather than deleted, so the correction is legible.
+>
+> ⚠ **AND DISCHARGED IS NOT PERMANENT — the limb that broke was CURRENCY, not mechanism.**
+> On 2026-09-09, within **ten minutes** of the domain going live, the published mirror was
+> **four commits behind the served build**: the link was present and answered 200, and a user
+> accepting the offer would have received source that does not build the program they were
+> served. Gate `AGPL` passed on exactly that evidence. It now also compares the mirror tree to
+> this tree **blob-for-blob at a resolved commit sha** — see `SLICER-GATES.md`, *AGPL — an
+> answering link is not a corresponding one*. ⇒ **The offer goes stale on every change to
+> `software/2bee.app/` that is deployed without re-mirroring**, which is why `backend`'s deploy
+> refuses to upload without a matching mirror tag.
 >
 > **Measured 2026-08-11** (anonymous `curl -I`, with `https://github.com` → **200**
 > as the control, so the box was online and the failures are real):

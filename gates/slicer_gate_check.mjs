@@ -409,6 +409,15 @@ const SELF_PLANTS = {
     'else, while `AuthGate.tsx` carried a second live link to the same dead repository on the one page an ' +
     'unauthenticated visitor sees. A gate narrowed to the one place a defect was found stays narrow, and the ' +
     'README already recorded that exact failure as retired',
+  'agpl-mirror-drift':
+    'force the correspondence probe to DRIFT while the offer link and its delivery probe stay perfect — the exact ' +
+    '2026-09-09 state, in which the mirror answered 200 and was FOUR COMMITS BEHIND the served build and this gate ' +
+    'went PASS on it. AGPL must go RED when 2bee.app is served and PEND when it is not; the one thing it may never ' +
+    'do is pass. This is the control on the limb whose absence produced the green legal called "worse than no gate"',
+  'agpl-mirror-unchecked':
+    'force the correspondence probe to UNCHECKED — the enumerator could not run (no egress, rate limit, a mechanism ' +
+    'that is not a GitHub repository). AGPL must report PENDING, never PASS: a limb that did not run is not a limb ' +
+    'that held, and this is the branch where a network-dependent check quietly becomes optional',
   'agpl-offline':
     'rule the current URL AND force both probes to UNCHECKED — the box has no network. AGPL must report PENDING, ' +
     'never PASS. It is the whole point of adding the probes: a gate that makes a network request is a gate that ' +
@@ -517,6 +526,8 @@ const SELF_PLANT_TARGETS = {
   'agpl-offer-ruled': { moves: ['AGPL'] },
   'agpl-surface-divergent': { moves: ['AGPL'] },
   'agpl-offline': { moves: ['AGPL'] },
+  'agpl-mirror-drift': { moves: ['AGPL'] },
+  'agpl-mirror-unchecked': { moves: ['AGPL'] },
   'splant-orphan': { moves: ['SPLNT'] },
 };
 
@@ -635,7 +646,7 @@ const GATES = [
   ['DOOR', 'THE TWO TOOL DOORS AGREE', 'HARD', '`tool_id: X` and `tool_ids: [X]` are TWO DIFFERENT CODE PATHS INTO THE PLANNER for the same one cutter, and they do not agree. `tool_ids` goes through `assign_tools_from_set` -> `recommend()` per feature, whose rejections become `tool_set_refusals` and reach the check at `job.rs:1140`. `tool_id` sets the tool on every operation and RETURNS — `apply_tool_set` gets `None`, the refusal list stays empty, and the per-feature recommender is never called. So the one-tool run was never PASSING that check, it was SKIPPING it: `pocket` + a 6mm down-cut through the singular door emits 962 lines, `ok: true`, zero refusals, while the simulator on that same run reports 6.0mm of material still standing at (120.6, 90.6) — and the set door refuses the job outright. Same cutter, same fixture, two answers, and the safe one is not the one that emits'],
   ['FLAG', 'FLAG ACCEPTED + DISCARDED', 'HARD', 'a flag that is accepted and ignored reads to the operator, the script AND THE GATE as a setting that took effect — `import --plant` exited 0 doing nothing, which would make any negative control driven that way vacuous, and `job --config` discarded every machine, workpiece, clamp and tool setting in the file on the host that prints the program an operator sends to the machine'],
   ['F1', 'DXF/SVG INTAKE', 'HARD', 'a dropped entity cuts a part that is missing a feature'],
-  ['AGPL', 'SOURCE OFFER (\u00a713)', 'HARD', 'this lane is AGPL-3.0-or-later: the moment it is SERVED, every user must be offered its Corresponding Source. The link in the footer IS the offer, and a 404 is not an offer'],
+  ['AGPL', 'SOURCE OFFER (\u00a713)', 'HARD', 'this lane is AGPL-3.0-or-later: the moment it is SERVED, every user must be offered its Corresponding Source. The link in the footer IS the offer, and a 404 is not an offer. \ud83d\udd34 AND AN ANSWERING LINK IS NOT AN OFFER EITHER \u2014 widened 2026-09-09 after `legal` measured the mirror four commits behind the served build while this gate passed on link-present + link-200. \u00a713 owes the source OF THE WORK BEING SERVED, so the gate also compares the mirror tree to this tree, blob by blob, at a resolved COMMIT SHA'],
   ['SPEC', 'SPEC CITATIONS', 'HARD', 'a spec row naming a gate that does not exist reads as gated and is not'],
   ['CAD1', 'SCAD SUBSET vs OPENSCAD', 'HARD', 'a .scad source our CAD tab evaluates into a DIFFERENT PART from the one the author wrote and OpenSCAD renders. Nothing downstream can notice: every contour is a real contour of a real solid, so it posts, simulates, gates green and cuts a plausible-looking wrong part. `edge_modifier_root` emits the OPPOSITE OBJECT today'],
   ['CAD1H', 'SCAD SUBSET vs OUR OWN MODELS', 'HARD', 'the same failure on the 296 LIVE .scad files under hardware/cad/ — recursive, minus 288 in archive/ and ref_models/ which are excluded WITH THEIR REASON PRINTED at run time (superseded / vendor reference: not cut, not shipped). Of those, 16 are _wcnc CNC cut files and 6 diverge. ⚠ THIS LINE READ "the 73 .scad files this company actually cuts" UNTIL 2026-09-02 AND SCANNED NONE OF THEM: the collector was non-recursive and every cut file is in a subdirectory, so the set was 6 top-level files plus 79 in lib/, parsed with no library host. The number was true of what it measured and false of what it was called — corrected here because the TABLE line is what a reader sees first, and ratcheting a baseline onto a gate that misdescribes its own population re-creates the defect at a larger number. A REFUSAL is safe (nothing is emitted); a DIVERGENCE is a wrong part with no warning — so the tracked number is DIVERGES+ERROR, and REFUSED->DIVERGES counts as getting WORSE even though it looks like new capability'],
@@ -690,8 +701,15 @@ const PENDING_BUDGET = {
     when: 'always',
     why:
       'DISC reads each caveat out of the message its gate EMITTED, so a gate that could not run ' +
-      'here (AGPL needs the network) never printed its pass-branch text and its caveat is neither ' +
-      'present nor missing. 🔴 WHICH FAILURE THIS STOPS BEING ABLE TO DETECT, as this list requires: ' +
+      'here never printed its pass-branch text and its caveat is neither present nor missing. ' +
+      '🔴 CORRECTED 2026-09-09 — THIS ENTRY NAMED THE WRONG CAUSE, AND THE WRONG CAUSE WAS THE ' +
+      'REASSURING ONE. It read "(AGPL needs the network)", which says the gap is a property of the ' +
+      'box. It was not: the DISC block was placed ABOVE the AGPL block in this file, so DISC read ' +
+      '`results` before AGPL had emitted anything and reported "AGPL did not run" on a box with ' +
+      'working network and a PASSING AGPL. ⚠ That is an ordering defect wearing an environment ' +
+      'defect\'s clothes — "the network is down" is unfixable and gets accepted, "the block is in ' +
+      'the wrong place" is a move. The block now sits after AGPL and before SPLNT. 🔴 WHICH FAILURE ' +
+      'THIS STOPS BEING ABLE TO DETECT, as this list requires: ' +
       'a caveat deleted from a gate that is ALREADY red or already unrunnable here goes unnoticed — ' +
       'the deletion and the gate\'s own silence are indistinguishable from this side. That is a real ' +
       'hole and it is the SAME hole one level up (a red gate hides its own disclosure), which is why ' +
@@ -739,8 +757,8 @@ const PENDING_BUDGET = {
   AGPL: {
     when: 'always',
     why:
-      "RULED 2026-08-14: the domain WILL be served (founder), so this pending is a deadline, not a contingency. TWO conditions. (1) \u2705 SETTLED 2026-09-04 \u2014 the offer's TARGET was a legal decision this lane may not make, and `legal` has now RULED it: a public mirror of `software/2bee.app/` only, tagged per release, recorded in SOURCE_OFFER_RULED. \u26a0 The ruling was MADE 2026-08-11 and did not reach this lane until 2026-09-04, so this gate read COULD NOT RUN for three weeks on a transmission failure rather than an open question \u2014 indistinguishable from here, and harmless only because the empty register was declared void instead of passing. What remains is not a decision: the mirror does not exist yet, so the ruled URL 404s, and publishing it is founder-gated. " +
-      '(2) both probes this gate now runs \u2014 is `2bee.app` published, and does the offer URL answer \u2014 need the network, and on a box with no network the honest answer is UNCHECKED, which is NOT "the premise holds". Every branch that does NOT need the network (no link at all, two links, an unruled link, a ruled link the box can prove dead, a published domain) is a FAIL inside the gate, not a pending',
+      "RULED 2026-08-14: the domain WILL be served (founder), so this pending is a deadline, not a contingency. \ud83d\udfe2 2026-09-09 \u2014 THE DEADLINE PASSED AND THE OBLIGATION IS LIVE: `2bee.app` resolves and serves this work. TWO conditions. (1) \u2705 SETTLED 2026-09-04 \u2014 the offer's TARGET was a legal decision this lane may not make, and `legal` has now RULED it: a public mirror of `software/2bee.app/` only, tagged per release, recorded in SOURCE_OFFER_RULED. \u26a0 The ruling was MADE 2026-08-11 and did not reach this lane until 2026-09-04, so this gate read COULD NOT RUN for three weeks on a transmission failure rather than an open question \u2014 indistinguishable from here, and harmless only because the empty register was declared void instead of passing. \ud83d\udd34 THIS ENTRY THEN ENDED *\"the mirror does not exist yet, so the ruled URL 404s, and publishing it is founder-gated\"* \u2014 TRUE WHEN WRITTEN, FALSE FROM 2026-09-08: the mirror EXISTS, is public and answers anonymously, the founder gave the go-word 2026-09-09, and the offer link is in the SERVED bundle. Corrected rather than deleted, because a stale blocker reads as an open ticket and keeps a finished job open. " +
+      '(2) the THREE probes this gate now runs \u2014 is `2bee.app` published, does the offer URL answer, and does the mirror CORRESPOND to this tree \u2014 all need the network, and on a box with no network the honest answer is UNCHECKED, which is NOT "the premise holds". \ud83d\udd34 The third probe was added 2026-09-09 after `legal` measured the mirror FOUR COMMITS BEHIND the served build while this gate read PASS: link present and link 200 were both true, and neither is correspondence. Every branch that does NOT need the network (no link at all, two links, an unruled link, a ruled link the box can prove dead, a published domain) is a FAIL inside the gate, not a pending',
   },
   BRND: {
     when: 'always',
@@ -10068,118 +10086,6 @@ if (!QUICK) {
 }
 
 
-// ---------------------------------------------------------------------------
-// DISC: THE DISCLOSURES ARE STILL IN THE OUTPUT
-//
-// 🔴 THE HAZARD (`pnp`, measured; ceo FLEET_RULES 0ez, 2026-09-05): a self-
-// limiting caveat inside a gate's PASS branch can be DELETED, reworded into
-// meaninglessness, or silently stop firing, and NO CONTROL MOVES. `pnp` removed
-// one and their sweep's output was BYTE-IDENTICAL, because a sweep classifying
-// runs on `startswith("  FAIL")` cannot see text inside a pass by construction.
-//
-// ⇒ Unlike a broken check, removing a caveat makes the control look STRONGER:
-// nothing goes red and the verdict reads better. That is why it is the last
-// thing anyone re-checks — and this lane holds one of the three largest
-// populations of them.
-//
-// ⚠ THE CLASS IS LARGE BECAUSE WE MADE IT. Converting silent failures into
-// printed disclosures was right all session, and it manufactured exactly the
-// artefact nothing guards.
-//
-// So rather than a test that would notice a deletion, this makes a deletion
-// MOVE THE VERDICT: each pinned caveat must appear in the message its gate
-// actually emitted, checked on the emitted text, never on the constant that was
-// supposed to produce it. `DISCLOSURES` is a list so adding one is a line.
-//
-// ⚠ REACHABILITY IS ASSERTED SEPARATELY AND LOUDLY. A caveat pinned to text a
-// gate prints only when it PASSES is legitimately absent when that gate fails —
-// and a check that silently accepted that would be green on a suite where every
-// gate had failed. An unreachable disclosure reports UNREACHABLE and counts as
-// a gap, never as a pass. (`pnp` hit this exactly: a naive fixture tripped their
-// ratchet and returned FAIL before any PASS text existed.)
-/* ⚠ THE GATE ID IS PART OF THE PIN, AND I GOT FOUR OF THEM WRONG. I derived
- * them by taking the nearest preceding `pass(`/`fail(` call in the source, which
- * is a proxy, not a measurement: these messages are multi-line template
- * literals and another gate's emit call can sit between a caveat and its own.
- * The first clean run accused TECH, MARK, PROBE and GDOC of dropping caveats
- * they were printing perfectly — a check that names the wrong owner does not
- * fail safe, it manufactures a defect in correct work. The ids below are read
- * off the EMITTED REPORT, which is the same artefact this check asserts on. */
-const DISCLOSURES = [
-  ['TECH',  'no product path takes a technology'],
-  ['MARK',  'whether the mark is LEGIBLE'],
-  ['PROBE', 'browser parity for the XYZ path'],
-  ['REACH', 'never that the operator read'],
-  ['CAD1',  'NOT CLEAN BY ABSENCE'],
-  ['RUN',   'CANNOT discover that our reading of grblHAL is wrong'],
-  ['CADT',  'whether our reading of OpenSCAD is right'],
-  ['TSC',   'whether the code is CORRECT'],
-  ['HOST',  'NOT ASSERTED, DELIBERATELY'],
-  ['GDOC',  'whether a transcript is genuine'],
-  ['AGPL',  'that what it serves is the Corresponding Source'],
-];
-/* 🔴 PINNED, because the list itself is deletable. Removing an entry would
- * otherwise silence its caveat and leave this gate green — the same failure one
- * level up, which is where controls of controls usually die. */
-const DISCLOSURES_PINNED = 11;
-{
-  const missing = [];
-  const unreachable = [];
-  if (DISCLOSURES.length !== DISCLOSURES_PINNED) {
-    missing.push(
-      `the list itself changed: ${DISCLOSURES.length} entr(ies), pinned at ${DISCLOSURES_PINNED}. ` +
-        'Adding one is fine — update the pin in the same commit. Removing one needs a sentence ' +
-        'saying which caveat you decided a reader no longer needs.',
-    );
-  }
-  if (selfPlanted('disclosure-deleted')) {
-    for (const r of results) r.msg = r.msg.split('NOT CLEAN BY ABSENCE').join('');
-  }
-  for (const [gate, text] of DISCLOSURES) {
-    const rows = results.filter((r) => r.id === gate);
-    if (rows.length === 0) { unreachable.push(`${gate} did not run — "${text}" untested`); continue; }
-    if (!rows.some((r) => r.msg.includes(text))) {
-      const states = rows.map((r) => r.state).join('/');
-      /* A gate that FAILED prints a different message, so its pass-branch
-       * caveat is absent for a reason that is not a deletion. Reported as a
-       * gap, because "we could not check" and "we checked" are different facts
-       * and only the second is a pass. */
-      if (rows.every((r) => r.state !== 'PASS')) unreachable.push(`${gate} was ${states} — "${text}" untested`);
-      else missing.push(`${gate} passed WITHOUT its caveat: "${text}"`);
-    }
-  }
-  /* 🔴 THE PLANT DELETES, it does not announce. Pushing a synthetic problem here
-   * would exercise the FAIL branch and prove nothing about DETECTION — the
-   * difference between "a plant that fires" and "a plant that fires correctly".
-   * This strips a real caveat out of a real emitted message and the check above
-   * has to notice on its own. Placed AFTER the loop would be useless, so the
-   * mutation runs before it: see the re-scan below. */
-  if (missing.length > 0) {
-    fail(
-      'DISC',
-      `${missing.length} disclosure problem(s): ${missing.join(' | ')}. ` +
-        'A caveat that stops printing removes the only thing standing between this gate’s number ' +
-        'and a reader who over-reads it, and nothing else in this suite would have moved.',
-    );
-  } else if (unreachable.length > 0) {
-    pend(
-      'DISC',
-      `${DISCLOSURES.length - unreachable.length} of ` +
-        `${DISCLOSURES.length} caveat(s) confirmed in the text their gate emitted; ` +
-        `${unreachable.length} COULD NOT BE CHECKED because the gate did not pass here: ` +
-        `${unreachable.join(' | ')}. UNCHECKED IS NOT ABSENT and it is not present either — ` +
-        'these are pinned to pass-branch text, so a red gate hides its own caveat from this check.',
-    );
-  } else {
-    pass(
-      'DISC',
-      `all ${DISCLOSURES.length} pinned caveat(s) appear in the ` +
-        'message their gate EMITTED (asserted on the emitted text, never on the constant that was ' +
-        'supposed to produce it). NOT COVERED: whether a caveat is still TRUE, or still the right ' +
-        'caveat — this proves it was printed, which is a different fact from it being earned.',
-    );
-  }
-}
 
 // ---------------------------------------------------------------------------
 // The verdict, as a pure function, so the thing every negative control asserts
@@ -10439,6 +10345,19 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
 // bytes and know they are the source of the running build. That is a human
 // review at the ruling, not a check.
 //
+// 🔴 THAT PARAGRAPH WAS A DECLARED GAP AND IT BECAME A BREACH — 2026-09-09.
+// `legal` measured `2bee.app` serving a build FOUR COMMITS AHEAD of the mirror
+// while this gate read PASS on exactly the two facts it does check. **A green
+// that cannot see the failing limb is worse than no gate, because it retires the
+// human read** — `legal`, adopted as a requirement by `ceo` the same hour.
+// ⚠ SO THE PARAGRAPH ABOVE IS NOW HALF WRONG, and it is kept rather than deleted
+// because *"that is a human review, not a check"* is the sentence that made the
+// gap sound permanent. It was not: half of it is now the correspondence probe
+// (MIRROR == THIS TREE, blob-for-blob, at a resolved commit sha). What genuinely
+// remains uncovered is the OTHER hop — TREE == SERVED BUNDLE — which is
+// `scripts/shipped_string_check.py` and is `ceo`'s, and this lane was told not to
+// build a second comparator. The verdict names which end it holds.
+//
 // MEASURED 2026-08-12 while writing this, and the reason the shape above is what
 // it is: `2bee.app` does not return "no A record". All three public resolvers
 // return SERVFAIL, because the domain IS DELEGATED — the `.app` registry hands
@@ -10604,6 +10523,232 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
     if (code !== null) return { state: 'dead', detail: `anonymous ranged GET -> HTTP ${code} (control github.com -> ${control ?? 'no answer'})` };
     if (control !== null) return { state: 'dead', detail: `no HTTP response at all, while the control github.com answered ${control} — the offer's host does not answer this box` };
     return { state: 'unchecked', detail: 'no HTTP response and the control did not answer either — this box has no HTTPS egress, so nothing was measured' };
+  };
+
+  // --- probe 3: does the MIRROR CORRESPOND to this tree? ---------------------
+  //
+  // 🔴 ADDED 2026-09-09 BECAUSE THIS GATE WENT GREEN OVER THE ONE LIMB THAT WAS
+  // BROKEN. `legal` measured `2bee.app` serving a build FOUR COMMITS AHEAD of the
+  // published mirror: the offer link was present and the target answered 200 —
+  // both true all morning, and neither is correspondence. §13 does not ask for
+  // *a* source, it asks for *the* Corresponding Source of the work being served.
+  // A user who accepted the offer that morning got source that does not build
+  // the program they were handed.
+  //
+  // ⚠ AND THE GREEN IS THE EXPENSIVE HALF, not the drift. `legal`: *"a green that
+  // cannot see the failing limb is worse than no gate, because it retires the
+  // human read."* Adopted as a requirement by `ceo` the same hour.
+  //
+  // 🔴 WHAT THIS LIMB MEASURES, EXACTLY: the mirror's default-branch tree against
+  // `HEAD:software/2bee.app`, BLOB SHA BY BLOB SHA. Both sides are git blob
+  // hashes of the same content, so equality is byte equality and a match is not
+  // an opinion. It is the `mirror tag == deployed commit` half of the adopted
+  // requirement.
+  //
+  // ⚠ WHAT IT DOES **NOT** MEASURE, and this is a DIFFERENT HOP, not a weaker
+  // version of the same one: whether the bundle actually being served was built
+  // from this tree. That is source-vs-served, `ceo` owns the comparator
+  // (`scripts/shipped_string_check.py`, which follows chunk references out of the
+  // main bundle), and this lane was told not to build a second one. So the chain
+  // is: MIRROR == TREE (here) + TREE == SERVED (there). This gate says which end
+  // it holds and refuses to imply the other.
+  //
+  // ⚠ THE DEFAULT BRANCH, NOT THE NEWEST TAG. An anonymous visitor who accepts
+  // the offer lands on the repository root and gets the default branch; a tag
+  // they were never told about discharges nothing. The tags matter for binding a
+  // release and are `ceo`'s to cut — the branch is what the user receives.
+  //
+  // ⚠ AND IT READS THE MIRROR BY COMMIT SHA, NEVER BY REF NAME — see the note
+  // at the resolve step. `legal` nearly filed a false failure against a CDN that
+  // is keyed on the ref name and lags exactly after a push.
+  //
+  // NEGATIVE CONTROLS: `--self-plant agpl-mirror-drift` (the morning's exact
+  // state — a mirror that answers and does not correspond) and `--self-plant
+  // agpl-mirror-unchecked` (the enumerator could not run; PENDING, never PASS).
+  //
+  // Exclusions are `legal`'s ruling Q1, RATIFIED 2026-09-09, not this lane's
+  // pruning: `AGENTS.md`/`CLAUDE.md` are the fleet's operating manual, are read
+  // by no build/install/run script, and fail the §1 definition on their own
+  // terms. ⚠ The ruling is SELF-REVOKING — if any build script ever reads them
+  // the exclusion lapses — so this list is a quotation of a decision, and moving
+  // it needs `legal`, not a commit here.
+  const MIRROR_EXCLUDED = ['AGENTS.md', 'CLAUDE.md'];
+  // The mirror's own note about being a mirror. It exists only there, so it is
+  // an expected EXTRA, never a missing file.
+  const MIRROR_ADDED = ['MIRROR.md'];
+
+  const gitOut = (args) => {
+    const r = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8', timeout: 30000 });
+    return r.status === 0 && typeof r.stdout === 'string' ? r.stdout : null;
+  };
+
+  const curlJson = (url) => {
+    // Anonymous, for the same reason the offer probe is: the obligation is to a
+    // user with none of our credentials. No token, no `gh`, no netrc.
+    const r = spawnSync(
+      'curl',
+      ['-sS', '-m', '25', '--connect-timeout', '8', '--retry', '0', '-H', 'Accept: application/vnd.github+json', url],
+      { encoding: 'utf8', timeout: 40000 }
+    );
+    if (r.status !== 0 || typeof r.stdout !== 'string' || !r.stdout.trim()) return null;
+    try {
+      return JSON.parse(r.stdout);
+    } catch {
+      return null;
+    }
+  };
+
+  const probeCorrespondence = (url) => {
+    if (selfPlanted('agpl-mirror-drift')) {
+      return {
+        state: 'drift',
+        detail:
+          `SELF-PLANT ${SELF_PLANT}: correspondence probe forced to DRIFT, modelling the 2026-09-09 state — ` +
+          'the mirror answered 200 and was four commits behind the served build',
+      };
+    }
+    if (selfPlanted('agpl-mirror-unchecked')) {
+      return { state: 'unchecked', detail: `SELF-PLANT ${SELF_PLANT}: correspondence probe forced to UNCHECKED — the enumerator did not run` };
+    }
+
+    // 🔴 NO PRESUPPOSED HOST — the D3 defect, one probe along. The mechanism is
+    // `legal`'s and MAY NOT BE GITHUB (a tarball beside a release, a different
+    // forge, the monorepo opened). This enumerator understands one shape, and
+    // every other shape is UNCHECKED — which is a gap that reports itself, not
+    // an absence that reads as clean.
+    const m = /^https:\/\/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(url);
+    if (!m) {
+      return {
+        state: 'unchecked',
+        detail:
+          `the ruled mechanism ${url} is not a GitHub repository root, and this limb knows how to enumerate a ` +
+          'GitHub tree and nothing else — so correspondence was NOT measured. A different mechanism needs its own ' +
+          'enumerator; it does not get a pass from this one not understanding it',
+      };
+    }
+    const [, owner, repo] = m;
+
+    const prefix = (gitOut(['rev-parse', '--show-prefix']) ?? '').trim().replace(/\/$/, '');
+    const treeish = prefix ? `HEAD:${prefix}` : 'HEAD';
+    // 🔴 `--full-tree`, AND IT IS NOT COSMETIC. Without it `ls-tree` restricts
+    // the listing to the CWD PREFIX — run from `software/2bee.app/` against the
+    // tree `HEAD:software/2bee.app`, it looks for `software/2bee.app/` INSIDE
+    // that subtree, finds nothing, and exits 0 with empty output. Measured here
+    // on the first run of this probe: 396 files became 0, rc=0, no error. An
+    // empty local side would have matched an empty mirror; the zero-blob guard
+    // below is what turned that into a PENDING instead of a green.
+    const localRaw = gitOut(['ls-tree', '-r', '--full-tree', treeish]);
+    if (localRaw === null) {
+      return {
+        state: 'unchecked',
+        detail: `\`git ls-tree -r --full-tree ${treeish}\` did not run in ${ROOT} — the LOCAL side of the comparison is missing, so nothing was compared`,
+      };
+    }
+    const local = new Map();
+    for (const line of localRaw.split('\n')) {
+      const t = /^\d+ blob ([0-9a-f]{40})\t(.+)$/.exec(line);
+      if (t) local.set(t[2], t[1]);
+    }
+    if (local.size === 0) {
+      return { state: 'unchecked', detail: `\`git ls-tree -r --full-tree ${treeish}\` listed ZERO blobs — an empty local side would match an empty mirror, which is the discovery-based false pass` };
+    }
+
+    const meta = curlJson(`https://api.github.com/repos/${owner}/${repo}`);
+    if (meta === null || typeof meta.default_branch !== 'string') {
+      const control = curlJson('https://api.github.com/');
+      return {
+        state: 'unchecked',
+        detail:
+          `anonymous GET https://api.github.com/repos/${owner}/${repo} returned nothing usable` +
+          (meta && typeof meta.message === 'string' ? ` [${meta.message}]` : '') +
+          (control === null
+            ? ' — and the control https://api.github.com/ did not answer either, so this box has no usable egress and NOTHING was measured'
+            : ' — while the CONTROL https://api.github.com/ answered, so the failure is specific to this repository, not to the box'),
+      };
+    }
+    const branch = meta.default_branch;
+
+    // 🔴 RESOLVE THE REF TO A COMMIT SHA FIRST, THEN READ AT THE SHA — and record
+    // which sha was compared. `legal` was one step from filing a false failure
+    // on 2026-09-09 because `raw.githubusercontent.com/<repo>/main/<path>` is a
+    // CDN keyed on the REF NAME with a short cache: it answers *"what does the
+    // cache hold for the string `main`"*, not *"what is at `main`"*. ⚠ NOTE THE
+    // DIRECTION — it is accurate while nothing is moving and lags exactly after
+    // a push, so a stale-mirror gate reading a ref name goes GREEN on cached
+    // pre-push content. A sha is content-addressed and cannot go stale. This
+    // limb never reads raw.githubusercontent.com at all, and it still resolves
+    // the ref first, because "the API is probably fine" is the assumption that
+    // class of defect is made of. A correspondence PASS that does not name the
+    // mirror commit it passed against is not evidence.
+    const head = curlJson(`https://api.github.com/repos/${owner}/${repo}/commits/${branch}`);
+    const mirrorSha = head && typeof head.sha === 'string' ? head.sha : null;
+    if (mirrorSha === null) {
+      return { state: 'unchecked', detail: `anonymous GET of ${owner}/${repo}@${branch} did not resolve to a commit sha${head && typeof head.message === 'string' ? ` [${head.message}]` : ''} — this limb refuses to read a tree by ref name` };
+    }
+
+    const tree = curlJson(`https://api.github.com/repos/${owner}/${repo}/git/trees/${mirrorSha}?recursive=1`);
+    if (tree === null || !Array.isArray(tree.tree)) {
+      return { state: 'unchecked', detail: `anonymous GET of the tree at ${owner}/${repo}@${mirrorSha.slice(0, 12)} returned no file list${tree && typeof tree.message === 'string' ? ` [${tree.message}]` : ''}` };
+    }
+    // 🔴 A TRUNCATED LIST READS AS MISSING FILES. GitHub truncates large trees
+    // and says so in a flag; believing the short list would manufacture drift in
+    // a correct mirror, which is the false red that gets a gate weakened.
+    if (tree.truncated === true) {
+      return { state: 'unchecked', detail: `GitHub TRUNCATED the tree listing for ${owner}/${repo}@${mirrorSha.slice(0, 12)} — a short list would read as missing files, so this run measured nothing` };
+    }
+
+    const remote = new Map();
+    for (const e of tree.tree) {
+      if (e && e.type === 'blob' && typeof e.path === 'string' && typeof e.sha === 'string') remote.set(e.path, e.sha);
+    }
+
+    const excluded = new Set(MIRROR_EXCLUDED);
+    const added = new Set(MIRROR_ADDED);
+    const missing = [];
+    const differ = [];
+    for (const [p, sha] of local) {
+      if (excluded.has(p)) {
+        // The ratified exclusion is checked in BOTH directions: a file the
+        // ruling keeps OUT that appears in the mirror is a publication defect,
+        // not a tidy-up. Reported below as an extra.
+        continue;
+      }
+      const r = remote.get(p);
+      if (r === undefined) missing.push(p);
+      else if (r !== sha) differ.push(p);
+    }
+    const extra = [];
+    for (const p of remote.keys()) {
+      if (local.has(p) && !excluded.has(p)) continue;
+      if (added.has(p)) continue;
+      extra.push(p);
+    }
+
+    const compared = local.size - [...excluded].filter((p) => local.has(p)).length;
+    const localSha = (gitOut(['rev-parse', 'HEAD']) ?? 'HEAD-UNKNOWN').trim();
+    const dirty = (gitOut(['status', '--porcelain', '--', '.']) ?? '').trim();
+    const dirtyNote = dirty
+      ? ` ⚠ THE WORKING TREE IS DIRTY (${dirty.split('\n').length} path(s)) — this limb compares the mirror to HEAD, which is what a commit publishes; uncommitted work is in neither`
+      : '';
+
+    if (missing.length === 0 && differ.length === 0 && extra.length === 0) {
+      return {
+        state: 'match',
+        detail:
+          `${owner}/${repo}@${branch} = COMMIT ${mirrorSha} matches HEAD:${prefix} (local ${localSha}) blob-for-blob across ${compared} file(s), with ` +
+          `${MIRROR_EXCLUDED.join(' + ')} excluded per legal's ruling Q1 and ${MIRROR_ADDED.join(' + ')} allowed as mirror-only${dirtyNote}`,
+      };
+    }
+    const say = (label, list) => (list.length ? `${list.length} ${label} (${list.slice(0, 6).join(', ')}${list.length > 6 ? `, +${list.length - 6} more` : ''})` : null);
+    return {
+      state: 'drift',
+      detail:
+        `${owner}/${repo}@${branch} = COMMIT ${mirrorSha} does NOT correspond to HEAD:${prefix} (local ${localSha}) — ` +
+        [say('file(s) MISSING from the mirror', missing), say('file(s) DIFFERING in content', differ), say('UNEXPECTED file(s) in the mirror', extra)]
+          .filter(Boolean)
+          .join('; ') +
+        ` (${compared} file(s) compared)${dirtyNote}`,
+    };
   };
 
   // --- the offer link, read WITHOUT presupposing its host --------------------
@@ -10833,7 +10978,41 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
     const off = probeOffer(url);
     const ruling = `ruled ${ruled.since} (${ruled.ruling})`;
     if (off.state === 'answers') {
-      pass('AGPL', `the source offer points at ${url}, ${ruling}, and it ANSWERS: ${off.detail}. ${premise}. NOT COVERED: that what it serves is the Corresponding Source of this build`);
+      // 🔴 ANSWERING IS NOT CORRESPONDING, AND THIS GATE PASSED ON THE DIFFERENCE.
+      // Until 2026-09-09 the branch below was the whole green: link present,
+      // link 200s. Both were true all morning while the mirror sat four commits
+      // behind the served build. The delivery probe and the correspondence probe
+      // ask different questions and BOTH must answer before a green.
+      const corr = probeCorrespondence(url);
+      const heldEnd =
+        'NOT COVERED: that what it serves is the Corresponding Source of the DEPLOYED BUNDLE — this gate holds ' +
+        'the MIRROR == THIS TREE end of the chain; TREE == SERVED is source-vs-served, `scripts/shipped_string_check.py` ' +
+        '(ceo owns it, and it follows chunk references out of the main bundle). Two hops, and this one names which it holds';
+      if (corr.state === 'match') {
+        pass('AGPL', `the source offer points at ${url}, ${ruling}, it ANSWERS: ${off.detail}, and it CORRESPONDS: ${corr.detail}. ${premise}. ${heldEnd}`);
+      } else if (corr.state === 'drift') {
+        // 🔴 SERVED + NON-CORRESPONDING IS THE BREACH ITSELF, not a warning.
+        // §13 owes the source OF THE WORK BEING SERVED; a user who accepts an
+        // offer that hands them a different program has been given nothing the
+        // licence asks for. Unserved, the duty has not attached and the drift is
+        // still a real defect that must not read as clean — so it PENDS rather
+        // than passing, and it never passes.
+        if (served) {
+          fail('AGPL', `🔴 §13 HAS ATTACHED AND THE OFFER DOES NOT CORRESPOND — ${url} is ${ruling} and ANSWERS (${off.detail}), but ${corr.detail}. A user who accepts this offer gets source that does not build the program they were served. ${premise}`);
+        } else {
+          results.push({
+            id: 'AGPL',
+            state: 'PENDING',
+            msg: `⚠ THE OFFER ANSWERS BUT DOES NOT CORRESPOND — ${url} is ${ruling} (${off.detail}), and ${corr.detail}. §13 has not attached, so this is not a breach today; it is the exact state that WAS a breach on 2026-09-09 within ten minutes of the domain going live. ${premise}. ${heldEnd}`,
+          });
+        }
+      } else {
+        results.push({
+          id: 'AGPL',
+          state: 'PENDING',
+          msg: `⚠ CORRESPONDENCE UNCHECKED, NOT PASSED: ${url} is ${ruling} and ANSWERS (${off.detail}), but this run could not compare the mirror to this tree — ${corr.detail}. A green over a limb this gate cannot see is worse than no gate, because it retires the human read. ${premise}. ${heldEnd}`,
+        });
+      }
     } else if (off.state === 'dead') {
       fail('AGPL', `🔴 THE OFFER IS RULED AND DEAD — ${url}, ${ruling}, ${off.detail}. A link that looks compliant and delivers nothing is the failure this gate exists for. ${premise}`);
     } else {
@@ -10843,6 +11022,130 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
         msg: `⚠ UNCHECKED, NOT PASSED: ${url} is ${ruling}, and this box could not measure whether it answers — ${off.detail}. An offline box does not get to certify a source offer. ${premise}`,
       });
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DISC: THE DISCLOSURES ARE STILL IN THE OUTPUT
+//
+// 🔴 THE HAZARD (`pnp`, measured; ceo FLEET_RULES 0ez, 2026-09-05): a self-
+// limiting caveat inside a gate's PASS branch can be DELETED, reworded into
+// meaninglessness, or silently stop firing, and NO CONTROL MOVES. `pnp` removed
+// one and their sweep's output was BYTE-IDENTICAL, because a sweep classifying
+// runs on `startswith("  FAIL")` cannot see text inside a pass by construction.
+//
+// ⇒ Unlike a broken check, removing a caveat makes the control look STRONGER:
+// nothing goes red and the verdict reads better. That is why it is the last
+// thing anyone re-checks — and this lane holds one of the three largest
+// populations of them.
+//
+// ⚠ THE CLASS IS LARGE BECAUSE WE MADE IT. Converting silent failures into
+// printed disclosures was right all session, and it manufactured exactly the
+// artefact nothing guards.
+//
+// 🔴 WHERE THIS BLOCK SITS IS PART OF THE CHECK, and it was in the wrong place
+// until 2026-09-09. It reads `results`, so it can only see gates that have
+// ALREADY emitted — and it was placed above the AGPL block, which emits ~900
+// lines later. So `AGPL` came back with zero rows and DISC printed *"AGPL did
+// not run"* on a box whose network was fine and whose AGPL was PASSING, every
+// run, forever. ⚠ THE MESSAGE WAS TRUE-SOUNDING AND THE PIN WAS DEAD: a caveat
+// deleted from AGPL's pass branch would have changed nothing here. Moved to sit
+// after AGPL and before SPLNT. ⇒ Any gate added BELOW this block is outside its
+// field of view and will report as "did not run" — put new gates above it, or
+// move this one again.
+//
+// So rather than a test that would notice a deletion, this makes a deletion
+// MOVE THE VERDICT: each pinned caveat must appear in the message its gate
+// actually emitted, checked on the emitted text, never on the constant that was
+// supposed to produce it. `DISCLOSURES` is a list so adding one is a line.
+//
+// ⚠ REACHABILITY IS ASSERTED SEPARATELY AND LOUDLY. A caveat pinned to text a
+// gate prints only when it PASSES is legitimately absent when that gate fails —
+// and a check that silently accepted that would be green on a suite where every
+// gate had failed. An unreachable disclosure reports UNREACHABLE and counts as
+// a gap, never as a pass. (`pnp` hit this exactly: a naive fixture tripped their
+// ratchet and returned FAIL before any PASS text existed.)
+/* ⚠ THE GATE ID IS PART OF THE PIN, AND I GOT FOUR OF THEM WRONG. I derived
+ * them by taking the nearest preceding `pass(`/`fail(` call in the source, which
+ * is a proxy, not a measurement: these messages are multi-line template
+ * literals and another gate's emit call can sit between a caveat and its own.
+ * The first clean run accused TECH, MARK, PROBE and GDOC of dropping caveats
+ * they were printing perfectly — a check that names the wrong owner does not
+ * fail safe, it manufactures a defect in correct work. The ids below are read
+ * off the EMITTED REPORT, which is the same artefact this check asserts on. */
+const DISCLOSURES = [
+  ['TECH',  'no product path takes a technology'],
+  ['MARK',  'whether the mark is LEGIBLE'],
+  ['PROBE', 'browser parity for the XYZ path'],
+  ['REACH', 'never that the operator read'],
+  ['CAD1',  'NOT CLEAN BY ABSENCE'],
+  ['RUN',   'CANNOT discover that our reading of grblHAL is wrong'],
+  ['CADT',  'whether our reading of OpenSCAD is right'],
+  ['TSC',   'whether the code is CORRECT'],
+  ['HOST',  'NOT ASSERTED, DELIBERATELY'],
+  ['GDOC',  'whether a transcript is genuine'],
+  ['AGPL',  'that what it serves is the Corresponding Source'],
+];
+/* 🔴 PINNED, because the list itself is deletable. Removing an entry would
+ * otherwise silence its caveat and leave this gate green — the same failure one
+ * level up, which is where controls of controls usually die. */
+const DISCLOSURES_PINNED = 11;
+{
+  const missing = [];
+  const unreachable = [];
+  if (DISCLOSURES.length !== DISCLOSURES_PINNED) {
+    missing.push(
+      `the list itself changed: ${DISCLOSURES.length} entr(ies), pinned at ${DISCLOSURES_PINNED}. ` +
+        'Adding one is fine — update the pin in the same commit. Removing one needs a sentence ' +
+        'saying which caveat you decided a reader no longer needs.',
+    );
+  }
+  if (selfPlanted('disclosure-deleted')) {
+    for (const r of results) r.msg = r.msg.split('NOT CLEAN BY ABSENCE').join('');
+  }
+  for (const [gate, text] of DISCLOSURES) {
+    const rows = results.filter((r) => r.id === gate);
+    if (rows.length === 0) { unreachable.push(`${gate} did not run — "${text}" untested`); continue; }
+    if (!rows.some((r) => r.msg.includes(text))) {
+      const states = rows.map((r) => r.state).join('/');
+      /* A gate that FAILED prints a different message, so its pass-branch
+       * caveat is absent for a reason that is not a deletion. Reported as a
+       * gap, because "we could not check" and "we checked" are different facts
+       * and only the second is a pass. */
+      if (rows.every((r) => r.state !== 'PASS')) unreachable.push(`${gate} was ${states} — "${text}" untested`);
+      else missing.push(`${gate} passed WITHOUT its caveat: "${text}"`);
+    }
+  }
+  /* 🔴 THE PLANT DELETES, it does not announce. Pushing a synthetic problem here
+   * would exercise the FAIL branch and prove nothing about DETECTION — the
+   * difference between "a plant that fires" and "a plant that fires correctly".
+   * This strips a real caveat out of a real emitted message and the check above
+   * has to notice on its own. Placed AFTER the loop would be useless, so the
+   * mutation runs before it: see the re-scan below. */
+  if (missing.length > 0) {
+    fail(
+      'DISC',
+      `${missing.length} disclosure problem(s): ${missing.join(' | ')}. ` +
+        'A caveat that stops printing removes the only thing standing between this gate’s number ' +
+        'and a reader who over-reads it, and nothing else in this suite would have moved.',
+    );
+  } else if (unreachable.length > 0) {
+    pend(
+      'DISC',
+      `${DISCLOSURES.length - unreachable.length} of ` +
+        `${DISCLOSURES.length} caveat(s) confirmed in the text their gate emitted; ` +
+        `${unreachable.length} COULD NOT BE CHECKED because the gate did not pass here: ` +
+        `${unreachable.join(' | ')}. UNCHECKED IS NOT ABSENT and it is not present either — ` +
+        'these are pinned to pass-branch text, so a red gate hides its own caveat from this check.',
+    );
+  } else {
+    pass(
+      'DISC',
+      `all ${DISCLOSURES.length} pinned caveat(s) appear in the ` +
+        'message their gate EMITTED (asserted on the emitted text, never on the constant that was ' +
+        'supposed to produce it). NOT COVERED: whether a caveat is still TRUE, or still the right ' +
+        'caveat — this proves it was printed, which is a different fact from it being earned.',
+    );
   }
 }
 
