@@ -219,7 +219,7 @@ export const SHEET_SIZES: SheetSize[] = [
     generic: false,
     detail:
       'Baltic mill square, imported into AU. Thickness tolerance here is governed ' +
-      'by EN 315, whose numeric band this lane could NOT source — see the ' +
+      'by EN 315, whose numeric band this app could NOT source — see the ' +
       "could-not-source list in docs/materials-research.md rather than assuming it's tight.",
   },
   {
@@ -235,7 +235,7 @@ export const SHEET_SIZES: SheetSize[] = [
       read: READ,
     },
     generic: false,
-    detail: 'Oversize Baltic sheet. Longer than any AU machine travel this lane has facts about — check travel before selecting it.',
+    detail: 'Oversize Baltic sheet. Longer than any AU machine travel this app has facts about — check travel before selecting it.',
   },
 
   // --- MDF, AU -------------------------------------------------------------
@@ -420,7 +420,7 @@ export const SHEET_SIZES: SheetSize[] = [
     generic: true,
     detail:
       'GENERIC — cited as the European mill standard by several secondary sources ' +
-      'and by none this lane could open. Offered so a EU sheet is not forced onto ' +
+      'and by none this app could open. Offered so a EU sheet is not forced onto ' +
       'the AU numbers, flagged so it is not trusted.',
   },
 ];

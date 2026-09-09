@@ -276,7 +276,7 @@ test('the fit control is offered, because the camera is no longer reset for you'
 /**
  * 🔴 A REMOVAL IS ONLY SAFE ONCE THE KNOWLEDGE IN IT HAS A NEW HOME, AND THE
  * NEW HOME IS ASSERTED. Founder, 2026-08-11: *"remove: Drag to orbit · … ·
- * Nothing this lane has produced has ever been cut"*. Three sentences, and two
+ * Nothing this app has produced has ever been cut"*. Three sentences, and two
  * of them were load-bearing:
  *
  *   · the drag directions — moved to the viewport's own `title`;
@@ -334,6 +334,9 @@ test('“top-level shapes are NOT unioned” survives, in the report Help → Ab
 test('the never-cut disclaimer still reaches a reader of the served UI', () => {
   const preview = readFileSync(join(HERE, '..', 'src', 'cad', 'preview.tsx'), 'utf8');
   const tab = readFileSync(join(HERE, '..', 'src', 'cad', 'CadTab.tsx'), 'utf8');
-  assert.match(preview, /Nothing this lane has produced has ever been cut\./);
-  assert.match(tab, /Nothing this lane has produced has ever cut anything\./);
+  /* ⚠ RE-PINNED 2026-09-09: 'this lane' -> 'this app' when fleet-internal referents were taken
+     out of operator-facing strings. The GUARD is unchanged — the never-cut sentence must still
+     reach the served UI; only the referent inside it moved with the source. */
+  assert.match(preview, /Nothing this app has produced has ever been cut\./);
+  assert.match(tab, /Nothing this app has produced has ever cut anything\./);
 });

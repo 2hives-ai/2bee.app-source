@@ -111,7 +111,7 @@ const X1 = 194;
  *  sheet to the right. */
 const SHEET_X = 104;
 
-/** The stock this lane cuts. 18 mm ply. */
+/** The stock this app plans cuts for. 18 mm ply. */
 const STOCK_MM = 18;
 
 /** Where the workpiece's front edge is in plan. Stock is above it (+Y is up the

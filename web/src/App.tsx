@@ -356,7 +356,7 @@ const CNC_NEVER_CUT =
 
 const CNC_ABOUT_LINES: readonly string[] = [
   'Browser-first CAM for CNC routers: the same Rust core runs here (as WebAssembly), in the ' +
-    'command-line harness and in the gates, so what is checked is what you download.',
+    'command-line harness and in the release checks, so what is checked is what you download.',
   'SUBTRACTIVE CNC ONLY. There is no slicer, layer model, extrusion width, retraction, cooling ' +
     'or support generation — the other process reports itself unimplemented everywhere the core ' +
     'asks, rather than half-working.',
@@ -635,7 +635,7 @@ const SPOILBOARD_RESTORE = readSessionSpoilboard(
  * `WORKHOLDING` carries 19 entries, 18 of them with a vendor URL and the date
  * the page was read — including the one that matters most, a horizontal toggle
  * clamp whose published under-arm clearance (16.5mm) is LESS than the 18mm ply
- * this lane cuts, so it physically cannot close over the stock. An invented
+ * this app plans cuts for, so it physically cannot close over the stock. An invented
  * catalogue can never tell you that.
  *
  * ⚠ NO DEFAULT CHANGED. `clamps` still starts EMPTY — nothing is declared until

@@ -39,7 +39,8 @@ function camWorker(): Worker {
   if (typeof Worker === 'undefined') {
     throw new Error(
       'this host has no Worker, so the CAM core cannot be started off the main thread. ' +
-        'It is NOT run on the main thread instead: that is the defect TODO #144 fixed, and a ' +
+        'It is NOT run on the main thread instead: that is the defect that moved planning off the ' +
+        'main thread, and a ' +
         'silent fallback would bring it back with nothing to show which path was taken.',
     );
   }

@@ -836,12 +836,27 @@ const SOURCE_OFFER_RULED = {
   // register was declared void and never reported as a pass, which is the only
   // reason the three weeks cost nothing but time.
   //
-  // ⚠ ADDING THIS ROW TURNS `AGPL` FROM PENDING TO RED, ON PURPOSE. The ruled
-  // URL is a 404 today (measured by `legal` 2026-09-04, anonymous, github.com ->
-  // 200 as control) because the mirror does not exist yet. `legal`, verbatim:
-  // *"That red is the ruling working… the red holds the truth that the offer does
-  // not yet exist, and it clears the day the mirror answers anonymously. Do not
-  // treat it as a regression to suppress."*
+  // 🟢 THE RED THIS ROW WAS ADDED TO RAISE HAS CLEARED — 2026-09-09.
+  // ⚠ THIS PARAGRAPH USED TO READ *"the ruled URL is a 404 today … because the
+  // mirror does not exist yet"*, quoting `legal`'s instruction not to suppress
+  // that red. **Both halves were true when written and the first is now false.**
+  // The mirror EXISTS and ANSWERS anonymously, and gate `AGPL` PASSES on it —
+  // measured here 2026-09-09, and independently by `ceo` in the shipped bundle
+  // (`2hives-ai/2bee.app-source` ×2, dead `2bee.slicer` href ×0).
+  //
+  // 🔴 THE CORRECTION IS WRITTEN HERE RATHER THAN DELETED because a stale 🔴 costs
+  // as much as a stale ✅ and is harder to find: nobody re-tests a blocker that
+  // names a reason, so a reader arriving at a GREEN gate under a comment saying
+  // its target 404s concludes the gate is lying and goes looking in the wrong
+  // file. `legal`'s clause — *"it clears the day the mirror answers anonymously"*
+  // — named its own discharge condition, and this is that day.
+  //
+  // ⚠ WHAT DID **NOT** CHANGE, and it is the half that still constrains: serving
+  // and discharging happened in the SAME operation because `.app` is HSTS-
+  // preloaded and there is no window between them. So this row must keep proving
+  // DELIVERY, not membership — a ruling naming a URL that goes dead LATER puts the
+  // gate back to red, which is the state this paragraph is describing the exit
+  // from, not the end of.
   //
   // ⚠ THE RULED TARGET IS THE ROOT **AND EVERY URL WITHIN IT** — per-tag
   // `/tree/<build-tag>` deep links are the SAME mechanism, not new offers. This

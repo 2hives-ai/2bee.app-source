@@ -95,7 +95,7 @@ const X1 = 194;
 /** Where the stock's edge is. Bed to the left of it, sheet to the right. */
 const SHEET_X = 78;
 
-/** The stock this lane cuts. 18 mm ply — the thickness every datum note in
+/** The stock this app plans cuts for. 18 mm ply — the thickness every datum note in
  *  `workholding.ts` converts against. */
 const STOCK_MM = 18;
 

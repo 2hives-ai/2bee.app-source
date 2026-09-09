@@ -803,7 +803,7 @@ export function pollPlan(autoReportMs: number | null): PollPlan {
       `them. It still asks for a full report (0x87) every ${AUTOREPORT_FULL_REFRESH_MS}ms, ` +
       'because WCO, Ov and H are change-only and three refusals key on them. ⚠ Whether 0x87 is ' +
       'also ignored under auto-reporting is not settled by the design and has not been read at ' +
-      'grblHAL’s source by this lane — if those fields never arrive, R1 and R3 refuse and say so.',
+      'grblHAL’s source by this app — if those fields never arrive, R1 and R3 refuse and say so.',
   };
 }
 

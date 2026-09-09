@@ -461,7 +461,7 @@ test('the rendered DRO carries the staleness, in the markup and not in a tooltip
    * operator debugging a frozen readout needs to know what was being asked for. */
   assert.match(from(current, 'run-poll'), /\$481=0/);
   /* ⚠ And the honest caveat about the hidden tab is rendered, not filed away. */
-  assert.match(from(current, 'run-poll-caveat'), /not been measured by this lane/);
+  assert.match(from(current, 'run-poll-caveat'), /not been measured for this app/);
 });
 
 /* 🔴 ASSERT ON THE RENDERED PAGE, NOT ON `deriveDro`. `wcoUnavailable` and

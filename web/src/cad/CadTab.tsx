@@ -1724,7 +1724,7 @@ export function CadTab() {
                * somebody asked for, and deleting it outright would be the first
                * step of a tab that stops saying it. Where it BELONGS is where
                * the cutting happens; that is not this lane-boundary's to move. */
-              'This tab emits no toolpath and no G-code. Nothing this lane has produced has ever cut anything.',
+              'This tab emits no toolpath and no G-code. Nothing this app has produced has ever cut anything.',
               ...KERNEL_LIMITS,
               'The pane layout and this menu were read from OpenSCAD 2026.08.07’s own MainWindow.ui — six ' +
                 'menus, 105 actions. This bar carries the ones that map onto something real.',

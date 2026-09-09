@@ -2658,7 +2658,7 @@ function auditWelded(w: Welded, repair: { splits: number; exhausted: boolean }, 
           'an edge were inserted into it, so no coordinate and no volume changed. '
         : '') +
       'This is a statement about the MESH, not a guarantee that the shape is the one you meant, and nothing ' +
-      'this lane has produced has ever been cut.';
+      'this app has produced has ever been cut.';
   }
   if (degenerate > 0) {
     detail += ` ${degenerate} zero-area triangle(s) are present; they are drawn and carry no information.`;

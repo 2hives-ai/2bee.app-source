@@ -2085,7 +2085,7 @@ export function CadPreview({
             true whether or not anything is drawn. */}
         {gl && !gl.ok ? (
           <div style={{ color: 'var(--muted)', fontSize: 12, pointerEvents: 'none' }}>
-            Nothing this lane has produced has ever been cut.
+            Nothing this app has produced has ever been cut.
           </div>
         ) : (
           <div style={{ alignSelf: 'flex-end', pointerEvents: 'auto' }}>

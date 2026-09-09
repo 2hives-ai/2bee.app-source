@@ -735,7 +735,7 @@ export function describeCadRecord(rec: SavedCadDrawing, verification?: CadVerifi
   }
   out.push({
     label: 'Evaluated',
-    value: `${new Date(c.evaluated_at).toLocaleString()} — in THIS browser, by the 2bee.cad kernel. Nothing was measured, nobody checked it, and nothing this lane has produced has ever been cut.`,
+    value: `${new Date(c.evaluated_at).toLocaleString()} — in THIS browser, by the 2bee.cad kernel. Nothing was measured, nobody checked it, and nothing this app has produced has ever been cut.`,
   });
   return out;
 }

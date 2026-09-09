@@ -212,8 +212,8 @@ export const UNITS_ABSENT: readonly string[] = [
 export const UNITS_NOT_CONVERTED: readonly string[] = [
   'The plan’s own notes, warnings and refusals — “12mm of cutting length cannot cut 18mm deep” and ' +
     'every sentence like it. They are formatted in Rust, inside the core, which is shared by the ' +
-    'browser, the command-line tool and the gates. A second unit in there would mean the refusal ' +
-    'that stops a cut has two renderings and only one of them is gate-tested. They stay in ' +
+    'browser, the command-line tool and the release checks. A second unit in there would mean the refusal ' +
+    'that stops a cut has two renderings and only one of them is covered by the release checks. They stay in ' +
     'millimetres, and they say “mm” in their own text.',
   'The G-code, the program map and the download. That is the program, not a picture of it: it is ' +
     'G21 millimetres by construction and it is byte-for-byte identical whichever unit this menu is ' +

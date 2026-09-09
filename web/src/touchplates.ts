@@ -545,7 +545,7 @@ export const TOUCH_PLATES: TouchPlate[] = [
       '(community.carbide3d.com/t/configuration-for-the-bitprobe-v2-thickness/45548, ' +
       'read 2026-08-09); this note said "plunges roughly 13 mm deeper" until ' +
       'then and had it backwards. Measure yours. ⚠ This entry is ' +
-      'also the counter-example to the obvious reading of TODO #40: it is ' +
+      'also the counter-example to the obvious reading of the Z-only rule: it is ' +
       'Z-only AND workpiece-referenced, so "Z-only means it belongs to the ' +
       'machine" is false.',
   },

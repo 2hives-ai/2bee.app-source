@@ -512,7 +512,11 @@ const CORRECTED: { file: string; gone: string; now: string }[] = [
   { file: 'jobMaterial.ts', gone: 'the sheet was typed rather than picked', now: 'the workpiece was typed rather than picked' },
   { file: 'cam.ts', gone: 'drawing(s) are on the table', now: 'drawing(s) are in the job' },
   { file: 'cam.ts', gone: 'drawing(s) on the table (${empty.join', now: 'drawing(s) in the job (${empty.join' },
-  { file: 'materials.ts', gone: 'Longer than any AU table this lane', now: 'Longer than any AU machine travel this lane' },
+  /* ⚠ \ re-pinned 2026-09-09: the referent 'this lane' became 'this app' when fleet-internal
+     vocabulary was taken out of operator-facing strings. The GUARD is unchanged — the retired
+     word 'table' must still be gone and the corrected sentence still present — only the quoted
+     text moved with the source. A guard that pins prose punishes improving it. */
+  { file: 'materials.ts', gone: 'Longer than any AU table this', now: 'Longer than any AU machine travel this app' },
   { file: 'materials.ts', gone: 'Exceeds most hobby-class table travel', now: 'Exceeds most hobby-class travel' },
   { file: 'samples/index.ts', gone: 'lands outside the table until the datum is moved — ', now: 'lands outside the travel until the datum is moved — ' },
   { file: 'samples/index.ts', gone: 'It also lands outside the table', now: 'It also lands outside the travel' },

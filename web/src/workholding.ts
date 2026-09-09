@@ -172,7 +172,7 @@ export const WORKHOLDING: Workholding[] = [
     name: 'Toggle clamp, horizontal hold-down (low clearance)',
     detail:
       'Half the height of the vertical clamp — and its published clearance is ' +
-      'LESS than an 18mm workpiece, so on this lane’s stock it cannot close at ' +
+      'LESS than an 18mm workpiece, so on the stock this app plans for it cannot close at ' +
       'all. Here so the picker can say that before four of them are bought.',
     generic: true,
     source: { url: 'https://www.destaco.com/213-U', read: '2026-08-08' },
@@ -185,7 +185,7 @@ export const WORKHOLDING: Workholding[] = [
       '= 36.1mm, HEIGHT UNDER CLAMP ARM 0.65in = 16.5mm, capacity 150lbf ' +
       '(~667N). GENERIC: no base footprint published; the 35mm width is a ' +
       'stand-in. 🔴 16.5mm < 18mm ply: this clamp will not close over the stock ' +
-      'this lane cuts, sitting flat on the spoilboard. "Clamp height" and "the ' +
+      'this app plans cuts for, sitting flat on the spoilboard. "Clamp height" and "the ' +
       'thickness it can clamp" are different numbers that both get called height.',
   },
 
@@ -278,7 +278,7 @@ export const WORKHOLDING: Workholding[] = [
       'claim from the composite nails entry below, which is about the CUTTER ' +
       'surviving. (2) It mounts by "Drill and tap a hole for the cap screw" — ' +
       '3/8-16 into MDF is not a fixing. It needs a tapped fixture plate or ' +
-      'threaded inserts, which is a mounting surface this lane has not confirmed ' +
+      'threaded inserts, which is a mounting surface this app has not confirmed ' +
       'exists. ' +
       'Its 1.27mm throw is even less than the cam clamp\'s 1.6mm: same silent ' +
       'failure, undersize stock loose while the clamp looks engaged.',
@@ -488,7 +488,7 @@ export const WORKHOLDING: Workholding[] = [
       'ONE HONEST `obstructs: false` — nothing is there. But the danger has no ' +
       'geometry: THE LAST SMALL PART CUT FROM A WORKPIECE IS HELD BY THE LEAST ' +
       'FORCE IT WILL EVER HAVE, at the moment it is most free to move. The ' +
-      'mitigation is onion-skin/tabs, which this lane already emits. Porous ' +
+      'mitigation is onion-skin/tabs, which this app already emits. Porous ' +
       'stock (particle board, unsealed MDF) leaks enough that the pump rating ' +
       'is not the holding force.',
   },
@@ -573,7 +573,7 @@ export const WORKHOLDING: Workholding[] = [
       'clean negative — Laguna gives no bond strength or bead size, and ' +
       'CNCCookbook\'s workholding guide does not list hot glue at all ' +
       '(both read 2026-08-08). Treat every figure here as a placeholder, and ' +
-      'treat the method as untested by this lane.',
+      'treat the method as untested by this app.',
   },
 
   // ------------------------------------------------------------- fasteners --

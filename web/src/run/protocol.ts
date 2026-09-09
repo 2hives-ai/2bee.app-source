@@ -1479,10 +1479,11 @@ export const EXCLUDED_REALTIME: Record<number, string> = {
     'and returns to Idle with [MSG:Stop] (protocol.c:598-599) — everything 0x21 (feed hold) does ' +
     'not do. It is not offered anyway, for three reasons that are all about the sender rather ' +
     'than the machine. (1) grblHAL marks the whole handler "Experimental for now, must be ' +
-    'verified" in its own comment (protocol.c:548), and this lane does not build a safety control ' +
+    'verified" in its own comment (protocol.c:548), and this app does not build a safety control ' +
     'on an upstream experiment it cannot test on a board. (2) It FLUSHES the RX buffer ' +
     '(hal.stream.cancel_read_buffer, protocol.c:565) and zeroes char_counter (protocol.c:846), so ' +
-    'mid-stream it desynchronises character counting exactly as 0x85 does — see refusal R7 for ' +
+    'mid-stream it desynchronises character counting exactly as 0x85 does — the same failure, ' +
+    'from the same cause, as the soft-reset byte this sender also refuses. ' +
     'the same failure with the same cause. (3) Its position consequence is CONDITIONAL, which is ' +
     'worse for a UI than a flat "costs position": sys.position_lost is set only where an alarm ' +
     'was already pending AND the steppers were still stepping (protocol.c:569-571); the ordinary ' +
@@ -1722,7 +1723,7 @@ const RETAINED = 'grblHAL’s own text: "Machine position retained. Alarm may be
  * still knows where it is. ⚠ Route the 4–21 classification to `pcb`/the
  * controller source rather than promoting a guess here. */
 const UNSTATED =
-  'grblHAL’s text for this alarm does not state whether position is retained, and this lane ' +
+  'grblHAL’s text for this alarm does not state whether position is retained, and this app ' +
   'has not read the stop path for it. Treated as NOT retained: re-home before cutting.';
 
 export const ALARMS: ReadonlyMap<number, AlarmSpec> = new Map(
@@ -2341,7 +2342,8 @@ export class Streamer {
     if (opts.mode === 'character-counting' && (opts.rxBufferSize === null || opts.rxBufferSize <= 0)) {
       throw new Error(
         'character counting needs a MEASURED RX buffer size (Bf, second figure). ' +
-          'Never guess 128 or 1024 — see refusal R13 and design §2.',
+          'Never guess 128 or 1024 — a buffer size this app did not measure is a buffer size ' +
+          'it will not stream against.',
       );
     }
     this.lines = opts.lines;

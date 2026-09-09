@@ -1222,7 +1222,7 @@ const index = {
     'A design is one .scad FILE and may be SEVERAL registered parts (cad, 2026-09-05: normal in ' +
     'their lane, not an edge case), so `partNames` and `describes` are lists and the file path is ' +
     'never a safe key for anything joined per part. `descriptionsWritten` vs `descriptionsShown` ' +
-    'is recomputed every build, never snapshotted — several of the unshown parts are nest sheets ' +
+    'is recomputed every build, never snapshotted — several of the unshown parts are nest layouts ' +
     'this reader may gain, so the gap moves on its own.',
   scanned: files.size,
   listed: entries.length,

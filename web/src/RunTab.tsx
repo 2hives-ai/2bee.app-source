@@ -3642,7 +3642,7 @@ export function RunTab(props: RunTabProps) {
           <strong className="bad">Nothing here has ever run a machine</strong>
           <p style={{ margin: '6px 0 0' }}>
             The router is <strong>ordered and has not arrived</strong>. Every check this tab has runs
-            against a simulated controller in node — this lane’s own model of grblHAL — so it can show
+            against a simulated controller in node — this app’s own model of grblHAL — so it can show
             that the tab agrees with our reading of the firmware and can never show that the reading is
             right. <strong>Nothing in this app has cut anything.</strong>
           </p>
@@ -3886,7 +3886,7 @@ export function RunTab(props: RunTabProps) {
           <span data-testid="run-poll-caveat">
             The poll timer runs in the streamer worker rather than in this page, because Chrome
             throttles timers in a hidden page. ⚠ Whether a worker of a hidden page is throttled too
-            has <strong>not been measured by this lane</strong> — so the readouts above carry the age
+            has <strong>not been measured for this app</strong> — so the readouts above carry the age
             of the report that actually arrived, and do not assume the poll happened.
           </span>
           {linkQuiet
@@ -4138,7 +4138,7 @@ export function RunTab(props: RunTabProps) {
             {/* 🔴 THE CAVEAT ITSELF LIVES BESIDE THE DRO (`run-poll-caveat`),
               * NOT HERE — 2026-08-11. Both blocks are unconditional and on the
               * same scrollable page, and the clause *"whether a worker of a
-              * hidden page is throttled too has not been measured by this lane"*
+              * hidden page is throttled too has not been measured for this app"*
               * was word-for-word identical in the two.
               *
               * ⚠ THE FIX IS PLACEMENT, NOT COMPRESSION, and the placement was
