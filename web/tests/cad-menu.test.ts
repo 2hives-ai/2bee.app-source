@@ -74,6 +74,7 @@ const CTX = {
   savedName: null,
   axes: true,
   scaleMarkers: true,
+  editorHidden: false,
   projection: 'perspective' as const,
   /* No history yet — both Edit items are disabled from this context. */
   undoLabel: null,
@@ -109,6 +110,7 @@ test('the command set is exactly the functions this tab actually has', () => {
     'view.console',
     'view.tree',
     'view.ask',
+    'view.hide-editor',
     'view.axes',
     'view.scale-markers',
     'view.projection.perspective',
@@ -859,4 +861,12 @@ test('the toolbar button and the menu item drive the same history', () => {
   assert.match(tab, /data-testid="cad-redo"[\s\S]{0,200}?onClick=\{\(\) => setEd\(redoEditor\)\}/);
   // No second stash left behind: `replace.ts` is the only history module.
   assert.ok(!/putBack|mayPutBack|PUT_BACK_WHAT/.test(withoutComments(tab)), 'the old one-slot API is still wired');
+});
+
+test('View → Hide editor is offered and its check mark tracks the layout (founder 2026-10-12)', () => {
+  const item = (ctx: typeof CTX) =>
+    cadMenus(ctx).flatMap((m) => m.items).find((i) => i.id === 'view.hide-editor');
+  assert.ok(item(CTX), 'the item exists');
+  assert.equal(item(CTX)!.checked, false);
+  assert.equal(item({ ...CTX, editorHidden: true })!.checked, true);
 });

@@ -1,0 +1,49 @@
+/* The 2bee.3d card look (shared app style, 2026-10-15). */
+.shop-card.shop-card-split {
+  background: var(--color-bg-card); border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-default); box-shadow: var(--shadow-card);
+}
+.shop-card-split > .shop-card-body { padding: 16px; }
+/* The open progress stays in view: the card clicked may be far below it. */
+.shop-progress { position: sticky; top: 0; z-index: 5; background: var(--color-bg-card); }
+.shop-progress progress { accent-color: var(--color-amber); }
+
+/* The Designs card: picture (opens the 3D view), body, and three open actions.
+ * Founder 2026-10-15: "open every item in cad , cnc or 3d". Brand tokens only. */
+.shop-card-split > .shop-card-body { flex: 1; }
+.shop-card-actions {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  border-top: 1px solid var(--line);
+}
+.shop-card-act {
+  padding: 9px 6px; background: none; border: 0; cursor: pointer;
+  color: var(--color-amber-deep, var(--link)); font: inherit; font-size: 0.85rem; font-weight: 600;
+}
+.shop-card-act + .shop-card-act { border-left: 1px solid var(--line); }
+.shop-card-act:hover:not(:disabled) { background: var(--color-amber); color: var(--color-on-amber, #000); }
+.shop-card-act:focus-visible { outline: 2px solid var(--color-amber-light); outline-offset: -2px; }
+.shop-card-act:disabled { cursor: progress; opacity: 0.6; }
+
+/* All · Mine (founder 2026-10-15: "see only my designs what I changed and saved"). */
+.shop-show { display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; flex: none; }
+.shop-show-btn {
+  padding: 6px 14px; background: var(--panel); color: var(--ink);
+  border: 0; font: inherit; cursor: pointer;
+}
+.shop-show-btn + .shop-show-btn { border-left: 1px solid var(--line); }
+.shop-show-btn[aria-pressed='true'] { background: var(--color-amber); color: var(--color-on-amber, #000); font-weight: 600; }
+.shop-show-btn:focus-visible { outline: 2px solid var(--color-amber-light); outline-offset: -2px; }
+.shop-card.shop-card-mine { border-color: color-mix(in srgb, var(--color-amber) 55%, var(--color-border-subtle)); }
+.shop-show-n { font-weight: 400; opacity: 0.75; font-size: 0.8em; margin-left: 2px; }
+.shop-card-actions-one { grid-template-columns: 1fr; }
+
+/* Archive (founder 2026-10-16: "in the design able to archive"). A quiet text button,
+ * NOT a fourth column in the open actions: it hides a card, it does not open anything. */
+.shop-card-archive {
+  align-self: flex-start; margin-top: 8px; padding: 2px 0; background: none; border: 0;
+  color: var(--muted); font: inherit; font-size: 0.8rem; text-decoration: underline; cursor: pointer;
+}
+.shop-card-archive:hover { color: var(--ink); }
+.shop-card-archive:focus-visible { outline: 2px solid var(--color-amber-light); outline-offset: 2px; }
+.shop-card.shop-card-archived { opacity: 0.85; }
+.shop-card-archived .shop-card-actions { grid-template-columns: 1fr; }

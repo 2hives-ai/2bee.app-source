@@ -1015,6 +1015,20 @@ pub const JOBS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The machine an IMPORTED drawing is planned on before the host's config is applied.
+///
+/// 🔴 NOT [`machine()`]. That is the reference jobs' synthetic shop, and its probe plate (1.6 mm)
+/// and drawer of spare collets are FIXTURE CONSTANTS — its own comment says so. The import
+/// path borrowed it whole, and `JobConfig::apply` only overwrites what a config carries: the
+/// Make step and 2bee.cnc sent no plate, so every router program they planned carried
+/// `G10 L20 P1 Z1.600` and setup reported it as a fact (with a 15 mm plate, every Z 13.4 mm
+/// too deep), and an 8 mm cutter was "fittable" by a collet change into collets nobody
+/// declared (bughunt 2026-11-15). Here: no probe unless the host turns it on (and then a
+/// plate it does not state is REFUSED, decision #43), and no spare collets unless declared.
+fn import_machine() -> Machine {
+    Machine { probe_enabled: false, touch_plate_mm: None, spare_collets_mm: Vec::new(), ..machine() }
+}
+
 fn machine() -> Machine {
     Machine {
         collet_mm: 6.0,
@@ -1132,11 +1146,30 @@ pub fn build(name: &str, plant: JobPlant) -> Option<BuiltJob> {
     match name {
         "plate" => {
             let part = plate();
-            // The plate body survives; the holes do not.
-            keep.extend(keep_region(&part, &[]));
             // Part ID first: once the outline is cut the part is loose, and
             // marking a loose part pushes it out from under the tool.
             let (marks, bad) = marking_ops(&part, &end_mill(3.175), 8.0, 0.4, &p);
+            // The plate body survives; the holes do not, and neither does the
+            // label's footprint: a mark is an INTENDED cut into a kept part.
+            // ONE rectangle round the whole label, never one per character —
+            // overlapping holes cancel under the even-odd test and would put the
+            // overlap back into the keep region. This fixture was green only
+            // because the gouge test had a one-cell depth tolerance that swallowed
+            // the 0.4mm marks (bughunt 2026-11-15).
+            let label = marks.iter().filter_map(|m| m.contour.bounds()).fold(None, |acc: Option<(f64, f64, f64, f64)>, b| {
+                Some(match acc {
+                    None => b,
+                    Some(a) => (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)),
+                })
+            });
+            let label_area: Vec<Contour> = label
+                .map(|(x0, y0, x1, y1)| {
+                    let r = marks[0].tool.diameter_mm * 0.5;
+                    Contour::rect(x0 - r, y0 - r, x1 - x0 + 2.0 * r, y1 - y0 + 2.0 * r)
+                })
+                .into_iter()
+                .collect();
+            keep.extend(keep_region(&part, &label_area));
             if !bad.is_empty() {
                 notes.push(format!(
                     "the part name contains {bad:?}, which the marking font cannot cut — \
@@ -1740,6 +1773,14 @@ pub struct JobConfig {
     pub material: Option<String>,
     pub op: Option<OpCfg>,
     pub probe_after_toolchange: Option<bool>,
+    /// Re-reference Z after a work-holding change. Absent = the job's default
+    /// (`true`). `false` is a choice with a stated cost: the core notes that
+    /// every cut after the move is out by however far the part shifted.
+    pub probe_after_clamp_change: Option<bool>,
+    /// When a cut crosses a declared clamp, split the job into clamping phases
+    /// with a pause to move the clamps (`crate::reclamp`) instead of leaving it
+    /// refused. Absent = off. It never lets a cut pass through a clamp.
+    pub auto_reclamp: Option<bool>,
     /// Where the operator has dragged the GEOMETRY on the workpiece, `[x_mm, y_mm]`
     /// in **workpiece millimetres** — see [`crate::job::Job::drawing_offset_x_mm`].
     ///
@@ -2518,7 +2559,15 @@ impl JobConfig {
         // 🔴 MUTUALLY EXCLUSIVE WITH `clamps`. The phases carry their own
         // clamp sets; sending both is a contradiction that would make one
         // invisible. Refuse rather than silently pick one.
-        if let Some(phases) = &self.clamp_phases {
+        if self.clamp_phases.as_ref().map_or(false, |p| p.is_empty()) {
+            // An empty list declares nothing: it is NOT phased work-holding, and
+            // `clamps` (if any) is what is checked.
+            built.notes.push(
+                "config declares `clamp_phases: []` — an empty list declares no work-holding, so it was \
+                 ignored and the job is checked as ONE phase against `clamps`"
+                    .into(),
+            );
+        } else if let Some(phases) = &self.clamp_phases {
             if self.clamps.is_some() {
                 built.notes.push(
                     "config declares BOTH `clamps` and `clamp_phases` — those are two different \
@@ -2575,6 +2624,8 @@ impl JobConfig {
             }
         }
         set!(built.job.probe_after_toolchange, self.probe_after_toolchange);
+        set!(built.job.probe_after_clamp_change, self.probe_after_clamp_change);
+        set!(built.job.auto_reclamp, self.auto_reclamp);
         if let Some(m) = &self.material {
             // 🔴 An unrecognised material is REPORTED by leaving the previous
             // one in place rather than falling back to plywood. Silently
@@ -2729,6 +2780,28 @@ impl JobConfig {
             });
         }
 
+        // 🔴 A CORRECTION THAT NOTHING APPLIES. With no cutter selected the operations keep
+        // the tools they were BUILT with, so an `extra_tools` entry that redeclares one of
+        // them — the way a shop corrects a measured cutting length or diameter — was
+        // silently ignored: `pocket` with the 6mm down-cut redeclared at a 10mm cutting
+        // length planned an 18mm-deep cut at exit 0, and `setup` agreed with itself off the
+        // stale copies (bughunt 2026-11-15). Refused, naming the tool and the fix.
+        if selected.is_empty() {
+            for extra in self.extra_tools.iter().flatten() {
+                if built.job.operations.iter().any(|op| op.tool.name == extra.id) {
+                    built.job.tool_set_refusals.push(crate::toolpath::Refusal {
+                        what: extra.id.clone(),
+                        why: format!(
+                            "`extra_tools` redeclares `{}`, which this job's operations use, but no \
+                             cutter is selected — so the operations would keep the BUILT-IN definition \
+                             and the correction would be ignored. Select it with `tool_id` or `tool_ids`",
+                            extra.id
+                        ),
+                    });
+                }
+            }
+        }
+
         if let Some(o) = &self.op {
             for op in &mut built.job.operations {
                 let p = &mut op.params;
@@ -2797,6 +2870,23 @@ impl JobConfig {
 /// through the real binary, and nowhere else.
 #[cfg(test)]
 mod plant_contract_tests {
+
+    #[test]
+    fn an_obj_on_the_auto_path_is_sectioned_at_the_z_that_was_asked_for() {
+        // 🔴 On `auto` only STL took the mesh path; an OBJ or 3MF was sectioned
+        // at a hard-coded z = 0 whatever `--z` said, and the base outline was
+        // cut as ok:true. A 150x100 base (z 0-10) with a 30x30 boss (z 10-30).
+        let obj = "v 20 20 0\nv 170 20 0\nv 20 120 0\nv 170 120 0\nv 20 20 10\nv 170 20 10\nv 20 120 10\nv 170 120 10\nf 1 2 4 3\nf 5 7 8 6\nf 1 5 6 2\nf 3 4 8 7\nf 1 3 7 5\nf 2 6 8 4\nv 60 50 10\nv 90 50 10\nv 60 80 10\nv 90 80 10\nv 60 50 30\nv 90 50 30\nv 60 80 30\nv 90 80 30\nf 9 10 12 11\nf 13 15 16 14\nf 9 13 14 10\nf 11 12 16 15\nf 9 11 15 13\nf 10 14 16 12\n";
+        let both = [super::intake_one(obj.as_bytes(), "auto", Some(20.0), &Stock::default()),
+                    super::intake_one(obj.as_bytes(), "obj", Some(20.0), &Stock::default())];
+        for (k, i) in both.iter().enumerate() {
+            assert!(i.error.is_none(), "{k}: {:?}", i.error);
+            let b = i.parts[0].outer.bounds().expect("an outline");
+            assert!((b.2 - b.0 - 30.0).abs() < 0.5, "path {k}: sectioned {:.1} mm wide — the boss is 30", b.2 - b.0);
+            assert_eq!(i.section_z, Some(20.0), "path {k}");
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -3223,6 +3313,63 @@ mod config_tests {
         assert!(r.is_err(), "an unknown key was accepted and silently dropped");
     }
 
+    /// Bughunt 2026-11-15: four ways a cut or rapid through a DECLARED clamp
+    /// produced a program, each asserted on the report the CLI prints.
+    fn report_with(job: &str, cfg: &str) -> Report {
+        let mut j = build(job, JobPlant::None).unwrap();
+        serde_json::from_str::<JobConfig>(cfg).expect("test config must parse").apply(&mut j);
+        report_of(&j, 0.6)
+    }
+
+    const BARS: &str = r#"{"name":"bar-left","x":5,"y":0,"w":40,"h":900,"height_mm":40},{"name":"bar-right","x":400,"y":0,"w":40,"h":900,"height_mm":40}"#;
+    fn hits(r: &Report, clamp: &str) -> bool {
+        r.fixture_findings.iter().any(|f| f.contains(clamp))
+    }
+
+    #[test]
+    fn an_empty_clamp_phase_list_does_not_switch_the_clamp_check_off() {
+        let bar = r#"{"name":"bar-on-part","x":50,"y":70,"w":60,"h":60,"height_mm":40}"#;
+        let plain = report_with("clamped", &format!(r#"{{"clamps":[{bar}]}}"#));
+        assert!(hits(&plain, "bar-on-part"), "control: the bar on the part must be found");
+        let empty = report_with("clamped", &format!(r#"{{"clamps":[{bar}],"clamp_phases":[]}}"#));
+        assert!(!empty.ok && hits(&empty, "bar-on-part"), "clamp_phases: [] cut through the bar: {:?}", empty.fixture_findings);
+    }
+
+    #[test]
+    fn a_clamp_declared_with_negative_extents_keeps_its_keepout() {
+        let pos = report_with("clamped", &format!(r#"{{"clamps":[{BARS},{{"name":"cam","x":50,"y":70,"w":60,"h":60,"height_mm":40}}]}}"#));
+        let neg = report_with("clamped", &format!(r#"{{"clamps":[{BARS},{{"name":"cam","x":110,"y":130,"w":-60,"h":-60,"height_mm":40}}]}}"#));
+        assert!(hits(&pos, "cam"), "control: the cam on the part must be found");
+        assert!(!neg.ok && hits(&neg, "cam"), "the same footprint declared from its other corner was cut through");
+    }
+
+    #[test]
+    fn the_first_rapid_of_a_clamp_phase_is_checked_as_the_line_it_travels() {
+        // Phase 1 ends near X231 Y90; phase 2 opens with G0 X60 Y57 at Z5, which
+        // passes over X150 at about Y74 — through a 40mm cam at x140..160 y70..80.
+        let c = r#"{"name":"cam","x":140,"y":70,"w":20,"h":10,"height_mm":40}"#;
+        let bars_only = report_with("multi-tool", &format!(r#"{{"clamp_phases":[{{"clamps":[{BARS}]}},{{"clamps":[{BARS}]}}]}}"#));
+        assert!(bars_only.ok, "control: the bars alone must pass: {:?} {:?}", bars_only.errors, bars_only.fixture_findings);
+        let r = report_with("multi-tool", &format!(r#"{{"clamp_phases":[{{"clamps":[{BARS}]}},{{"clamps":[{BARS},{c}]}}]}}"#));
+        assert!(!r.ok && hits(&r, "cam"), "a rapid through a phase-2 clamp at the phase boundary passed");
+    }
+
+    #[test]
+    fn a_reclamp_stop_restarts_the_spindle_for_the_same_cutter() {
+        // The post writes M5 at a clamp change; with the same cutter and rpm on
+        // both sides no M3 followed, and the post refused the whole program.
+        let r = report_with(
+            "plate",
+            r#"{"clamps":[{"name":"edge","x":30,"y":100,"w":50,"h":40,"height_mm":20,"rotation_deg":0},
+                {"name":"far","x":400,"y":100,"w":40,"h":40,"height_mm":20,"rotation_deg":0}],"auto_reclamp":true}"#,
+        );
+        assert!(r.ok, "refused: {:?} {:?}", r.errors, r.fixture_findings);
+        let after = r.gcode.split("CLAMP CHANGE").nth(1).expect("one clamp change");
+        let m3 = after.find("M3").expect("no M3 after the clamp change");
+        let g1 = after.find("\nG1 ").expect("no cut after the clamp change");
+        assert!(m3 < g1, "a cut after the clamp change runs before the spindle restarts");
+    }
+
     #[test]
     fn clamps_replace_wholesale_and_confirmed_clear_is_separate() {
         let mut j = build("clamped", JobPlant::None).unwrap();
@@ -3356,7 +3503,10 @@ mod config_tests {
 /// because you cannot get back to it from here.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RenderMove {
-    /// `rapid` | `cut` | `tab` | `drill` | `change` | `probe`
+    /// `rapid` | `cut` | `tab` | `drill` | `change` | `probe` | `clamp` | `zero`
+    /// (`clamp` = the program stops for the operator to move clamps; `zero` =
+    /// it stops for the operator to set Z zero by hand after a cutter change on
+    /// a machine with no probe; `text` carries the instruction).
     pub kind: String,
     pub x: f64,
     pub y: f64,
@@ -4112,6 +4262,29 @@ pub struct Report {
     #[serde(default)]
     pub spoilboard_bare_reach: Option<[f64; 4]>,
     pub clamps: Vec<ClampCfg>,
+    /// The clamp SET in force during each phase of a program that moves its
+    /// clamps mid-job, in program order. **Empty = one phase** and `clamps`
+    /// holds throughout. When non-empty, `clamp_phases[0]` equals `clamps`
+    /// and a `render` move of kind `clamp` marks each boundary.
+    #[serde(default)]
+    pub clamp_phases: Vec<Vec<ClampCfg>>,
+    /// What the operator moves at the pause, when the core planned the phases
+    /// (`crate::reclamp`). Positions are footprint CENTRES, machine mm.
+    #[serde(default)]
+    pub clamp_moves: Vec<ClampMoveOut>,
+    /// `( CLAMP CHANGE -> … )` pauses in the EMITTED program. Every one of them
+    /// is also an `M0` counted in `tool_changes`, which counts every `M0` the
+    /// program writes — so the tool changes alone are the difference.
+    #[serde(default)]
+    pub clamp_changes: usize,
+    /// Every operator stop in the EMITTED program, in order — one shape for
+    /// every kind (`crate::setup::interventions_of`). Empty for a refused job.
+    #[serde(default, skip_deserializing)]
+    pub interventions: Vec<crate::setup::Intervention>,
+    /// The planner's own count of the stops in a job that moves its clamps,
+    /// with what merging saved. `None` on every other job.
+    #[serde(default)]
+    pub intervention_plan: Option<InterventionPlanOut>,
     /// 🔴 **The transform that takes `drawing` into the frame `render` and
     /// `gcode` are already in** — `Job::place`, measured out of itself.
     ///
@@ -4129,6 +4302,39 @@ pub struct Report {
     /// to remove.
     #[serde(default)]
     pub drawing_placement: crate::job::Placement2D,
+}
+
+/// See [`Report::intervention_plan`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct InterventionPlanOut {
+    pub cutter: usize,
+    pub clamps: usize,
+    pub merged: usize,
+    pub stops: usize,
+    pub stops_unmerged: usize,
+}
+
+/// One clamp the operator moves at a mid-job pause — see [`Report::clamp_moves`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ClampMoveOut {
+    pub clamp: String,
+    /// Footprint centre before the move, machine mm.
+    pub from: [f64; 2],
+    /// Footprint centre after the move, machine mm.
+    pub to: [f64; 2],
+}
+
+/// The echo of one clamp, as the viewport reads it.
+fn clamp_cfg_of(c: &crate::fixture::Clamp) -> ClampCfg {
+    ClampCfg {
+        name: c.name.clone(),
+        x: c.x,
+        y: c.y,
+        w: c.w,
+        h: c.h,
+        height_mm: c.height_mm,
+        rotation_deg: c.rotation_deg,
+    }
 }
 
 /// Flatten an arc for DISPLAY. The G-code keeps the arc.
@@ -4546,6 +4752,29 @@ pub fn report_of_with_surface(
                 }
                 render.push(rm);
             }
+            MoveKind::ClampChange => {
+                // The work-holding pause, as its OWN kind: a tool change and a
+                // clamp move are different procedures at the machine, and a
+                // timeline that drew both as "change" would tell the operator
+                // to fetch a cutter when they need to move a clamp.
+                let mut rm =
+                    RenderMove::at("clamp", cur.0, cur.1, built.job.machine.safe_z_mm);
+                if !m.text.is_empty() {
+                    rm.text = Some(m.text.clone());
+                }
+                render.push(rm);
+            }
+            MoveKind::ManualZero => {
+                // The SECOND stop of a cutter change on a machine with no Z
+                // probe: the person sets Z zero by hand. Its own kind so a
+                // timeline can show the stop as "change cutter, then set Z
+                // zero by hand" — one intervention, two `M0`.
+                let mut rm = RenderMove::at("zero", cur.0, cur.1, built.job.machine.safe_z_mm);
+                if !m.text.is_empty() {
+                    rm.text = Some(m.text.clone());
+                }
+                render.push(rm);
+            }
             MoveKind::Probe => render.push(RenderMove::at(
                 "probe",
                 cur.0,
@@ -4739,6 +4968,42 @@ pub fn report_of_with_surface(
                 rotation_deg: c.rotation_deg,
             })
             .collect(),
+        clamp_phases: r
+            .clamp_phases
+            .iter()
+            .map(|ph| ph.clamps.iter().map(clamp_cfg_of).collect())
+            .collect(),
+        clamp_moves: r
+            .clamp_moves
+            .iter()
+            .map(|m| ClampMoveOut { clamp: m.clamp.clone(), from: [m.from.0, m.from.1], to: [m.to.0, m.to.1] })
+            .collect(),
+        // Read off the EMITTED program, the same text the setup checklist reads.
+        clamp_changes: if r.is_runnable() {
+            post.gcode
+                .lines()
+                .filter(|l| {
+                    l.trim()
+                        .trim_start_matches('(')
+                        .trim_start()
+                        .starts_with(crate::setup::CLAMP_CHANGE_PREFIX.trim_end())
+                })
+                .count()
+        } else {
+            0
+        },
+        interventions: if r.is_runnable() {
+            crate::setup::interventions_of(&post.gcode)
+        } else {
+            Vec::new()
+        },
+        intervention_plan: (r.interventions.stops > 0).then(|| InterventionPlanOut {
+            cutter: r.interventions.cutter,
+            clamps: r.interventions.clamps,
+            merged: r.interventions.merged,
+            stops: r.interventions.stops,
+            stops_unmerged: r.interventions.stops_unmerged,
+        }),
         // Read out of the SAME `Job` the program was planned from, and measured
         // out of `Job::place` rather than rebuilt from the stock's fields — see
         // `Job::placement`. A host that draws the drawing under this lands on
@@ -5166,11 +5431,27 @@ fn intake_one(data: &[u8], format: &str, z_section_mm: Option<f64>, stock: &Stoc
             }
         }
     } else {
+        // 🔴 OBJ AND 3MF ARE MESHES TOO, and the comment below used to say the
+        // mesh branch had claimed every mesh. It claims STL only: on `auto` an
+        // OBJ or 3MF reached `parse_bytes` with z = 0.0 hard-coded, so
+        // `import step.obj --z 20` sectioned at z = 0, said so in small print,
+        // and cut the base outline as ok:true. Content-detected meshes now take
+        // their own arm, which reads `--z` (or mid-height when none is given).
+        let format = if format.eq_ignore_ascii_case("auto") {
+            if crate::mesh::looks_like_3mf(data) {
+                "3mf"
+            } else if std::str::from_utf8(data).map(crate::mesh::looks_like_obj).unwrap_or(false) {
+                "obj"
+            } else {
+                format
+            }
+        } else {
+            format
+        };
         match format {
-            // Content-decided. The mesh branch above already claimed anything
-            // that looks like an STL, so the Z passed here is unreachable — it
-            // is written as 0.0 rather than plumbed, because a value that can
-            // never be read must not look like a default anyone relies on.
+            // Content-decided, and no longer a mesh: STL was claimed by the
+            // mesh branch above and OBJ/3MF just now, so the 0.0 is unreachable
+            // as a section Z.
             "auto" => crate::import::parse_bytes(data, stock.size_y_mm, 0.0, IMPORT_TOL_MM),
             "dxf" | "svg" | "obj" | "step" => {
                 let Ok(text) = std::str::from_utf8(data) else {
@@ -5195,7 +5476,9 @@ fn intake_one(data: &[u8], format: &str, z_section_mm: Option<f64>, stock: &Stoc
                             mesh.z_span().map(|(lo, hi)| (lo + hi) * 0.5).unwrap_or(0.0)
                         });
                         section_z = Some(z);
-                        crate::mesh::section(&mesh, z, IMPORT_TOL_MM)
+                        // The format's own section, so the note says OBJ (and
+                        // that OBJ carries no units), not "STL".
+                        crate::mesh::parse_obj_section(text, z, IMPORT_TOL_MM)
                     }
                     // Refused, not read — the same refusal the browser and the
                     // CLI give, from the same constant. See `mesh::refuse_step`.
@@ -5209,7 +5492,7 @@ fn intake_one(data: &[u8], format: &str, z_section_mm: Option<f64>, stock: &Stoc
                     mesh.z_span().map(|(lo, hi)| (lo + hi) * 0.5).unwrap_or(0.0)
                 });
                 section_z = Some(z);
-                crate::mesh::section(&mesh, z, IMPORT_TOL_MM)
+                crate::mesh::parse_3mf_section(data, z, IMPORT_TOL_MM)
             }
             other => {
                 return Intake {
@@ -5344,7 +5627,7 @@ fn refused_import_report(
     // after `cfg.apply`; so does this. Its notes are discarded deliberately —
     // this job is never planned, and the real ones are already in `notes`.
     let mut probe = BuiltJob {
-        job: Job::new("imported", machine(), stock.clone()),
+        job: Job::new("imported", import_machine(), stock.clone()),
         dogbones: Vec::new(),
         keep: Vec::new(),
         remove: Vec::new(),
@@ -5471,6 +5754,11 @@ fn refused_import_report(
         spoilboard: None,
         spoilboard_bare_reach: None,
         clamps: Vec::new(),
+        clamp_phases: Vec::new(),
+        clamp_moves: Vec::new(),
+        clamp_changes: 0,
+        interventions: Vec::new(),
+        intervention_plan: None,
         // 🔴 THE DATUM THE OPERATOR SET — measured out of `Job::place` on the
         // probe above, exactly as the planned path measures it out of the job it
         // posted. It is a property of the CONFIG, known before the first drawing
@@ -6002,7 +6290,7 @@ fn import_many_raw(
     }
 
     // ---- 5. build and post ------------------------------------------------
-    let mut job = Job::new("imported", machine(), stock);
+    let mut job = Job::new("imported", import_machine(), stock);
     let base = OperationParams {
         depth_total_mm: job.stock.thickness_mm,
         depth_per_pass_mm: 4.0,
@@ -6525,6 +6813,22 @@ mod tool_import_tests {
             "tool_id":"End Mill - Down-cut 6mm 2F"}"#)
         .apply(&mut j);
         assert!((op_named(&j, "plate").tool.chipload_mm - 0.14).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_redeclared_tool_with_no_cutter_selected_is_refused_not_ignored() {
+        // bughunt 2026-11-15: the correction was silently dropped and the built tool kept.
+        let mut j = build("pocket", JobPlant::None).unwrap();
+        cfg(r#"{"extra_tools":[{"id":"End Mill - Down-cut 6mm 2F","category":"End Mill",
+            "diameter_mm":6.0,"flutes":2,"shank_mm":6.0,"cutting_length_mm":10.0,
+            "chipload_mm":0.1,"chipload_min_mm":0.05,"chipload_max_mm":0.25,
+            "rpm_min":8000,"rpm_max":24000}]}"#)
+        .apply(&mut j);
+        assert!(
+            j.job.tool_set_refusals.iter().any(|r| r.why.contains("correction would be ignored")),
+            "{:?}",
+            j.job.tool_set_refusals
+        );
     }
 
     #[test]

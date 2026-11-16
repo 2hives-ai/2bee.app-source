@@ -10,7 +10,10 @@
  * runnable program.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { seedTab } from './tab';
+import { seedTab, seedCadCode } from './tab';
+
+/* 2bee.cad opens on the chat view since 2026-10-15; these tests drive its code view. */
+test.beforeEach(async ({ page }) => seedCadCode(page));
 /* The row's own constant, not a fourth copy of its text: renaming it in the
  * panel used to leave this assertion green while the screen said something
  * else. */

@@ -1679,6 +1679,19 @@ pub enum MoveKind {
     /// Re-reference Z from the touch plate. Emitted after a tool change, because
     /// a new tool has a different length and the old Z zero is now wrong.
     Probe,
+    /// Set Z zero BY HAND — the cutter-change re-reference on a machine with
+    /// NO Z probe (founder 2026-10-16: *"change the different drilling tools
+    /// are priority"*, including on a machine without a probe). Planned only
+    /// straight after a [`MoveKind::ToolChange`]; `text` is the instruction
+    /// the operator reads.
+    ///
+    /// The post writes a SECOND stop (`( SET Z ZERO -> … )`, `M0`): the person
+    /// touches the new cutter off and zeroes Z with the controller's own jog
+    /// and zero, then resumes. 🔴 After it the tool is AT the new zero —
+    /// touching the work — so the post's first motion is `G90 G5x` and a
+    /// Z-ONLY `G0` to safe Z, before any X/Y move; nothing assumes the old Z.
+    /// Nothing in the program measures the zero the person set.
+    ManualZero,
     SpindleOn,
     SpindleOff,
     Dwell,
@@ -1900,6 +1913,11 @@ impl Move {
     }
     pub fn probe() -> Self {
         Self { kind: MoveKind::Probe, ..Default::default() }
+    }
+    /// Set Z zero by hand after a cutter change (no Z probe). `text` = what the
+    /// operator is told to do.
+    pub fn manual_zero(instruction: impl Into<String>) -> Self {
+        Self { kind: MoveKind::ManualZero, text: instruction.into(), ..Default::default() }
     }
 }
 

@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import App from './App';
 import AuthGate from './AuthGate';
 import './styles.css';
+import './spec/spec.css';
+import './home/home.css';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

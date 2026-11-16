@@ -1,0 +1,183 @@
+/* 2bee.3d tab — pnp's 2bee.3d layout (left: parts + print assistant; centre:
+ * plate tabs, 3D plate, result, printers), on brand tokens only. Every rule is
+ * scoped under .p3d so nothing leaks into the other tabs. */
+
+.p3d { display: flex; flex-direction: column; gap: 12px; padding: 12px 16px 24px; color: var(--color-text-primary); font: var(--type-body)/1.5 var(--font-primary); min-width: 0; }
+.p3d *, .p3d *::before, .p3d *::after { box-sizing: border-box; }
+.p3d button, .p3d select, .p3d input[type='text'], .p3d input[type='password'], .p3d input[type='number'] {
+  font: inherit; font-size: var(--type-body-sm); color: var(--color-text-primary); background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 5px 10px; transition: var(--motion-fast);
+}
+.p3d button { cursor: pointer; }
+.p3d button:hover:not(:disabled) { border-color: var(--color-amber); }
+.p3d button:disabled { opacity: 0.5; cursor: not-allowed; }
+.p3d button:focus-visible, .p3d select:focus-visible, .p3d input:focus-visible, .p3d textarea:focus-visible, .p3d summary:focus-visible, .p3d-drop:focus-visible {
+  outline: 2px solid var(--color-amber-light); outline-offset: 2px;
+}
+.p3d summary { cursor: pointer; color: var(--color-text-muted); font-size: var(--type-body-sm); }
+.p3d code { font-family: var(--font-mono); font-size: var(--type-mono); overflow-wrap: anywhere; }
+
+.p3d-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.p3d-title { display: flex; align-items: baseline; gap: 10px; }
+.p3d-title strong { font-size: var(--type-h4); color: var(--color-heading); }
+.p3d-connbtn { display: inline-flex; align-items: center; gap: 6px; }
+.p3d-banner { margin: 0; padding: 8px 12px; border: 1px solid var(--color-status-warn); border-left-width: 4px; border-radius: var(--radius-sm); background: var(--color-bg-card); font-size: var(--type-body-sm); }
+
+.p3d-main { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 860px) { .p3d-main { grid-template-columns: minmax(0, 1fr); } }
+.p3d-left, .p3d-centre { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.p3d-panel { background: var(--color-bg-card); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-default); padding: 14px; box-shadow: var(--shadow-card); min-width: 0; }
+
+.p3d-sub { color: var(--color-text-muted); font-size: var(--type-body-sm); margin: 0; overflow-wrap: anywhere; }
+.p3d-err { color: var(--color-status-error); font-size: var(--type-body-sm); margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.p3d-warn { color: var(--color-status-warn); font-size: var(--type-body-sm); margin: 4px 0; overflow-wrap: anywhere; }
+.p3d-ok { color: var(--color-status-success); font-size: var(--type-body-sm); margin: 4px 0; }
+.p3d-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+.p3d-grow { flex: 1 1 auto; min-width: 0; font-size: var(--type-body-sm); }
+.p3d-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--color-text-faint); }
+.p3d-dot.p3d-up { background: var(--color-status-success); }
+.p3d-dot.p3d-down { background: var(--color-status-warn); }
+.p3d-sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--color-border); vertical-align: -1px; flex: none; }
+
+/* connections */
+.p3d-conns { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+.p3d-conn { margin: 0; padding: 12px; border: 1px solid var(--color-border-subtle); border-radius: var(--radius-default); background: var(--color-bg-card); display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.p3d-conn legend { font-weight: 600; padding: 0 4px; }
+.p3d-conn label { display: flex; flex-direction: column; gap: 2px; font-size: var(--type-label); color: var(--color-text-muted); }
+.p3d-conn label.p3d-inline { flex-direction: row; align-items: center; gap: 6px; }
+
+/* parts */
+.p3d-drop { border: 2px dashed var(--color-border); border-radius: var(--radius-default); padding: 18px; text-align: center; color: var(--color-text-muted); cursor: pointer; transition: var(--motion-fast); }
+.p3d-drop.p3d-over, .p3d-drop:hover { border-color: var(--color-amber); color: var(--color-text-primary); }
+.p3d-drop.p3d-disabled { opacity: 0.5; cursor: not-allowed; }
+.p3d-obj { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 6px 10px; padding: 8px; margin-top: 8px; border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm); background: var(--color-bg-secondary); cursor: pointer; }
+.p3d-obj.p3d-sel { border-color: var(--color-amber); }
+.p3d-obj img, .p3d-noimg { width: 48px; height: 48px; border-radius: var(--radius-sm); background: var(--color-bg-deep); }
+.p3d-objbody { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.p3d-nm { font-size: var(--type-body-sm); overflow-wrap: anywhere; }
+.p3d-nm small { color: var(--color-text-muted); }
+.p3d-qtyx { color: var(--color-amber); }
+.p3d-ctl { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.p3d-ctl button, .p3d-ctl select { padding: 3px 7px; font-size: var(--type-caption); }
+.p3d-qty { display: inline-flex; align-items: center; gap: 2px; }
+.p3d-qty button { min-width: 24px; }
+.p3d .p3d-qty input { width: 46px; text-align: center; padding: 3px 2px; font-size: var(--type-caption); }
+.p3d-jobs { margin-top: 12px; }
+.p3d-filebtn { display: inline-block; font-size: var(--type-body-sm); padding: 5px 10px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-secondary); cursor: pointer; }
+
+/* print assistant */
+.p3d-chat { display: flex; flex-direction: column; gap: 10px; }
+.p3d-chat-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.p3d-chat-head h3 { margin: 0; font-size: var(--type-h4); color: var(--color-heading); }
+.p3d .p3d-ai-status { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; font-size: var(--type-caption); color: var(--color-text-muted); padding: 2px 4px; }
+.p3d-ai-setup { border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm); padding: 8px; background: var(--color-bg-secondary); font-size: var(--type-body-sm); }
+.p3d-qs { display: flex; flex-wrap: wrap; gap: 6px; }
+.p3d .p3d-qbtn { border-radius: var(--radius-pill); }
+.p3d-log { display: flex; flex-direction: column; gap: 10px; min-height: 160px; max-height: 420px; overflow-y: auto; padding: 10px; background: var(--color-bg-deep); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-default); }
+.p3d-msg { max-width: 94%; padding: 8px 12px; border-radius: var(--radius-default); background: var(--color-bg-card-raised); border: 1px solid var(--color-border-subtle); font-size: var(--type-body-sm); }
+.p3d-msg.p3d-user { align-self: flex-end; background: var(--color-bg-secondary); border-color: var(--color-border); }
+.p3d-msg.p3d-wait { color: var(--color-text-muted); font-style: italic; }
+.p3d-text { margin: 0 0 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.p3d-note, .p3d-why { margin: 4px 0 0; color: var(--color-text-muted); overflow-wrap: anywhere; }
+.p3d-risk { margin: 4px 0 0; color: var(--color-status-warn); }
+.p3d-bad { color: var(--color-status-error); }
+.p3d-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.p3d .p3d-chip { border-radius: var(--radius-pill); border-color: var(--color-amber); color: var(--color-amber); background: transparent; }
+.p3d .p3d-chip:hover:not(:disabled) { background: var(--color-amber); color: var(--color-on-amber); }
+.p3d .p3d-chip[aria-pressed='true'] { background: var(--color-amber); color: var(--color-on-amber); }
+.p3d-presets { display: flex; flex-direction: column; gap: 8px; }
+.p3d-presets label { display: flex; flex-direction: column; gap: 2px; color: var(--color-text-muted); font-size: var(--type-caption); }
+.p3d-presets select { max-width: 100%; }
+.p3d-items { list-style: none; margin: 6px 0 0; padding: 0; }
+.p3d-items li { padding: 2px 0; overflow-wrap: anywhere; }
+.p3d-from { color: var(--color-text-muted); font-family: var(--font-mono); text-decoration: line-through; }
+.p3d-to { color: var(--color-amber); font-family: var(--font-mono); }
+.p3d-arrow { color: var(--color-text-faint); }
+.p3d-form { display: flex; flex-direction: column; gap: 6px; }
+.p3d-label { color: var(--color-text-muted); font-size: var(--type-label); letter-spacing: 0.02em; text-transform: uppercase; }
+.p3d-input { width: 100%; resize: vertical; padding: 8px 10px; font: inherit; color: var(--color-text-primary); background: var(--color-bg-secondary); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
+.p3d .p3d-send, .p3d .p3d-primary { background: var(--color-amber); color: var(--color-on-amber); border-color: var(--color-amber); font-weight: 600; }
+.p3d .p3d-send:hover:not(:disabled), .p3d .p3d-primary:hover:not(:disabled) { background: var(--color-interactive-hover); border-color: var(--color-interactive-hover); }
+.p3d-hint { font-size: var(--type-caption); color: var(--color-text-faint); }
+.p3d-applied { display: flex; flex-direction: column; gap: 8px; margin: 6px 0; }
+.p3d-entry { padding: 8px 10px; background: var(--color-bg-secondary); border: 1px solid var(--color-border-subtle); border-left: 3px solid var(--color-amber); border-radius: var(--radius-sm); font-size: var(--type-body-sm); }
+.p3d-entry-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.p3d-empty { margin: 0; font-size: var(--type-body-sm); color: var(--color-text-faint); }
+
+/* plates + 3D view */
+.p3d-plates { padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.p3d-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.p3d .p3d-platetab { text-align: left; line-height: 1.3; }
+.p3d .p3d-platetab[aria-selected='true'] { border-color: var(--color-amber); background: var(--color-bg-deep); }
+.p3d-platetab small { display: block; color: var(--color-text-muted); font-size: var(--type-caption); }
+.p3d-platetab small.p3d-st-failed { color: var(--color-status-error); }
+.p3d-platetab small.p3d-st-waiting, .p3d-platetab small.p3d-st-stale { color: var(--color-status-warn); }
+.p3d-view { position: relative; height: 460px; background: var(--color-bg-deep); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-default); overflow: hidden; }
+.p3d-view-host, .p3d-view-canvas { position: absolute; inset: 0; }
+.p3d-viewmsg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--color-text-faint); pointer-events: none; text-align: center; padding: 12px; }
+/* Model / Sliced toggle and the layer scrubber (sliced view, 2026-11-12). The legend swatches are toolpath instrument
+   colours (gcodePath.ts KIND_COLOR), not brand colours. */
+.p3d-viewmode { position: absolute; top: 10px; left: 10px; display: flex; border: 1px solid var(--color-border); border-radius: var(--radius-default); overflow: hidden; background: var(--color-bg-card); }
+.p3d .p3d-viewmode button { border: 0; border-radius: 0; padding: 4px 12px; background: transparent; color: var(--color-text-muted); }
+.p3d .p3d-viewmode button[aria-pressed='true'] { background: var(--color-bg-deep); color: var(--color-text-high); box-shadow: inset 0 -2px 0 var(--color-amber); }
+.p3d-layerbar { position: absolute; left: 10px; right: 10px; bottom: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 6px 10px; border-radius: var(--radius-default); background: var(--color-bg-card); color: var(--color-text-high); font-size: var(--type-caption); }
+.p3d-layerbar input[type='range'] { flex: 1 1 200px; accent-color: var(--color-amber); }
+.p3d-layernum { font-variant-numeric: tabular-nums; min-width: 15ch; }
+.p3d-travel { display: inline-flex; align-items: center; gap: 4px; }
+.p3d-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; color: var(--color-text-muted); }
+.p3d-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.p3d-busy { position: absolute; top: 10px; right: 10px; display: flex; align-items: center; gap: 8px; padding: 4px 10px; border-radius: var(--radius-pill); background: var(--color-bg-card); color: var(--color-text-high); font-size: var(--type-caption); pointer-events: none; }
+.p3d-busy progress { width: 70px; height: 6px; accent-color: var(--color-amber); }
+.p3d-spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--color-border); border-top-color: var(--color-amber); border-radius: 50%; animation: p3d-spin 0.9s linear infinite; }
+@keyframes p3d-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .p3d-spin { animation: none; border-right-color: var(--color-amber); } .p3d * { transition: none !important; } }
+.p3d-problems { display: flex; flex-direction: column; gap: 2px; }
+.p3d-results.p3d-stale { opacity: 0.6; }
+.p3d-resline { font-family: var(--font-mono); font-size: var(--type-mono); color: var(--color-text-high); }
+.p3d-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: var(--type-body-sm); }
+.p3d-table th { text-align: left; color: var(--color-text-muted); font-weight: 500; }
+.p3d-table td, .p3d-table th { padding: 2px 8px 2px 0; overflow-wrap: anywhere; }
+.p3d-dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; margin: 8px 0; font-size: var(--type-body-sm); }
+.p3d-dl dt { color: var(--color-text-muted); }
+.p3d-dl dd { margin: 0; overflow-wrap: anywhere; }
+.p3d-log-pre { white-space: pre-wrap; font-family: var(--font-mono); font-size: var(--type-caption); }
+
+/* printers */
+.p3d-printers { display: flex; flex-direction: column; gap: 10px; }
+.p3d-printers-bar { display: flex; align-items: center; gap: 10px; }
+.p3d-printers-bar h3 { margin: 0 auto 0 0; font-size: var(--type-h4); color: var(--color-heading); }
+.p3d-card { max-width: 420px; background: var(--color-bg-card); border: 1px solid var(--color-amber); border-radius: var(--radius-default); padding: 14px; box-shadow: var(--shadow-card); display: flex; flex-direction: column; gap: 8px; }
+.p3d-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.p3d-card-name { font-weight: 600; }
+.p3d-badge { flex: none; padding: 2px 10px; border-radius: var(--radius-pill); font-size: var(--type-caption); font-weight: 600; letter-spacing: 0.04em; border: 1px solid currentColor; }
+.p3d-badge[data-s='online'] { color: var(--color-status-success); }
+.p3d-badge[data-s='offline'] { color: var(--color-status-error); }
+.p3d-badge[data-s='unset'], .p3d-badge[data-s='loading'] { color: var(--color-text-muted); }
+.p3d-slots label { display: flex; flex-direction: column; gap: 2px; font-size: var(--type-caption); color: var(--color-text-muted); margin-top: 6px; }
+.p3d-slotrow { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.p3d-slotname { flex: 1 1 auto; font-size: var(--type-body-sm); }
+.p3d-slotrow input[type='color'] { width: 34px; height: 26px; padding: 0; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: none; }
+.p3d-upload { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--color-border-subtle); padding-top: 8px; }
+.p3d-check { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: var(--type-body-sm); }
+.p3d-check label { display: flex; align-items: center; gap: 6px; }
+
+/* Gates column (gates/GatesPanel.tsx): parts + AI · plate + printer · Gates. The
+ * panel's own look is in styles.css; only its place in this grid is here. */
+.p3d-main { grid-template-columns: 340px minmax(0, 1fr) auto; }
+.p3d-main > .gates-panel { width: 280px; position: sticky; top: 12px; max-height: calc(100vh - 24px); }
+.p3d-main > .gates-panel.gates-collapsed { width: 44px; }
+@media (max-width: 1100px) { .p3d-main > .gates-panel { width: 220px; } }
+@media (max-width: 860px) {
+  .p3d-main { grid-template-columns: minmax(0, 1fr); }
+  .p3d-main > .gates-panel { width: auto; position: static; max-height: none; }
+}
+/* Plate picture on the printer card (plateMap.ts). The svg Y axis is flipped there, not here. */
+.p3d-platemap { margin: 6px 0; }
+.p3d-platemap svg { display: block; width: 100%; max-height: 240px; background: var(--color-bg-deep); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm); }
+.p3d-platemap-area { fill: var(--color-bg-secondary); stroke: var(--color-border); stroke-width: 0.8; vector-effect: non-scaling-stroke; }
+.p3d-platemap-obj path { fill: var(--color-amber); fill-opacity: 0.35; stroke: var(--color-amber); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.p3d-platemap-obj text { fill: var(--color-text-high); font-size: 8px; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+.p3d-platemap-obj.hot path { fill-opacity: 0.8; stroke-width: 2.5; }
+.p3d-platemap-obj.skipped path { fill: var(--color-text-faint); fill-opacity: 0.25; stroke: var(--color-text-faint); stroke-dasharray: 3 2; }
+.p3d-hot { background: var(--color-bg-secondary); border-radius: var(--radius-sm); }
+.p3d-objid { display: inline-block; min-width: 1.6em; font-variant-numeric: tabular-nums; color: var(--color-text-muted); }

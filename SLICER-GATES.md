@@ -22,13 +22,19 @@ pass, which regenerates the committed `web/src/wasm`** — so a typo rewrote a
 tracked build product. Gate **FLAG** limb 5 holds the harness to the same
 contract it holds the CLI to; see its section below.
 
-**Three exit codes, because there are three answers:**
+**Three exit codes, because there are three answers — and they are the fleet's contract:**
 
 | Exit | Verdict | Means |
 |---|---|---|
 | 0 | `GO` | every gate ran and answered |
-| 3 | `INCOMPLETE` | nothing failed; a **budgeted** gate could not run here. **Not a pass.** |
-| 1 | `NO-GO` | a gate ran and did not pass — **or was disarmed into PENDING** |
+| 2 | `INCOMPLETE` | nothing failed; a **budgeted** gate could not run here. **Not a pass.** Also exit 2: an invocation refused before anything ran — told apart by its **empty stdout** |
+| 1 | `NO-GO` | a gate ran and did not pass — **or was disarmed into PENDING**, or the core did not compile, or a table in the harness is malformed |
+
+⚠ **INCOMPLETE was exit `3` until 2026-09-26.** It moved to `2` when this gate got its row in
+`fleet_gate_check.py` (ceo ruling, same day): the fleet reads `2` as "could not run" and scored
+`3` as a defect. Gate **VERD** now asserts the numbers themselves, not only that they differ.
+`--json <path>` writes the report the fleet tallies — `PENDING` is `SKIP`, `INCOMPLETE` is
+`INCONCLUSIVE`.
 
 ## Why this file reads differently to a normal test plan
 
@@ -111,7 +117,7 @@ fixture. So three rules bind, and they are not negotiable:
    (`CTRL`, `RUN`, `AGPL` always; `CAD1`, `CAD1H`, `BRND` always; `I1`, `SPLNT`
    under `--quick` only). **A PENDING outside that budget is scored as a FAIL**, so a disarmed
    gate reads NO-GO through the same line every control asserts on. A budgeted
-   PENDING gives `INCOMPLETE`, exit 3 — not a pass, not a failure, and **not a
+   PENDING gives `INCOMPLETE`, exit 2 (3 until 2026-09-26) — not a pass, not a failure, and **not a
    string a negative control may accept**.
 
    ⚠ **The third verdict is deliberately not called `GO-WITH-GAPS`.**
@@ -975,6 +981,64 @@ local side matches an empty mirror**, so the naive version of this probe would h
 green on nothing at all. The zero-blob guard turned it into a PENDING instead, and `--full-tree`
 is the fix. ⇒ ***A discovery-based comparison whose population can silently become empty passes
 by construction.***
+
+### AGPL — the basis is the DEPLOYED commit, and the mirror can be wrong by being AHEAD (2026-09-09)
+
+🔴 **Every instrument on this day's thread asked whether the mirror was BEHIND. `legal` measured the
+opposite and found nothing was watching it.** After the correspondence fix was committed here, the
+mirror was re-cut at `HEAD` — correct practice — and `main` then published **two commits ahead of
+the bundle still on the CDN**. §13 is violated just as squarely in that direction: the recipient
+still receives source that does not build the served program.
+
+> ***"'Mirror == deployed' is the invariant. 'Mirror ≥ tree' and 'mirror ≤ tree' are both only
+> proxies for it, and they fail in opposite directions."*** — `legal`
+
+**So the comparison basis is no longer this tree.** `backend`'s deploy publishes the build commit in
+the served artefact (`https://2bee.app/build-info.json`), so the probe **reads it** and compares the
+mirror to `<deployed-commit>:software/2bee.app`. A blob-level set comparison is direction-agnostic:
+a file the mirror is missing, one whose content differs, and one the mirror carries that the
+deployed commit does not are all drift.
+
+⚠ **Two things stated in the verdict rather than assumed.** (a) It assumes `build-info.json` and the
+bundle come from the same deploy — nothing here can see a CDN serving them from different ones — and
+🔴 **the value is ASSERTED BY THE DEPLOYER, not derived from the artefact** (`legal`): the deploy
+script writes its own `BUILD_COMMIT` into `dist/`, nothing in the bundle confirms it, and **a bundle
+cannot be asked which commit produced it.** ⚠ Measurably not theoretical — `5c7c4550ab6:…/web` and
+`691558f97f:…/web` are the SAME tree object, so today's bundle is consistent with either commit and
+no examination distinguishes them (harmless, since both give the same Corresponding Source for every
+bundle-affecting path). ⇒ **This basis inherits the deploy script's correctness exactly, and that
+script wrote the wrong `BUILD_COMMIT` earlier the same day.** **A gate that cannot derive a fact says
+it took it on trust.**
+(b) If it cannot be read, or names a commit **this clone cannot resolve**, the basis falls back to
+`HEAD` **and says so** — and on that basis drift can only ever PEND, never FAIL, because a commit
+that exists here and was never deployed creates no §13 obligation. *(`ceo`'s third-state rule, second
+application: "cannot resolve" is not "does not match".)*
+
+⚠ **The bundle-affecting path list is a FAIL-TRIGGER, not a definition of Corresponding Source** —
+`legal`'s boundary, kept here because the distinction is easy to lose. §1 covers everything needed to
+generate, install, run **and modify** the work, including the scripts controlling those activities,
+which is broader than "compiles into the bundle": a build script under `tools/` is Corresponding
+Source though nothing it emits is bundled. **What the mirror must CARRY is the whole ruled subtree.
+The list only decides FAIL versus PENDING, and an omission from it can never produce a green.**
+
+**Witnessed red — `--self-plant agpl-mirror-ahead`**, the direction nobody was testing, and the only
+plant that drives the deployed-basis branch (no probe-4 evidence is consulted there):
+
+```
+  SELF-PLANTED FAIL    AGPL  🔴 §13 HAS ATTACHED AND THE OFFER DOES NOT CORRESPOND — …
+  SELF-PLANT: the mirror publishes a web/src/ file the DEPLOYED commit does not have —
+  the mirror is AHEAD of the served build
+VERDICT: NO-GO — 1 gate(s) did not pass, and 6 could not run (CAD1H, RUN, I1, CTRL, DISC, SPLNT).
+```
+
+**Clean run, on the real invariant rather than a proxy:**
+
+```
+  PASS    AGPL  … and it CORRESPONDS: [basis is the DEPLOYED commit 691558f97f94, read from
+  https://2bee.app/build-info.json (assumes build-info.json and the bundle come from the same
+  deploy)] 2hives-ai/2bee.app-source@main = COMMIT b676dcece7ab… matches
+  691558f97f94…:software/2bee.app blob-for-blob
+```
 
 ### AGPL — the limb red-flagged a COMPLIANT state within the hour (serving-drift partition + required disclosure, 2026-09-09)
 
@@ -2426,6 +2490,7 @@ only once a plant could be watched making it go red.
 |---|---|---|---|
 | B2B4 | Datum + material | a datum or material setting consumed by nothing reads as configured | datum shift + material bounds diff |
 | TECH | Technology seam | ~~an unimplemented process posted as CNC drives a spindle through an FDM plan~~ 🔴 **HONESTLY DOWNGRADED 2026-08-10: THAT FAILURE CANNOT OCCUR, so this gate could not go red for the reason it existed.** `Technology::Fdm` is reachable from exactly one place in the whole CLI — the `dialect-rules` **reporting** subcommand (`cli/src/main.rs:899`). No `job`, `report`, `import`, `nest` or `fixture` path takes a technology, so no job can be posted as the wrong one. Every assertion the gate made was on a **metadata dump** (`implemented`, `has_post`, two substrings out of the `why` fields), which is the exact shape `AGENTS.md` bans, and its declared control (*"`Technology::Fdm` must refuse"*) was a restatement of one of its own limbs | ~~`Technology::Fdm` must refuse~~ — that was the check written twice, not a control. **What it holds now, smaller and true:** (1) the declaration, labelled as a declaration; (2) **an unknown technology must be REFUSED, not approximated** — the limb that gives this gate a reachable red, **and it is RED today**: `dialect-rules no-such-technology` exits 0 and returns the CNC ruleset, because `cli/src/main.rs:900` matches `Some("fdm") \| Some("FDM")` and falls through `_ =>` to `Cnc`, so every typo, every future technology name **and a missing argument** are answered as CNC — this gate's own headline failure on the one path that can reach it, owned by `cli/`; (3) the FDM ban list is run over a **real emitted CNC program** and must HIT, because a list that never fires is indistinguishable from an empty one and G2 asks the core for exactly this kind of list. ⚠ **Still uncovered, and it is the original claim:** nothing posts a job as a technology. This row arms the day a product path takes one |
+| FDM | FDM engine (`twobee-fdm`) | a slicer whose tests run nothing, or whose parity controls cannot fail, would be trusted with the X2D on no evidence | **Added 2026-10-14** with the crate (founder ruling: FDM in Rust in this lane; engine by `pnp`). Runs `cargo test -p twobee-fdm --release --lib` against a **test floor (300; 315 at landing)** and `parity --selftest` (its own negative controls: +15 % wall → FAIL, missing feature → FAIL, empty population → PENDING). When both hold the row is **PENDING, never PASS**: parity against OrcaSlicer needs Orca and is not measured here (`PENDING_BUDGET.FDM`). Control: `--self-plant fdm-empty-run` filters the test run to nothing and the floor must go red. ⚠ `Technology::Fdm` in `twobee-cam` stays `implemented() == false`: the CNC core does not route FDM to this crate, and saying otherwise would be a claim about the core, not the crate. Nothing has printed. |
 | C6 | Tool library I/O | a tool fed at somebody else's numbers burns the edge | an invalid tool refused by name |
 | MARK | Part marking | 36 identical blanks cannot be sorted without an ID. 🔴 **AND THIS GATE READ THE PLAN, NOT THE PROGRAM, UNTIL 2026-08-28** — it asserted on `report.render`, the move list `core/src/fixtures.rs` builds by walking `r.path.moves` one step BEFORE the post. One doctrinal violation sitting inside the harness that enforces the doctrine: *assert on the emitted program, never on the setting that was supposed to produce it* is this lane's standing rule, and it has been bitten by that shape five times (`ENT`'s vertical plunge under `EntryMode::Ramp`, `EntryMode::Helix` aliased to `Ramp`, `P4`'s dogbone counts, `P3`'s `pocketFloorZ` helper, a `JobSummary` walked off `path.moves`). A post that dropped, rounded or reordered the marking moves would have left it green. ⚠ Blast radius is small and is not zero: marking is cosmetic, which is why this was carried as TODO #145 rather than fixed under the safety work — and then fixed | **reads `gcode` and nothing else.** DEPTH: cutting moves at engraving depth in the emitted text, with **modal Z tracked line by line** because a `G1` carrying no Z word is still cutting at the last Z stated. TOOL: attribution from the `( op: <name> [<tool>] )` banner the core writes and `parse_banner` reads back — the only place the emitted program says which cutter a move belongs to, since this post emits no `T` word and no `M6` (the change is a banner, a collet note and M5/M3). The marking ops must name a cutter the profile ops do not. Two `--self-plant` controls, one per limb — `mark-depth-window`, `mark-banner-blind` — **two witnessed reds below** |
 | LEAD | Lead in/out | entering along the wall leaves a witness mark on the finished edge | arc count with and without leads |
@@ -3116,8 +3181,12 @@ is what happened between the oracle's README being written and this gate being
 wired, when `color()` became a pass-through and the hardware leg went from
 `REFUSED 50 / DIVERGES 3 / ERROR 1` to `REFUSED 24 / DIVERGES 27 / ERROR 3`.
 
-CAD1H BASELINE: DIVERGES+ERROR = 72
-CAD1H BASELINE: PENDING = 126/318
+CAD1H BASELINE: DIVERGES+ERROR = 54
+CAD1H BASELINE: PENDING = 160/373
+
+*(2026-10-15 ~09:1x: DIVERGES+ERROR back to **54** — the 53 below came from the loaded pass #5 and a misread scratch file; calm pass #8 on the deterministic budget measures 54, the same file set as the 10-14 pin. Kept for the record: DIVERGES+ERROR 54 → 53, "confirmed" by the calm full pass #6 at cad-tree@1c75bf401150. PENDING briefly read 159 from pass #5 at load ~75 — a LOAD ARTEFACT (the mesher's 6 s wall-clock budget turns measurable files into refusals) — and is back at 160, the calm value.)*
+
+*(2026-10-14: re-derived at cad-tree@8c6127346c91, reader cad-src 7fb9f49882c7 — both moved. 72 → 54 DIVERGES+ERROR; PENDING 126/318 → 160/373, the rise attributed file by file in the gate constant: 25 DIVERGES → PENDING that had diverged only on the TREE leg (oracle printer + scoping bugs fixed in 187f6a74ec) and now sit in the long-ruled `$preview` / top-level-overlap classes.)*
 
 *(2026-09-02: **a second ratchet, because the first one is gameable.** A ratchet
 on `DIVERGES+ERROR` alone rewards turning a file into "undecidable": today
@@ -3587,8 +3656,42 @@ corpus PENDING that is not a missing binary still fails it.
   green there means *"the core in this binary is these bytes"*, never *"this
   binary is fresh"*. Same boundary `K3` states one level down.
 
+🟢 **SUPERSEDED 2026-09-17 — I1 RUNS ON THIS BOX AND HAS SINCE 2026-08-12. THE
+BLOCK BELOW IS KEPT AS THE RECORD OF A CORRECT INVESTIGATION WITH A WRONG
+CONCLUSION, AND IT WAS LIVE IN THIS FILE FOR FIVE WEEKS.**
+
+```
+npx playwright test --reporter=line            116 passed (4.3m)
+[111/116] e2e/webgl.spec.ts:141  no GL plant is active unless this file was run on purpose
+[112/116] e2e/webgl.spec.ts:161  runs WebGL on real GPU hardware, not a software rasteriser
+```
+
+**The GPU was blocklisted, not missing.** `--use-gl=angle --use-angle=gl-egl`
+produces a context on the box's RTX 4090; every flag combination tried below is
+in the *swiftshader* family, which produces none. **Measured 2026-08-12 and
+recorded in `web/playwright.config.ts`'s header — and NOWHERE ELSE.**
+
+🔴 **THAT IS THE DEFECT WORTH KEEPING FROM THIS.** The fix landed in the config
+and the retraction never reached the document that tells everyone what "done"
+means here. ⇒ ***A stale 🔴 is as expensive as a stale ✅ and far harder to find,
+because nobody re-tests a blocker that names a reason*** — this file's own canon
+says exactly that, three sections up, and this block sat under it for five weeks.
+**`FUNCTIONAL-SPEC.md` B10 then cited this paragraph to mark three real,
+currently-passing e2e tests as *"declared, not passing"*.** **A retraction is not
+done when the code is fixed; it is done when every document that reasoned from
+the old fact has been corrected.**
+
+⚠ **The product defect the block identifies underneath is NOT superseded** — an
+unguarded `new THREE.WebGLRenderer(` still takes the whole app down rather than
+the viewport. **Working GL on the test box is not a guard on an operator's.**
+
+---
+
 🔴 **I1 CANNOT PASS ON THIS BOX TODAY, AND THAT IS NOT A REGRESSION IN THIS TREE
-(measured 2026-08-10, re-measured 23:28 on a rebuilt tree).** The browser tests
+(measured 2026-08-10, re-measured 23:28 on a rebuilt tree).** ⚠ **FALSE SINCE
+2026-08-12 — see the correction immediately above. Retained, not deleted, because
+deleting it would hide that this file asserted an unrunnable suite for five weeks
+while the suite ran.** The browser tests
 fail across all spec files, and the cause is in the browser rather than in the
 app: Chromium cannot create a WebGL context at all, so `three.js` throws at boot
 and React unmounts — `document.body` renders 0 characters and no control exists

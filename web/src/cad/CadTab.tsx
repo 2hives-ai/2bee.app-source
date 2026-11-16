@@ -4,17 +4,23 @@ import {
   useMemo,
   useRef,
   useState,
+  useDeferredValue,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import { parseScad, sceneLines, type ScadResult, type SceneLine } from './scad';
-import { meshScene, type MeshResult } from './mesh';
-import { CadPreview, type CadCamera } from './preview';
+import { meshScene } from './mesh';
+import { CadPreview, pickReference, type CadCamera, type PartPick } from './preview';
+import { ParamsPanel } from './ParamsPanel';
+import { BLANK_MODEL } from './blank';
+import { setParam, type Param, type ParamValue } from './params';
 import { CadEditor, marksFromConsole, type CadEditorHandle } from './editor';
 import { CadConsole, consoleBadge, consoleLines } from './console';
 import { CadOpen, MOUNT_A_FOLDER } from './open';
 import { claimPending, subscribeHandoff, type PendingDesign } from '../shop/handoff';
+import { suggestSaveName, uniqueName } from './saveName';
 import ObjectPicker, { type ObjectItem } from '../ObjectPicker';
-import { buildCadRecord, isCadRecord, type CadBuild } from './record';
+import { buildCadRecord as buildCadRecordForView, isCadRecord, type CadBuild } from './record';
+import { buildMachineRecord, resolutionSentence, type MachineBuild } from './machine';
 import { GAPS, MenuBar, OMISSIONS, cadMenus, onCadKeyDown } from './menu';
 import {
   ASK_PANEL_VISIBLE,
@@ -27,6 +33,7 @@ import {
 import {
   canRedo,
   canUndo,
+  canUndoAction,
   initialEditor,
   redo as redoEditor,
   redoLabel,
@@ -52,6 +59,45 @@ import {
 } from './session';
 import { list as listSaved, saveCadModel } from '../store';
 import { CAD_DEFAULT_PROJECTION, readProjection, type Projection } from '../projection';
+import { CadChat } from './CadChat';
+import { CadAnim, mentionsT } from './CadAnim';
+import { captureCanvas, saveThumbnail } from '../cnc/thumbnail';
+import { designToCnc, designToStl } from '../shop/toCnc';
+import { requestOpenIn } from '../shop/handoff';
+import { cadGates, cadMaySend } from './cadGates';
+import { readPrinters } from '../machines/printers';
+import { GatesPanel } from '../gates/GatesPanel';
+import { CadSpec } from '../spec/mounts';
+import type { MeshResult as AnimMesh } from './mesh';
+
+/** The history step the chat applies, and the only one its Undo may put back. */
+const AI_CHANGE = 'the AI change';
+
+/**
+ * Which face of the tab is shown. Founder 2026-10-15: *"2bee.cad should be only
+ * a chat interface and a 3d visualization, no menus, nothing else right now,
+ * may be a save button?"* ⇒ `chat` is the default and the only one offered.
+ *
+ * ⚠ `code` (menus, editor, console) is NOT deleted, only unoffered: it is
+ * reached by `?cad=code` in the URL, which also persists it in this browser
+ * (`?cad=chat` goes back). The browser tests that drive the editor use it.
+ */
+export type CadView = 'chat' | 'code';
+export const CAD_VIEW_KEY = '2bee.app.cad.view';
+export function readCadView(search: string, stored: string | null): CadView {
+  const q = new URLSearchParams(search).get('cad');
+  if (q === 'code' || q === 'chat') return q;
+  return stored === 'code' ? 'code' : 'chat';
+}
+function initialCadView(): CadView {
+  try {
+    const v = readCadView(globalThis.location?.search ?? '', globalThis.localStorage?.getItem(CAD_VIEW_KEY) ?? null);
+    globalThis.localStorage?.setItem(CAD_VIEW_KEY, v);
+    return v;
+  } catch {
+    return 'chat';
+  }
+}
 
 // 2bee.cad stage 2 — an editor, a parse result, and a preview with a kernel
 // behind it.
@@ -119,7 +165,10 @@ import { CAD_DEFAULT_PROJECTION, readProjection, type Projection } from '../proj
 // 🔴 WHAT IS DELIBERATELY NOT COPIED, because a dead control is worse than a
 // missing one and this tab is the wrong place to start faking a surface:
 //
-//   · NO CUSTOMIZER DOCK. It reads `/* [Section] */` annotations and parameter
+//   · NO CUSTOMIZER DOCK. ⚠ CORRECTED 2026-11-13: a Variables panel now sits
+//     above the 3D view (cad/ParamsPanel.tsx, founder "turn on/off features"),
+//     reading the annotations below via cad/params.ts. Still no dock and no
+//     parameter sets. The original reason, kept for the record: It reads `/* [Section] */` annotations and parameter
 //     sets, and `docs/openscad-feature-inventory.md` records that we parse
 //     neither. An empty Customizer would say "this model has no parameters",
 //     which is a claim about the MODEL made by a feature that does not exist.
@@ -387,6 +436,13 @@ const LAYOUT_KEY = '2bee.app.cad.layout';
 interface CadLayout {
   /** Fraction of the main row given to the editor, 0.2…0.8. */
   split: number;
+  /**
+   * The code editor column is hidden and the 3D view takes the whole row —
+   * OpenSCAD's `view/hideEditor` (founder 2026-10-12: hide/collapse the left
+   * sidebar). The editor stays MOUNTED while hidden, so its text, undo history
+   * and error marks are untouched; only its column is not drawn.
+   */
+  editorHidden: boolean;
   /** Height of the bottom dock in CSS pixels. */
   dock: number;
   /** Which bottom tab is showing. */
@@ -505,6 +561,7 @@ export function nextDockTabIndex(key: string, i: number, count: number): number 
 
 export const DEFAULT_LAYOUT: CadLayout = {
   split: 0.44,
+  editorHidden: false,
   dock: 180,
   tab: 'console',
   /* Both true, which is OpenSCAD's default for both, read at
@@ -525,6 +582,9 @@ export function readLayout(raw: string | null | undefined): CadLayout {
         typeof v.split === 'number' && Number.isFinite(v.split)
           ? Math.min(0.8, Math.max(0.2, v.split))
           : DEFAULT_LAYOUT.split,
+      /* Only a stored literal `true` hides the editor: a corrupt preference
+       * must never leave the operator with no code on screen. */
+      editorHidden: v.editorHidden === true,
       dock:
         typeof v.dock === 'number' && Number.isFinite(v.dock)
           ? Math.min(600, Math.max(0, v.dock))
@@ -631,14 +691,31 @@ function Splitter({
  * the same source whichever door was used. A second `buildCadRecord` call
  * beside a copy of its conditions is the thing that eventually disagrees.
  */
+/**
+ * 🔴 WHAT A SAVE OR AN EXPORT IS BUILT FROM: the source and its library, evaluated
+ * AGAIN as a RENDER (`machine.ts`, `$preview` false) — never the viewport's
+ * preview parse/mesh. A record in the drawings list is what the cnc tab sections
+ * and cuts, and an exported STL is what a slicer prints; a source that draws
+ * display-only geometry under `if ($preview)` (the gland plate's 13 mm connector
+ * stubs) wrote that geometry into both until 2026-11-12.
+ */
+interface MachineSource {
+  /** The source the mesh on screen is OF. Never the editor's text. */
+  source: string;
+  library: ScadLibrary;
+  path: string;
+}
+
+/** The record a machine reads, with a FRESH host (see the host note in CadTab). */
+function machineBuild(m: MachineSource, name: string, now: number): MachineBuild {
+  return buildMachineRecord({ name, source: m.source, opts: { host: makeLibraryHost(m.library), path: m.path }, now });
+}
+
 async function writeCadModel(args: {
   name: string;
-  /** The source the mesh is OF. Never the editor's text. */
-  source: string;
-  parse: ScadResult;
-  mesh: MeshResult;
+  machine: MachineSource;
 }): Promise<{ ok: true; stored: string } | { ok: false; why: string }> {
-  const built = buildCadRecord({ ...args, now: Date.now() });
+  const built = machineBuild(args.machine, args.name, Date.now());
   if (!built.ok) return { ok: false, why: `${built.refusal.headline}. ${built.refusal.detail}` };
   try {
     await saveCadModel(built.record, Date.now());
@@ -695,21 +772,20 @@ async function writeCadModel(args: {
  * was removed in the same pass.
  */
 function SaveDialog({
-  source,
-  parse,
-  mesh,
+  machine,
   stale,
   initialName,
+  suggestion,
   onSaved,
   onClose,
 }: {
-  /** The source the mesh is OF. Not the editor's text. */
-  source: string;
-  parse: ScadResult;
-  mesh: MeshResult;
+  /** The source the mesh is OF (not the editor's text), re-evaluated as a render for the record. */
+  machine: MachineSource;
   stale: boolean;
   /** The name this model already has, if it has one. */
   initialName: string;
+  /** Prefill for a model with no name yet (`saveName.ts`); made unique against the saved list once it is read. */
+  suggestion: string;
   /** Told the exact text that was stored AND the name it was stored under. */
   onSaved(source: string, name: string): void;
   onClose(): void;
@@ -735,6 +811,14 @@ function SaveDialog({
       .catch((e) => setNote(`could not read the saved drawings: ${String(e)}`));
   }, []);
   useEffect(refreshNames, [refreshNames]);
+  const typed = useRef(false);
+  const nameInput = useRef<HTMLInputElement | null>(null);
+  // Prefill only after the list is read: a prefill that is a saved name would turn Save into a silent Replace.
+  useEffect(() => {
+    if (!namesRead || initialName || typed.current) return;
+    setName(uniqueName(suggestion, existing.map((e) => e.name)));
+    requestAnimationFrame(() => nameInput.current?.select());
+  }, [namesRead, existing, initialName, suggestion]);
 
   /* 🔴 THE SAME GATE, CALLED TWICE, rather than one call plus a copy of its
    * conditions. This build is thrown away — it exists only so the control can
@@ -743,10 +827,7 @@ function SaveDialog({
    * STL twice is cheap; a second implementation of "may this be saved" is the
    * thing that eventually disagrees with the first. The placeholder name only
    * reaches the STL's 80-byte header. */
-  const preview: CadBuild = useMemo(
-    () => buildCadRecord({ name: 'preview', source, parse, mesh, now: 0 }),
-    [source, parse, mesh]
-  );
+  const preview: CadBuild = useMemo(() => machineBuild(machine, 'preview', 0), [machine]);
 
   const clean = name.trim();
   const hit = namesRead ? existing.find((e) => e.name === clean) : undefined;
@@ -798,7 +879,7 @@ function SaveDialog({
     setBusy(true);
     setNote('');
     try {
-      const out = await writeCadModel({ name: clean, source, parse, mesh });
+      const out = await writeCadModel({ name: clean, machine });
       if (!out.ok) {
         setNote(`NOT saved — ${out.why}`);
         return;
@@ -831,17 +912,25 @@ function SaveDialog({
         searchPlaceholder="name…"
         items={rows}
         selectedIds={taken ? [clean] : []}
-        onChange={(ids) => setName(ids[0] ?? '')}
+        onChange={(ids) => {
+          typed.current = true;
+          setName(ids[0] ?? '');
+        }}
         emptyMessage="Nothing is saved in this browser yet, so nothing can be replaced — whatever you name this is a new record."
       />
 
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '8px 0' }}>
         <input
           data-testid="cad-save-name"
+          ref={nameInput}
           aria-label="name this model"
           value={name}
           placeholder="name this model…"
-          onChange={(e) => setName(e.target.value)}
+          onFocus={(e) => e.currentTarget.select()}
+          onChange={(e) => {
+            typed.current = true;
+            setName(e.target.value);
+          }}
           style={{
             flex: '1 1 200px',
             minWidth: 160,
@@ -951,6 +1040,96 @@ function SaveDialog({
  * gave `resolved` a `<code>` wrapper and no longer does — the cost of one writer,
  * and paid deliberately.
  */
+/**
+ * The chat view's save: one name box and one button (founder 2026-10-15,
+ * *"may be a save button?"*). Same guards as {@link SaveDialog}, not fewer:
+ * the same `writeCadModel` (so the same audit refusal), no save while the mesh
+ * is behind the source, and a name that already exists says REPLACE, because
+ * `store.ts::save()` keys on the name and the old record is gone after it.
+ */
+function QuickSave({
+  machine,
+  stale,
+  initialName,
+  suggestion,
+  onSaved,
+  onClose,
+}: {
+  machine: MachineSource;
+  stale: boolean;
+  initialName: string;
+  /** Prefill for a design that has no saved name yet (`saveName.ts`); made unique against the saved list. */
+  suggestion: string;
+  onSaved: (storedSource: string, name: string) => void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(initialName);
+  const [names, setNames] = useState<string[] | null>(null);
+  const typed = useRef(false);
+  const nameInput = useRef<HTMLInputElement | null>(null);
+  // Prefill once the saved list is known, so the prefill is never a name that would silently REPLACE a record.
+  useEffect(() => {
+    if (names === null || initialName || typed.current) return;
+    setName(uniqueName(suggestion, names));
+    requestAnimationFrame(() => nameInput.current?.select());
+  }, [names, initialName, suggestion]);
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    listSaved('drawings')
+      .then((items) => setNames(items.map((i) => i.name)))
+      .catch((e) => setNote(`Could not read the saved list: ${String(e)}`));
+  }, []);
+  const clean = name.trim();
+  const taken = names?.includes(clean) ?? false;
+  const blocked = stale ? 'Wait a moment, the model is still updating.' : !clean ? null : names === null ? 'Reading the saved list…' : null;
+  const save = async () => {
+    if (!clean || blocked || busy) return;
+    setBusy(true);
+    const out = await writeCadModel({ name: clean, machine });
+    setBusy(false);
+    if (!out.ok) {
+      setNote(`Not saved: ${out.why}`);
+      return;
+    }
+    onSaved(out.stored, clean);
+    onClose();
+  };
+  return (
+    <form
+      className="cad-quick-save"
+      data-testid="cad-quick-save"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void save();
+      }}
+    >
+      <input
+        autoFocus
+        ref={nameInput}
+        data-testid="cad-quick-save-name"
+        value={name}
+        placeholder="Name this design"
+        maxLength={120}
+        onFocus={(e) => e.currentTarget.select()}
+        onChange={(e) => {
+          typed.current = true;
+          setName(e.target.value);
+          setNote('');
+        }}
+      />
+      <button type="submit" className="primary" disabled={!clean || !!blocked || busy} data-testid="cad-quick-save-go">
+        {taken ? 'Replace' : 'Save'}
+      </button>
+      <button type="button" onClick={onClose}>
+        Cancel
+      </button>
+      {taken ? <span className="warn">Replaces the saved “{clean}”.</span> : null}
+      {blocked || note ? <span className={note ? 'bad' : 'note'}>{note || blocked}</span> : null}
+    </form>
+  );
+}
+
 function missReason(m: LibraryMiss): string {
   switch (m.why) {
     case 'no-library':
@@ -1010,9 +1189,7 @@ function ImportReport({ misses, reads }: { misses: readonly LibraryMiss[]; reads
 }
 
 /** An empty file, with the one sentence a blank editor cannot say for itself. */
-const BLANK = `// A new, empty 2bee.cad model. Millimetres and degrees.
-// Nothing is saved anywhere until you save it into the drawings list below.
-`;
+const BLANK = BLANK_MODEL;
 
 /**
  * A read-only answer the menu produced. Never a modal — it cannot trap focus.
@@ -1028,7 +1205,8 @@ interface MenuReport {
   tone?: 'bad';
 }
 
-export function CadTab() {
+/** `initialView` overrides the stored/URL choice — the dock tests render the code view. */
+export function CadTab({ initialView, onOpenIn }: { initialView?: CadView; onOpenIn?: (target: 'cnc' | '3d') => void } = {}) {
   /**
    * 🔴 THE EDITOR'S TEXT, WHAT IS ON DISK, AND WHAT A REPLACEMENT DISPLACED —
    * one value, in `replace.ts`, whose rules are pure and asserted.
@@ -1107,6 +1285,17 @@ export function CadTab() {
   const [sessionKept, setSessionKept] = useState(true);
 
   const [layout, setLayout] = useState<CadLayout>(readStoredLayout);
+  const [view] = useState<CadView>(() => initialView ?? initialCadView());
+  /** A frame of the animation, shown instead of the static mesh while Play runs. */
+  const [animMesh, setAnimMesh] = useState<AnimMesh | null>(null);
+  const [opening, setOpening] = useState<'cnc' | '3d' | null>(null);
+  const [cadAutoAsk, setCadAutoAsk] = useState<{ nonce: number; text: string } | null>(null);
+  /* Founder 2026-11-13: click a part in the 3D view and a reference to it lands in
+   * the AI prompt, so "make THIS thicker" names one item. Added to the prompt, never sent. */
+  const [cadPick, setCadPick] = useState<{ nonce: number; text: string } | null>(null);
+  /* Founder 2026-11-13: "when I click new clear up the AI history". The chat is
+   * remounted with a new key: messages, prompt and any request in flight go. */
+  const [chatKey, setChatKey] = useState(0);
   const patch = useCallback((p: Partial<CadLayout>) => {
     setLayout((old) => {
       const next = { ...old, ...p };
@@ -1137,6 +1326,12 @@ export function CadTab() {
   }, [src, library, selfPath]);
   const result = parsed.result;
   const lines = useMemo(() => sceneLines(result.scene), [result]);
+  const libraryFiles = useMemo(() => Object.fromEntries(library.files), [library]);
+  /** Play is offered when the design or ANY file it reads mentions `$t` (an animation usually lives in an included file). */
+  const animated = useMemo(
+    () => mentionsT(src) || parsed.reads.some((r) => mentionsT(library.files.get(r) ?? '')),
+    [src, parsed.reads, library],
+  );
 
   // The source the MESH is currently of. Parsing again from it is microseconds
   // and keeps this a pure function of one string, rather than a second copy of
@@ -1153,12 +1348,78 @@ export function CadTab() {
    * about which constructs were refused. A record built from one and the other
    * would carry a refusal list belonging to a different source: the one thing
    * saved with a part that must not be about a different part. */
-  const meshParse = useMemo(
-    () => parseScad(meshSrc, { host: makeLibraryHost(library), path: selfPath }),
-    [meshSrc, library, selfPath],
-  );
-  const mesh = useMemo(() => meshScene(meshParse.scene), [meshParse]);
-  const stale = meshSrc !== src;
+  /**
+   * 🔴 THE PARSE AND THE MESH RUN ON THE MAIN THREAD AND CAN TAKE SECONDS, AND
+   * UNTIL 2026-09-09 NOTHING ON SCREEN SAID SO. Opening a large design from the
+   * Designs tab froze the tab mid-switch: no spinner, no message, no repaint —
+   * because both `useMemo`s ran in the SAME render as the source change, so the
+   * browser never got a frame in which to show that work had started.
+   *
+   * `useDeferredValue` buys exactly that frame. React paints once with the
+   * PREVIOUS mesh and `building === true`, then recomputes. Nothing about the
+   * computation changed; what changed is that the user is told it is happening.
+   *
+   * ⚠ IT IS NOT A PERCENTAGE AND MUST NOT BECOME ONE. `parseScad`/`meshScene`
+   * are synchronous and expose no progress, so any number here would be
+   * invented — the "describes the plan, not the output" defect, on a progress
+   * indicator. The overlay says WHICH stage and how long it has been running.
+   */
+  const deferredMeshSrc = useDeferredValue(meshSrc);
+  const building = deferredMeshSrc !== meshSrc;
+  /* 🔴 BOTH CALLS ARE WRAPPED, AND THE REASON IS #163. `parseScad` and
+   * `meshScene` run SYNCHRONOUSLY ON THE MAIN THREAD, here, in a render. A throw
+   * out of either is not caught by anything in this file: React unmounts the
+   * subtree and the visitor gets a blank tab that says nothing at all.
+   *
+   * ⚠ IT IS NOT HYPOTHETICAL AND IT IS NOT OUR OWN GEOMETRY THAT FOUND IT. The
+   * external-design shelf hands this reader files nobody here wrote — a
+   * `RangeError: Maximum call stack size exceeded` came out of
+   * `Adam-CAD/CADAM` `benchmarks/13-v8-engine.scad` on the verifier's first real
+   * run. Three unbounded recursions have since been given depth guards that
+   * REFUSE by name, which is the real fix; this is the backstop for the fourth
+   * one nobody has found yet.
+   *
+   * 🔴 A CAUGHT FAILURE IS RENDERED AS A REFUSAL, NOT SWALLOWED. The message goes
+   * into the same `errors` / `issues` channels the reader already shows, so the
+   * tab keeps the editor and says what happened — which is the whole difference
+   * between "this file was refused, here is why" and a white screen. */
+  const meshParse = useMemo(() => {
+    try {
+      return parseScad(deferredMeshSrc, { host: makeLibraryHost(library), path: selfPath });
+    } catch (e) {
+      return {
+        ...parseScad('', { host: makeLibraryHost(library), path: selfPath }),
+        errors: [{ line: 1, message: `the reader failed on this source: ${e instanceof Error ? e.message : String(e)}` }],
+      };
+    }
+  }, [deferredMeshSrc, library, selfPath]);
+  const mesh = useMemo(() => {
+    try {
+      return meshScene(meshParse.scene);
+    } catch (e) {
+      const empty = meshScene({ kind: 'group', label: 'refused', children: [], line: 1 });
+      return {
+        ...empty,
+        trust: 'nothing' as const,
+        issues: [
+          {
+            severity: 'refused' as const,
+            name: 'the whole model',
+            line: 1,
+            detail:
+              `the mesher failed on this scene: ${e instanceof Error ? e.message : String(e)}. Nothing is drawn. ` +
+              'This is a DEFECT in the reader, not a property of the source — a refusal names a limit, and this ' +
+              'did not.',
+            alters: 'geometry' as const,
+          },
+        ],
+      };
+    }
+  }, [meshParse]);
+  /* ⚠ `stale` compares the EDITOR's text to the source the mesh is of, which is
+   * now the DEFERRED one — otherwise the badge would go clean while a build was
+   * still in flight, which is the direction that lies. */
+  const stale = deferredMeshSrc !== src;
   const dirty = src !== baseline;
 
   const goToLine = useCallback((line: number) => editor.current?.goToLine(line), []);
@@ -1182,6 +1443,8 @@ export function CadTab() {
    * Clearing costs one dialog; not clearing costs a record.
    */
   const [savedName, setSavedName] = useState<string | null>(opened?.savedName ?? null);
+  /** The catalogue title of the design last opened from the Designs tab: the first choice for the Save prefill. */
+  const [designTitle, setDesignTitle] = useState<string | null>(null);
 
   const replaceEditor = useCallback((what: string, next: string, named: string | null = null) => {
     setEd((s) => replaceWith(s, { next, what, isStored: named !== null }));
@@ -1215,6 +1478,13 @@ export function CadTab() {
       for (const [path, source] of Object.entries(d.files)) files.set(path, source);
       setLibrary({ files, rootName: 'Designs', pickedAt: Date.now(), skipped: [] });
       setSelfPath(d.path);
+      setDesignTitle(d.title);
+      /* The design page's "New design" is New too: a fresh chat. */
+      if (d.id === 'new') {
+        setChatKey((k) => k + 1);
+        setCadPick(null);
+        setCadAutoAsk(null);
+      }
       replaceEditor(`the design "${d.title}"`, d.source, null);
     },
     [replaceEditor],
@@ -1227,11 +1497,40 @@ export function CadTab() {
   }, [acceptDesign]);
 
 
+  const onPickPart = useCallback(
+    (p: PartPick) => {
+      setCadPick({ nonce: Date.now(), text: pickReference(p) });
+      /* The code view keeps the prompt in the Ask pane; bring it up. The chat view always shows its prompt. */
+      if (view !== 'chat') patch({ tab: 'ask' });
+    },
+    [view, patch],
+  );
+
+  /* Founder 2026-11-13: change a design variable (turn a feature on/off) from a
+   * control. It is an ordinary undoable edit of that one literal in the source. */
+  const onParam = useCallback((p: Param, v: ParamValue) => {
+    setEd((s) => {
+      try {
+        return replaceWith(s, { next: setParam(s.src, p, v), what: `${p.name} = ${String(v)}` });
+      } catch {
+        return s;
+      }
+    });
+  }, []);
+
   /** A save moved what is on disk, and gave this model a name. */
   const onSaved = useCallback(
     (storedSource: string, name: string) => {
       setBaseline(storedSource);
       setSavedName(name);
+      /* Founder 2026-11-13: "when I save the design in cad save the thumb with it so
+       * it will appear in the design list". Same capture as "Save thumbnail", filed
+       * under the saved name, which is the Mine card's title (shop/mine.ts). A
+       * refused capture does not fail the save: the card then shows the old picture
+       * or none, and "Save thumbnail" still reports why. */
+      const cv = shell.current?.querySelector<HTMLCanvasElement>('[data-testid="cad-preview-canvas"]');
+      const url = cv ? captureCanvas(cv) : null;
+      if (url) saveThumbnail(name, url);
       /* After a save the record and the editor agree, which is exactly what the
        * marker exists to deny. */
       setRestored(false);
@@ -1381,8 +1680,18 @@ export function CadTab() {
    * bytes from the same encoder, so they refuse on the same terms, and the one
    * way to guarantee that is to ask the same function.
    */
+  /* The input to every write (Save, Save as, Export STL). Built lazily, as a
+   * RENDER, at the moment of writing — see `MachineSource`. */
+  const machine: MachineSource = useMemo(
+    () => ({ source: deferredMeshSrc, library, path: selfPath }),
+    [deferredMeshSrc, library, selfPath],
+  );
+  const machineRecord = useCallback((name: string) => machineBuild(machine, name, 0), [machine]);
+  /* ⚠ `exportBuild` is the VIEWPORT's audit, kept only as the early reason on a
+   * disabled Save control. It no longer produces bytes: every write re-builds
+   * through `machineBuild` and refuses on that build's own verdict. */
   const exportBuild = useMemo(
-    () => buildCadRecord({ name: 'export', source: meshSrc, parse: meshParse, mesh, now: 0 }),
+    () => buildCadRecordForView({ name: 'export', source: meshSrc, parse: meshParse, mesh, now: 0 }),
     [meshSrc, meshParse, mesh],
   );
   const saveBlocked = stale
@@ -1482,6 +1791,13 @@ export function CadTab() {
     (id: string) => {
       switch (id) {
         case 'file.new':
+          /* The previous design's title and path go too: a new model kept under the old
+           * title would be offered the old name on Save. The old text stays on Undo. */
+          setSelfPath('');
+          setDesignTitle(null);
+          setChatKey((k) => k + 1);
+          setCadPick(null);
+          setCadAutoAsk(null);
           replaceEditor('New', BLANK);
           break;
         case 'file.example':
@@ -1515,7 +1831,7 @@ export function CadTab() {
             setReport({ title: 'Save REFUSED — nothing was written', lines: [saveBlocked], tone: 'bad' });
             break;
           }
-          void writeCadModel({ name: savedName, source: meshSrc, parse: meshParse, mesh }).then((out) => {
+          void writeCadModel({ name: savedName, machine }).then((out) => {
             if (out.ok) onSaved(out.stored, savedName);
             else setReport({ title: 'Save REFUSED — nothing was written', lines: [out.why], tone: 'bad' });
           });
@@ -1533,12 +1849,16 @@ export function CadTab() {
           queueMicrotask(() => savePanel.current?.scrollIntoView({ block: 'nearest' }));
           break;
         case 'file.export.stl': {
-          if (!exportBuild.ok || stale) {
+          /* 🔴 THE FILE IS THE RENDER, built now from the meshed source — not the
+           * viewport's preview mesh (`machineRecord` / `MachineSource`). */
+          const built = stale ? null : machineRecord('export');
+          if (!built || !built.ok) {
             /* 🔴 THE REFUSAL IS THE ONE THING IN THIS SLOT THAT GOT LOUDER.
              * With the success alert gone, this is the only report that appears
              * unbidden — so it is marked, rather than looking like the answer
              * `Help → About` gives. */
-            setReport({ title: 'Export REFUSED — no file was written', lines: [saveBlocked ?? 'refused'], tone: 'bad' });
+            const why = built && !built.ok ? `${built.refusal.headline}. ${built.refusal.detail}` : (saveBlocked ?? 'refused');
+            setReport({ title: 'Export REFUSED — no file was written', lines: [why], tone: 'bad' });
             break;
           }
           /* 🔴 THE BYTES ARE THE RECORD'S, and the record was built from the
@@ -1546,7 +1866,7 @@ export function CadTab() {
            * which differs for 250 ms after every keystroke. An STL whose
            * geometry belongs to a different string than the one on screen is
            * exactly the plausible-wrong-part this lane exists to refuse. */
-          const rec = exportBuild.record;
+          const rec = built.record;
           const blob = new Blob([rec.bytes as BlobPart], { type: 'model/stl' });
           const a = document.createElement('a');
           a.href = URL.createObjectURL(blob);
@@ -1604,12 +1924,18 @@ export function CadTab() {
                 'shape is complete, the appearance is not in it.'
               : '';
 
+          /* The resolution-ladder tier (machine.ts): said whenever the file is NOT at the print
+           * resolution, because a coarser part is a fact about the file on the operator's disk. */
+          const coarserLine = resolutionSentence(built.resolution);
+
           if (absences.length > 0) {
             setReport({
               title: 'The exported STL is MISSING something',
-              lines: [...absences, colourLine].filter(Boolean),
+              lines: [...absences, coarserLine, colourLine].filter(Boolean),
               tone: 'bad',
             });
+          } else if (coarserLine) {
+            setReport({ title: 'The exported STL was built at a coarser resolution', lines: [coarserLine, colourLine].filter(Boolean) });
           } else if (colourLine) {
             setReport({ title: 'The exported STL carries no colour', lines: [colourLine] });
           }
@@ -1701,6 +2027,9 @@ export function CadTab() {
         case 'view.tree':
           patch({ tab: 'tree' });
           break;
+        case 'view.hide-editor':
+          patch({ editorHidden: !layout.editorHidden });
+          break;
         case 'view.reset-layout':
           setLayout(DEFAULT_LAYOUT);
           writeLayout(DEFAULT_LAYOUT);
@@ -1748,7 +2077,8 @@ export function CadTab() {
     },
     [
       replaceEditor,
-      exportBuild,
+      machine,
+      machineRecord,
       stale,
       saveBlocked,
       jumpTargets,
@@ -1761,6 +2091,7 @@ export function CadTab() {
       onSaved,
       layout.axes,
       layout.scaleMarkers,
+      layout.editorHidden,
       openSettings,
     ],
   );
@@ -1779,6 +2110,7 @@ export function CadTab() {
         axes: layout.axes,
         scaleMarkers: layout.scaleMarkers,
         projection: layout.projection,
+        editorHidden: layout.editorHidden,
       }),
     /* ⚠ `ed.past`/`ed.future`, NOT `ed`. The whole editor state changes on every
      * keystroke and the two labels change only when the history does — depending
@@ -1798,6 +2130,7 @@ export function CadTab() {
        * the menu was last built — the control would work and look like it had
        * not. A memo dependency omitted is a stale green in the plainest form. */
       layout.projection,
+      layout.editorHidden,
     ],
   );
 
@@ -1881,6 +2214,171 @@ export function CadTab() {
     return () => window.removeEventListener('beforeunload', onLeave);
   }, [dirty]);
 
+  const printers = readPrinters(globalThis.localStorage ?? null)
+    .filter((p) => p.fields.buildX !== null && p.fields.buildY !== null && p.fields.buildZ !== null)
+    .map((p) => ({ name: p.name, build: [p.fields.buildX!, p.fields.buildY!, p.fields.buildZ!] as [number, number, number] }));
+  const gatesNow = cadGates({ parse: meshParse, mesh, building: building || stale, printers });
+  if (view === 'chat') {
+    return (
+      <div data-testid="cad-tab" data-view="chat" ref={shell} className="cad-simple">
+        <CadChat
+          key={chatKey}
+          source={src}
+          scad={{ host: makeLibraryHost(library), path: selfPath }}
+          onApply={(next) => replaceEditor(AI_CHANGE, next)}
+          onUndo={canUndoAction(ed, AI_CHANGE) ? () => setEd(undoEditor) : null}
+          cfg={askCfg}
+          onPatch={patchAsk}
+          autoAsk={cadAutoAsk}
+          insert={cadPick}
+        />
+        <div className="cad-simple-view">
+          <div className="cad-simple-bar">
+            {saveShowing ? (
+              <QuickSave
+                machine={machine}
+                stale={stale}
+                initialName={savedName ?? ''}
+                suggestion={suggestSaveName({ savedName, title: designTitle, path: selfPath, source: deferredMeshSrc })}
+                onSaved={onSaved}
+                onClose={() => setSaveShowing(false)}
+              />
+            ) : (
+              <>
+                {/* Founder 2026-11-13: "how can I create a new cad design? where is the new button?" */}
+                <button type="button" data-testid="cad-new" title="Start an empty design; the current text stays on Undo" onClick={() => runCommand('file.new')}>
+                  New
+                </button>
+                <CadSpec selfPath={selfPath} savedName={savedName} source={src} onAsk={(text) => setCadAutoAsk({ nonce: Date.now(), text })} />
+                {report ? (
+                  <span className={report.tone === 'bad' ? 'bad' : 'note'} data-testid="cad-menu-report" title={report.lines.join(' ')}>
+                    {report.title}
+                  </span>
+                ) : dirty ? (
+                  <span className="note" data-testid="cad-dirty">
+                    {savedName ? `Not saved · ${savedName}` : 'Not saved'}
+                  </span>
+                ) : savedName ? (
+                  <span className="note">Saved · {savedName}</span>
+                ) : null}
+                {/* Founder 2026-10-16: "when I am in cad able to open the current cad in cnc
+                    or 3d". The SAME routes as the design page's buttons (shop/toCnc.ts):
+                    cnc gets the model laid flat and saved to the drawings list (cad's own
+                    Save checks), where automatic placement positions it; 3d gets an STL,
+                    which the slicer arranges on the plate. The model on screen is sent,
+                    saved or not. */}
+                {onOpenIn
+                  ? (['cnc', '3d'] as const).map((target) => (
+                      <button
+                        key={target}
+                        type="button"
+                        data-testid={`cad-open-${target}`}
+                        disabled={opening !== null || stale || !cadMaySend(gatesNow, target)}
+                        title={stale ? 'Wait for the model to finish updating' : !cadMaySend(gatesNow, target) ? (gatesNow.find((g) => g.state !== 'PASS' && (g.id === (target === 'cnc' ? 'cnc' : 'print') || !['cnc', 'print'].includes(g.id)))?.why ?? '') : `Send this model to ${target}`}
+                        onClick={() => {
+                          const title = savedName ?? (selfPath ? selfPath.split('/').pop()!.replace(/\.scad$/, '') : 'cad model');
+                          const files = Object.fromEntries(library.files);
+                          const path = selfPath || `${title}.scad`;
+                          files[path] = deferredMeshSrc;
+                          const d = { id: `cad:${title}`, title, path, source: deferredMeshSrc, files };
+                          setOpening(target);
+                          setReport(null);
+                          void (async () => {
+                            try {
+                              if (target === 'cnc') {
+                                const r = await designToCnc(d);
+                                if (!r.ok) throw new Error(r.why);
+                                requestOpenIn('cnc', { id: d.id, title, cnc: r.cnc });
+                              } else {
+                                const r = await designToStl(d);
+                                if (!r.ok) throw new Error(r.why);
+                                requestOpenIn('3d', { ...d, stl: r.stl });
+                              }
+                              onOpenIn(target);
+                            } catch (e) {
+                              setReport({ title: `Not sent to ${target}`, lines: [String(e instanceof Error ? e.message : e)], tone: 'bad' });
+                            } finally {
+                              setOpening(null);
+                            }
+                          })();
+                        }}
+                      >
+                        {opening === target ? `Sending to ${target}…` : `Open in ${target}`}
+                      </button>
+                    ))
+                  : null}
+                {/* Founder 2026-10-15: "remove the thumbnail from cnc, add it to cad".
+                    Stored under the saved name, else the design's catalogue path, so
+                    the design page can find it (cnc/thumbnail.ts readThumbnail). */}
+                <button
+                  type="button"
+                  data-testid="cad-save-thumb"
+                  title="Store this 3D view as the design's picture on the design page"
+                  onClick={() => {
+                    const cv = shell.current?.querySelector<HTMLCanvasElement>('[data-testid="cad-preview-canvas"]');
+                    const url = cv ? captureCanvas(cv) : null;
+                    const key = savedName ?? (selfPath || null);
+                    const ok = !!url && !!key && saveThumbnail(key, url);
+                    setReport({
+                      title: ok ? `Thumbnail saved for "${key}"` : key ? 'Thumbnail NOT saved' : 'Save the design first, then its thumbnail',
+                      lines: ok ? ['The design page shows it on that design.'] : key ? ['This browser refused to store it, or nothing was drawn.'] : ['A new model has no name to file the picture under.'],
+                      ...(ok ? {} : { tone: 'bad' as const }),
+                    });
+                  }}
+                >
+                  Save thumbnail
+                </button>
+                <button
+                  type="button"
+                  className="primary"
+                  data-testid="cad-save"
+                  title={saveBlocked ?? 'Save this design to your list'}
+                  onClick={() => {
+                    setReport(null);
+                    runCommand('file.save');
+                  }}
+                >
+                  Save
+                </button>
+              </>
+            )}
+          </div>
+          <ParamsPanel source={src} onChange={onParam} />
+          <div className="cad-simple-canvas">
+            {animated ? (
+              <CadAnim source={deferredMeshSrc} path={selfPath} files={libraryFiles} onFrame={setAnimMesh} />
+            ) : null}
+            {building ? (
+              <div className="cad-building" role="status" aria-live="polite" data-testid="cad-building">
+                <progress aria-label="Building the model" />
+                <span>Updating the model…</span>
+              </div>
+            ) : null}
+            <CadPreview
+              result={animMesh ?? mesh}
+              stale={stale}
+              showAxes={layout.axes}
+              showScaleMarkers={layout.scaleMarkers}
+              projection={layout.projection}
+              initialCamera={opened?.camera ?? null}
+              onCameraChange={onCameraChange}
+              onPickPart={onPickPart}
+            />
+          </div>
+        </div>
+        <GatesPanel
+          gates={gatesNow}
+          storeKey="2bee.app.cad.gates"
+          onFix={() => {
+            const bad = gatesNow.filter((g) => g.state === 'FAIL');
+            if (bad.length) setCadAutoAsk({ nonce: Date.now(), text: `Fix the design so these checks pass, keeping its purpose: ${bad.map((g) => `${g.name}: ${g.why}`).join(' ')}` });
+          }}
+          fixNotes={cadAutoAsk ? ['Asked the design assistant to fix it (see the chat); the gates re-check the result.'] : []}
+        />
+      </div>
+    );
+  }
+
   return (
     <div
       data-testid="cad-tab"
@@ -1913,6 +2411,15 @@ export function CadTab() {
             decision to a reader who did not ask and names nothing they can act
             on. It is in this file's header, where it belongs. */}
         <MenuBar menus={menus} onCommand={runCommand} />
+        <button
+          type="button"
+          data-testid="cad-editor-toggle"
+          aria-pressed={layout.editorHidden}
+          title={layout.editorHidden ? 'Show the code editor' : 'Hide the code editor (View → Hide editor)'}
+          onClick={() => patch({ editorHidden: !layout.editorHidden })}
+        >
+          {layout.editorHidden ? 'Show code' : 'Hide code'}
+        </button>
 
         {/* 🔴 SILENT WHEN CLEAN, MARKED WHEN DIRTY — the same cut as the audit
             verdict. `no unsaved changes` fires when things are fine, which is
@@ -2096,11 +2603,10 @@ export function CadTab() {
           <SaveDialog
             /* 🔴 THE MESHED SOURCE, NOT THE EDITOR'S. They differ for 250 ms
              * after every keystroke and the record stores the meshed one. */
-            source={meshSrc}
-            parse={meshParse}
-            mesh={mesh}
+            machine={machine}
             stale={stale}
             initialName={savedName ?? ''}
+            suggestion={suggestSaveName({ savedName, title: designTitle, path: selfPath, source: deferredMeshSrc })}
             onSaved={onSaved}
             onClose={() => setSaveShowing(false)}
           />
@@ -2113,17 +2619,18 @@ export function CadTab() {
         style={{ flex: 1, minHeight: 120, display: 'flex', flexDirection: 'row', minWidth: 0 }}
       >
         <div
+          data-testid="cad-editor-column"
           style={{
             flex: `0 0 ${(layout.split * 100).toFixed(2)}%`,
             minWidth: 0,
-            display: 'flex',
+            display: layout.editorHidden ? 'none' : 'flex',
             flexDirection: 'column',
           }}
         >
           <CadEditor ref={editor} value={src} onChange={setSrc} marks={marks} />
         </div>
 
-        <Splitter
+        {layout.editorHidden ? null : <Splitter
           vertical
           label="editor and 3D view split"
           testid="cad-split-main"
@@ -2132,10 +2639,21 @@ export function CadTab() {
             if (w <= 0) return;
             patch({ split: Math.min(0.8, Math.max(0.2, layout.split + px / w)) });
           }}
-        />
+        />}
 
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-          <div style={{ flex: 1, minHeight: 0 }}>
+          <ParamsPanel source={src} onChange={onParam} />
+          <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+            {building ? (
+              <div className="cad-building" role="status" aria-live="polite" data-testid="cad-building">
+                <progress aria-label="Building the model" />
+                <span>Parsing and meshing this design…</span>
+                <span className="cad-building-note">
+                  This runs on this thread and cannot be sampled, so there is no percentage. The picture
+                  below is the PREVIOUS model until it finishes.
+                </span>
+              </div>
+            ) : null}
             <CadPreview
               result={mesh}
               stale={stale}
@@ -2149,6 +2667,7 @@ export function CadTab() {
                * purpose. See its note in `preview.tsx`. */
               initialCamera={opened?.camera ?? null}
               onCameraChange={onCameraChange}
+              onPickPart={onPickPart}
             />
           </div>
           {/* 🔴 THE SAVE PANEL IS NO LONGER PARKED HERE. It was a permanent
@@ -2287,11 +2806,14 @@ export function CadTab() {
              * two different stashes is how an operator presses the one that
              * puts back the wrong thing. */
             <AskPanel
+              key={chatKey}
               source={src}
               onApply={(next) => replaceEditor('the model proposal', next)}
               cfg={askCfg}
               onPatch={patchAsk}
               onOpenSettings={openSettings}
+              insert={cadPick}
+              scad={{ host: makeLibraryHost(library), path: selfPath }}
             />
           ) : (
             <div

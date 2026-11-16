@@ -34,6 +34,9 @@ import {
   handleCallback,
   isAdmin,
   isTokenExpired,
+  loadTokens,
+  saveTokens,
+  clearTokens,
   login,
   logout,
   type TokenSet,
@@ -103,6 +106,7 @@ export default function AuthGate({ children }: AuthGateProps) {
             setState('not-admin');
             return;
           }
+          saveTokens(tokens);
           setToken(tokens);
           setState('authed');
         })
@@ -111,8 +115,15 @@ export default function AuthGate({ children }: AuthGateProps) {
           if (alive) setState('unauth');
         });
     } else {
-      // No callback — user needs to log in.
-      setState('unauth');
+      // No callback: a token this TAB stored before a refresh, re-checked, or sign in.
+      const stored = loadTokens();
+      if (stored && !isTokenExpired(stored) && isAdmin(stored)) {
+        setToken(stored);
+        setState('authed');
+      } else {
+        clearTokens();
+        setState(stored ? 'expired' : 'unauth');
+      }
     }
 
     return () => { alive = false; };
@@ -124,16 +135,18 @@ export default function AuthGate({ children }: AuthGateProps) {
     if (!token || state !== 'authed') return;
     const remaining = token.received_at + token.expires_in * 1000 - Date.now();
     if (remaining <= 30_000) {
+      clearTokens();
       setState('expired');
       return;
     }
-    const timer = setTimeout(() => setState('expired'), remaining - 30_000);
+    const timer = setTimeout(() => { clearTokens(); setState('expired'); }, remaining - 30_000);
     return () => clearTimeout(timer);
   }, [token, state]);
 
   const handleLogin = useCallback(() => { login(); }, []);
   const handleLogout = useCallback(() => {
     setToken(null);
+    clearTokens();
     logout();
   }, []);
 

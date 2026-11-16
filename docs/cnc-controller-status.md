@@ -34,6 +34,12 @@ USB at `/dev/ttyACM0` — enumerating as `STM32 Virtual ComPort`.
 Gate **CTRL** exercised with `tools/controller_probe.py` against `rect-profile` fixture.
 Result: **47/50 lines answered; the last 3 (M5, G0 Z5.000, M30) were never answered at all.**
 
+⚠ **2026-11-15 — "never answered" may be the probe's own timeout, not the board.** `M5`
+waits for the planner to empty before its `ok`; the moves queued ahead of it take ~16.8 s
+against the probe's 10 s window, and the `$I` sent next would then read that late `ok`.
+Inferred, not re-run. `tools/controller_probe.py` now waits while the board reports it is
+busy, refuses a program stop (`M0`) on a rig that moves, and soft-resets on exit.
+
 ⚠ **CORRECTED 2026-08-27 — this line read "3 rejected".** The transcript records
 `replies: []` and `verdict: null` for all three. **A rejection and a silence are different
 findings with different owners.** "Rejected by grblHAL" is a claim about *our dialect* and sends

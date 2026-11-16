@@ -158,15 +158,16 @@ test("brand's light/dark rule is what the stylesheet actually wires", () => {
   );
 });
 
-test('the mark is in the tab row, and the dead product name is not in the header', () => {
+test('the mark, tabs and toggle are in the header row, and the dead product name is not in it', () => {
   /* Structural only: this asserts the MARKUP, and nobody has looked at the page.
    * That the row LOOKS right — the mark aligned, the toggle at the far edge — is
    * a human's call and is not claimed here. */
   const app = readFileSync(join(import.meta.dirname, '..', 'src', 'App.tsx'), 'utf8');
-  const row = app.slice(app.indexOf('<div className="tabrow">'), app.indexOf('<TabPanel id="cnc"'));
-  assert.ok(row.includes('className="mark"'), 'the tab row carries no mark');
-  assert.ok(row.includes('data-testid="theme-toggle"'), 'the theme toggle is not in the tab row');
-  assert.ok(row.includes('<TabBar'), 'the tab row does not hold the tab bar');
+  /* One header row since 2026-10-15: mark, name, tabs and the toggle together. */
+  const row = app.slice(app.indexOf('<header className="topbar">'), app.indexOf('</header>'));
+  assert.ok(row.includes('className="mark"'), 'the header row carries no mark');
+  assert.ok(row.includes('data-testid="theme-toggle"'), 'the theme toggle is not in the header row');
+  assert.ok(row.includes('<TabBar'), 'the header row does not hold the tab bar');
 
   /* 🔴 THE PRODUCT NAME. `2bee.slicer` was renamed on 2026-08-09 and this header
    * kept shipping it. Comments may still discuss the old name — that is how the

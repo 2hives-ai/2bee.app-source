@@ -158,6 +158,12 @@ export interface ObjectItem {
   /** True ⇒ present in the list, visible, readable, but not selectable. */
   disabled?: boolean;
   /**
+   * A short reason this row is a problem, shown in RED on its row and chip
+   * (founder 2026-10-15: "when there is no tool in the repository highlight it
+   * in red on the list"). Still selectable: the host decides what it means.
+   */
+  warn?: string;
+  /**
    * `true` for the built-ins — the shipped machine presets, the tool library,
    * the sample drawings. They can be EDITED and then only kept with "Save as":
    * the built-in itself never changes, so a shop can always get back to a known
@@ -1612,7 +1618,7 @@ export default function ObjectPicker({
         {mode === 'multi' && selectedItems.length > 0 ? (
           <span className="op-chips" data-testid={`${testid}-chips`}>
             {shownChips.map((it) => (
-              <span className="op-chip" key={it.id} title={it.name} data-testid={`${testid}-chip-${it.id}`}>
+              <span className={`op-chip${it.warn ? ' op-warn' : ''}`} key={it.id} title={it.warn ? `${it.name} — ${it.warn}` : it.name} data-testid={`${testid}-chip-${it.id}`}>
                 <span className="op-chip-name">{it.name}</span>
                 <span
                   role="button"
@@ -1805,7 +1811,8 @@ export default function ObjectPicker({
                   role="option"
                   aria-selected={selected.has(it.id)}
                   aria-disabled={it.disabled === true}
-                  className={`op-opt${i === activeIndex ? ' op-active' : ''}`}
+                  className={`op-opt${i === activeIndex ? ' op-active' : ''}${it.warn ? ' op-warn' : ''}`}
+                  title={it.warn}
                   /* 🔴 HOVER MOVES THE PREVIEW AND DOES NOT COUNT AS CHOOSING.
                      Corrected 2026-08-27, hours after `activeChosen` was added
                      with `chooseActive(i)` here — which reintroduced the very

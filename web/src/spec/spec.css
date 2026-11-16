@@ -1,0 +1,49 @@
+/* The specification card + drawer (spec/SpecPanel.tsx). Colours from the brand tokens. */
+.spec-card {
+  display: flex; align-items: center; gap: 8px; font-size: 13px;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
+  padding: 4px 8px; min-width: 0;
+}
+.spec-card-title { font-weight: 600; }
+.spec-card-src { color: var(--muted); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spec-card-src.none { color: var(--bad); }
+.spec-card button { padding: 2px 10px; font-size: 12px; }
+.spec-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 60;
+  width: min(640px, 100vw); box-sizing: border-box;
+  display: flex; flex-direction: column; gap: 8px; padding: 14px 16px;
+  background: var(--panel); color: var(--ink);
+  border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgb(0 0 0 / 25%);
+  overflow-y: auto; font-size: 14px;
+}
+.spec-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.spec-label { font-size: 12px; color: var(--muted); border-left: 3px solid var(--line); padding-left: 8px; }
+.spec-label.ai { color: var(--bad); border-left-color: var(--bad); font-weight: 600; }
+.spec-note { font-size: 12px; }
+.spec-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.spec-drawer button.primary { background: var(--accent); border-color: var(--accent); color: var(--color-on-amber, #1a1a1a); font-weight: 600; }
+.spec-drawer button.primary:disabled { opacity: .5; }
+.spec-edit { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
+.spec-edit textarea {
+  flex: 1; min-height: 50vh; resize: vertical; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--ink); background: var(--color-bg, transparent); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px;
+}
+.spec-review { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; font-size: 13px; }
+.spec-review.change { border-color: var(--accent); }
+.spec-review.ok { border-color: var(--ok); }
+.spec-review.bad { color: var(--bad); }
+.spec-review p { margin: 4px 0; }
+.spec-review ul, .spec-review ol { margin: 4px 0; padding-left: 20px; }
+.spec-review-h { font-weight: 600; margin-top: 6px; }
+.spec-draft { display: flex; flex-direction: column; gap: 8px; }
+.spec-md { line-height: 1.5; }
+.spec-md h2 { font-size: 17px; margin: 14px 0 6px; }
+.spec-md h3 { font-size: 15px; margin: 12px 0 4px; }
+.spec-md h4, .spec-md h5, .spec-md h6, .spec-md h7 { font-size: 14px; margin: 10px 0 4px; }
+.spec-md p { margin: 6px 0; }
+.spec-md ul, .spec-md ol { margin: 4px 0; padding-left: 22px; }
+.spec-md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: color-mix(in srgb, var(--line) 40%, transparent); padding: 0 3px; border-radius: 3px; }
+.spec-md pre { overflow-x: auto; padding: 8px; border: 1px solid var(--line); border-radius: var(--radius); }
+.spec-md pre code { background: none; padding: 0; }
+.spec-md table { border-collapse: collapse; font-size: 12px; display: block; overflow-x: auto; }
+.spec-md th, .spec-md td { border: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; }

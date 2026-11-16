@@ -139,9 +139,12 @@ function refusalCopyProblems(html: string): string[] {
     ? section(html, 'run-refusal-index')
     : '';
   for (const id of index.match(/R\d+/g) ?? []) {
-    const explained = [...html.matchAll(/data-testid="run-refused-[^"]*"[^>]*>([^<]*)/g)].some(
-      (m) => m[1].includes(id) && m[1].replace(id, '').trim().length > 4
-    );
+    // The whole element, tags stripped: since 2026-10-12 a control shows its
+    // first reason and folds the rest into a <details> inside the same element
+    // (`RefusalReasons`), so text after the first tag is still beside the control.
+    const explained = [...html.matchAll(/data-testid="(run-refused-[^"]*)"/g)]
+      .map((m) => section(html, m[1]).replace(/<[^>]*>/g, ' '))
+      .some((text) => text.includes(id) && text.replace(id, '').trim().length > 4);
     if (!explained) out.push(`${id} is indexed with no reason beside any control`);
   }
   return out;
@@ -203,6 +206,17 @@ test('🔴 PLANT §9.1 — a refusal that lost its reason goes RED', () => {
     problems.some((p) => /R1/.test(p)),
     `a refusal with no reason anywhere was not caught: ${JSON.stringify(problems)}`
   );
+});
+
+test('🔴 PLANT §9.1 — the FOLDED reasons going missing goes RED (founder 2026-10-12)', () => {
+  const clean = renderToStaticMarkup(h(RunTab, { tracked: connected(), now: 0 }));
+  assert.ok(clean.includes('<details'), 'precondition: some control folds its later reasons');
+  /* The defect a "fewer words" change invites: the fold keeps the first reason
+   * and quietly drops the rest. Every folded id is still in the index, so the
+   * sweep must notice that nothing beside a control explains it. */
+  const planted = clean.replace(/<details[\s\S]*?<\/details>/g, '');
+  assert.notEqual(planted, clean, 'the plant did not apply');
+  assert.ok(refusalCopyProblems(planted).length > 0, 'dropping the folded reasons was not caught');
 });
 
 test('🔴 PLANT §9.1 — the list printing the sentence a second time goes RED', () => {

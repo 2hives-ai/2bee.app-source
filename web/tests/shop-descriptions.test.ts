@@ -131,15 +131,50 @@ test('every withheld design is absent, and its reason is dated and does not read
     /* ⚠ NOT in cad's list — it has no registered part name, so their population
      * cannot see it, and its TITLE is the one that states the cancelled setup. */
     '2bee_entrance/2bee_entrance_dual_queen_assembly.scad',
-    /* ceo's 2026-09-05 ruling: an unregistered generation whose own tree does not
-     * say whether it is live. A DIFFERENT reason from the five above, named here
-     * individually so swapping one group for another cannot pass on a count. */
-    '2bee_sensor_pod_v2/pod_v2_carrier.scad',
-    '2bee_sensor_pod_v2/pod_v2_devboard.scad',
-    '2bee_sensor_pod_v2/pod_v2_enclosure.scad',
   ]) {
     assert.ok(!listed.has(p), `${p} is LISTED — it publishes a cancelled configuration`);
     assert.ok(withheld.has(p), `${p} is absent from the catalogue but not RECORDED as withheld`);
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+   * 🔴 RETIRED UPSTREAM — A THIRD STATE, ADDED 2026-09-17 BECAUSE THE TEST COULD
+   * NOT EXPRESS IT AND SAID SOMETHING FALSE INSTEAD.
+   * ═══════════════════════════════════════════════════════════════════════════
+   *
+   * The three `2bee_sensor_pod_v2/` designs were named in the loop above. `cad`
+   * then DELETED the directory (`470c198dfe`: *"superseded by v3, zero live
+   * importers, verified byte-identical renders before deletion"*) — correct work
+   * by the lane that owns the tree.
+   *
+   * ⚠ THIS TEST WENT RED AND BLAMED THE WRONG THING. Its message read
+   * *"absent from the catalogue but not RECORDED as withheld"*, which points a
+   * reader straight at the generator. The generator was fine: it cannot withhold
+   * a file that is not there. ⇒ ***A control that has two states for a three-state
+   * world reports the nearest wrong one, confidently.***
+   *
+   * 🔴 AND DELETING THE THREE NAMES WOULD HAVE BEEN THE WORSE FIX. This test
+   * exists so a design cannot leave the catalogue silently; removing a name to
+   * make it green is the silent departure, performed by hand. So the names stay
+   * and change CLASS, with the upstream commit that moved them.
+   *
+   * The assertion runs in BOTH directions, which is what makes it a control
+   * rather than a comment: the file must be gone from `cad`'s tree AND absent
+   * from the catalogue. If `cad` restores it, this goes red and says to move the
+   * path back to the withheld list above — a returning design must not quietly
+   * reappear unexamined either. */
+  const RETIRED: Record<string, string> = {
+    '2bee_sensor_pod_v2/pod_v2_carrier.scad': '470c198dfe (cad, 2026-09-17): superseded by v3, zero live importers',
+    '2bee_sensor_pod_v2/pod_v2_devboard.scad': '470c198dfe (cad, 2026-09-17): superseded by v3, zero live importers',
+    '2bee_sensor_pod_v2/pod_v2_enclosure.scad': '470c198dfe (cad, 2026-09-17): superseded by v3, zero live importers',
+  };
+  for (const [p, why] of Object.entries(RETIRED)) {
+    assert.ok(
+      !existsSync(join(CAD, p)),
+      `${p} is BACK in cad's tree (retired as ${why}) — it must return to the withheld ` +
+        'list above and be re-examined, not silently re-enter the catalogue',
+    );
+    assert.ok(!listed.has(p), `${p} is LISTED and its source does not exist`);
+    assert.ok(!withheld.has(p), `${p} is withheld, but its source is gone — withholding a file that does not exist reads as a live decision about a live design`);
   }
 
   /* Withholding must be visible, not silent: a design that vanishes without a
@@ -183,7 +218,18 @@ test('every withheld design is absent, and its reason is dated and does not read
    * which is the opposite of what this file is for. The group is the set of
    * paths; the reason is what has to stay true about it. */
   assert.equal(index.withheld.filter((w: any) => w.path.startsWith('2bee_entrance/')).length, 5);
-  assert.equal(index.withheld.filter((w: any) => w.path.startsWith('2bee_sensor_pod_v2/')).length, 3);
+  /* ⚠ WAS `2bee_sensor_pod_v2/ === 3`. That group no longer exists — see RETIRED
+   * above — and a pinned count of a deleted group can only ever be wrong. What
+   * replaces it is the property the count was standing in for: nothing may be
+   * withheld whose source is not in cad's tree, because such a row reads as a
+   * live decision about a live design and nobody will ever clear it. */
+  for (const w of index.withheld) {
+    assert.ok(
+      existsSync(join(CAD, w.path)),
+      `${w.path} is withheld but has no source in cad's tree — a withholding ` +
+        'outlives its design and becomes a permanent unexplained absence',
+    );
+  }
 });
 
 test('no card says dual queen', (t) => {

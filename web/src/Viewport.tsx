@@ -7,6 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { dragMode } from './view3d/mouse';
 import {
   decodeLoadedMesh,
   decodeStockSurface,
@@ -38,6 +39,7 @@ import {
   orthoFrustum,
   worldPerPixel,
   type Projection,
+  zoomTowardCursor,
 } from './projection';
 
 /* ═══ WEBGL MAY SIMPLY NOT BE THERE, AND THAT MUST NOT COST THE PROGRAM ══════
@@ -232,6 +234,14 @@ export interface ViewportProps {
    */
   zDatum: ZDatumName;
   clamps: ClampCfg[];
+  /**
+   * Names of the clamps that were MOVED to where `clamps` puts them, at a
+   * mid-job stop — drawn in the clamp-move orange instead of the clamp red.
+   * Absent/empty on a job whose clamps never move.
+   */
+  clampsMoved?: string[];
+  /** Where the moved clamps stood BEFORE the stop: drawn as outlines only. */
+  clampGhosts?: ClampCfg[];
   moves: RenderMove[];
   /**
    * **The travel envelope** — how far the cutter can REACH, from the machine
@@ -255,6 +265,14 @@ export interface ViewportProps {
    * in those words instead of printing a number it does not have.
    */
   travelZMm?: number | null;
+  /**
+   * Draw the MACHINE around the work as a wireframe: side rails outside the
+   * travel and a gantry across it (founder 2026-10-15, cnc chat view: "add the
+   * machine into the canvas"). LINES ONLY, on purpose — a solid under the work
+   * would claim a support surface nobody declared (see "TWO RECTANGLES" below).
+   * It follows the travel layer's eye.
+   */
+  machineFrame?: boolean;
   /**
    * **The sacrificial sheet, and where it is bolted** — `Report.spoilboard`,
    * passed through verbatim.
@@ -664,7 +682,9 @@ export interface ViewportProps {
  * control list that quietly shrinks makes the second look like the first.
  */
 export type Layer =
-  | RenderKind
+  // `zero` (set Z zero by hand, no probe) is drawn on the `change` layer: it is
+  // the second half of the cutter change, not a class of its own to hide.
+  | Exclude<RenderKind, 'zero'>
   | 'workpiece'
   | 'tool'
   | 'touch'
@@ -713,6 +733,9 @@ export const LAYERS: Layer[] = [
   'drill',
   'rapid',
   'change',
+  // The clamp-move STOP (founder 2026-10-16): its own class beside the cutter
+  // change, because the two are different procedures at the machine.
+  'clamp',
   'probe',
   'workpiece',
   // Second to last, beside the bed and for the same reason: work holding is a
@@ -762,6 +785,7 @@ export const LAYER_LABEL: Record<Layer, string> = {
   drill: 'drill',
   rapid: 'rapid',
   change: 'tool change',
+  clamp: 'clamp move (stop)',
   probe: 'probe move',
   workpiece: 'workpiece',
   // Both words, for the same reason `bed` carries both: "work holding" is what
@@ -785,7 +809,7 @@ export const LAYER_LABEL: Record<Layer, string> = {
  * is the one place the "not in this program, so not offered" rule is written
  * and it is called from two surfaces.
  */
-const MOVE_LAYERS: Layer[] = ['cut', 'tab', 'drill', 'rapid', 'change', 'probe'];
+const MOVE_LAYERS: Layer[] = ['cut', 'tab', 'drill', 'rapid', 'change', 'clamp', 'probe'];
 
 /**
  * Which SIDEBAR PANEL owns each layer — founder, 2026-08-11: *"put it into the
@@ -826,6 +850,7 @@ export const LAYER_SECTION: Record<Layer, string> = {
   drill: 'panel-op',
   rapid: 'panel-op',
   change: 'panel-op',
+  clamp: 'panel-op',
   probe: 'panel-op',
   result: 'panel-verify',
 };
@@ -855,6 +880,7 @@ export const LAYER_DEFAULTS: Record<Layer, boolean> = {
   drill: true,
   rapid: true,
   change: true,
+  clamp: true,
   probe: true,
   workpiece: true,
   // Work holding starts VISIBLE for the same reason the reach does, only
@@ -1290,7 +1316,14 @@ const COLOR: Record<string, number> = {
   rapid: 0x9e9e9e,
   change: 0xc62828,
   probe: 0x6a1b9a,
+  // The clamp-move stop. Orange, NOT the clamp red: the stop is an instruction
+  // to MOVE a clamp, and a moved clamp is drawn in this same colour so the
+  // marker on the timeline and the clamp in the scene read as one thing.
+  clamp: 0xef6c00,
 };
+
+/** The moved-clamp / clamp-stop colour, as CSS — the SAME number `COLOR.clamp` draws with. */
+export const CLAMP_MOVE_CSS = '#ef6c00';
 
 /**
  * The clamp red — ONE number, read by the mesh material and by the legend
@@ -2842,8 +2875,11 @@ export const SCENE_DEP_NAMES = [
   'boardDepth',
   'spoilboardPositionAssumed',
   'travelZMm',
+  'machineFrame',
   'zDatum',
   'otherWorkpieces',
+  'clampsMoved',
+  'clampGhosts',
 ] as const;
 
 /**
@@ -2941,6 +2977,7 @@ export function sceneDeps(p: ViewportProps): readonly unknown[] {
     p.boardDepth,
     p.spoilboardPositionAssumed,
     p.travelZMm,
+    p.machineFrame,
     /* 🔴 THE DATUM IS SCENE GEOMETRY. It is the triad's Z root (`axesRootZMm`),
      * so a declaration that reached the render but not this list would leave the
      * arrows at the last datum while every Z word in the program moved by a
@@ -2950,6 +2987,10 @@ export function sceneDeps(p: ViewportProps): readonly unknown[] {
     p.zDatum,
     // Other workpieces are scene GEOMETRY (ghost outlines), so they rebuild.
     p.otherWorkpieces,
+    // Value key: the playhead re-renders this up to 20 times a second and a
+    // fresh array of the same names must not count as a change.
+    (p.clampsMoved ?? []).join('|'),
+    p.clampGhosts,
   ];
 }
 
@@ -3164,6 +3205,13 @@ export function Viewport(props: ViewportProps) {
   useEffect(() => {
     const el = host.current;
     if (!el) return;
+    /* 🔴 RESET FIRST (2026-10-15). `framedFor` is a ref and outlives this effect.
+     * Under React StrictMode (the dev server) this setup runs, is torn down and
+     * runs again with the orbit back at its defaults, while `framedFor` still
+     * holds the sheet the FIRST run framed, so the scene effect never framed the
+     * second camera: 2bee.cnc opened zoomed into a corner of the sheet on every
+     * dev load. Same defect and fix as `framedOnce` in cad/preview.tsx. */
+    framedFor.current = null;
 
     /* 🔴 GUARDED, AND THE EARLY RETURN IS THE WHOLE FIX. Unguarded, this line
      * threw straight out of the effect and took the entire application with it
@@ -3806,7 +3854,7 @@ export function Viewport(props: ViewportProps) {
         ];
         if (idx !== undefined && idx >= 0) rows.push(['Move', `${idx + 1} of ${d.total}`]);
         return {
-          title: `Toolpath — ${LAYER_LABEL[kind] ?? kind}`,
+          title: `Toolpath — ${(kind === 'zero' ? LAYER_LABEL.change : LAYER_LABEL[kind]) ?? kind}`,
           rows,
           // 🔴 The whole reason this panel is short. A rendered move carries
           // `kind`, `x`, `y`, `z` and nothing else. A feed, an operation name
@@ -4026,7 +4074,8 @@ export function Viewport(props: ViewportProps) {
         }
       }
       dragging = true;
-      panning = e.button === 2 || e.shiftKey;
+      /* Founder 2026-10-16, every 3D: left-drag MOVES (pans; an object where moving is allowed — handled above), right-drag (or alt+left) ROTATES. */
+      panning = dragMode(e) === 'pan';
       lx = e.clientX;
       ly = e.clientY;
       (e.target as Element).setPointerCapture?.(e.pointerId);
@@ -4303,7 +4352,32 @@ export function Viewport(props: ViewportProps) {
     };
     const wheel = (e: WheelEvent) => {
       e.preventDefault();
+      const before = radius;
       radius = Math.min(9000, Math.max(120, radius * (e.deltaY > 0 ? 1.12 : 0.9)));
+      /* 🔴 ZOOM TOWARD THE POINTER. The line above is untouched — same factor,
+       * same direction, still byte-identical to the other viewport and still
+       * matching OpenSCAD. What this adds is the LATERAL shift that keeps the
+       * thing you are pointing at under the pointer; zooming toward the middle
+       * of the screen while the part you are looking at sits in a corner is what
+       * makes a 3D view feel like it is fighting you. See `zoomTowardCursor`.
+       *
+       * ⚠ ONE DEFINITION, NOT A COPY. Both viewports call the same function in
+       * `projection.ts`, which they already both import, so there is no second
+       * copy for the parity test to have to police. */
+      {
+        const r = dom.getBoundingClientRect();
+        const z = zoomTowardCursor({
+          offsetX: e.clientX - r.left - r.width / 2,
+          offsetY: e.clientY - r.top - r.height / 2,
+          viewH,
+          before,
+          after: radius,
+          theta,
+          phi,
+        });
+        target.x += z.x;
+        target.y += z.y;
+      }
       place();
     };
     const ctx = (e: Event) => {
@@ -4825,6 +4899,24 @@ export function Viewport(props: ViewportProps) {
     const travelLine = new THREE.Line(travelGeo, travelMat);
     travelLine.name = 'travel';
     scene.add(travelLine);
+
+    if (props.machineFrame) {
+      const zTop = bedZ + Math.max(40, props.travelZMm ?? 100) + 40;
+      const frameMat = track(new THREE.LineBasicMaterial({ color: 0x8a8f86, transparent: true, opacity: 0.85 }));
+      const edgeBox = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number) => {
+        const g = track(new THREE.EdgesGeometry(new THREE.BoxGeometry(x1 - x0, y1 - y0, z1 - z0)));
+        const m = new THREE.LineSegments(g, frameMat);
+        m.position.set((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+        m.name = 'travel-grid';
+        scene.add(m);
+      };
+      const rail = 40, gap = 30;
+      edgeBox(-gap - rail, -gap, bedZ - 80, -gap, ty + gap, bedZ); // left rail
+      edgeBox(tx + gap, -gap, bedZ - 80, tx + gap + rail, ty + gap, bedZ); // right rail
+      edgeBox(-gap - rail, ty * 0.5 - 40, zTop, tx + gap + rail, ty * 0.5 + 40, zTop + 60); // gantry beam
+      edgeBox(-gap - rail, ty * 0.5 - 40, bedZ, -gap, ty * 0.5 + 40, zTop); // gantry legs
+      edgeBox(tx + gap, ty * 0.5 - 40, bedZ, tx + gap + rail, ty * 0.5 + 40, zTop);
+    }
 
     // --- spoilboard: the only rectangle here made of anything ---------------
     //
@@ -5499,9 +5591,10 @@ export function Viewport(props: ViewportProps) {
     // board as floating in the air.
     for (const c of props.clamps) {
       const g = track(new THREE.BoxGeometry(c.w, c.h, c.height_mm));
+      const moved = (props.clampsMoved ?? []).includes(c.name);
       const m = track(
         new THREE.MeshStandardMaterial({
-          color: CLAMP_COLOR,
+          color: moved ? COLOR.clamp : CLAMP_COLOR,
           transparent: true,
           opacity: 0.5,
           flatShading: true,
@@ -5510,8 +5603,8 @@ export function Viewport(props: ViewportProps) {
           // A declared obstruction is an ACTIVE thing on the bed, so it takes
           // the low emissive the house look reserves for exactly that. The hue
           // is unchanged: this is the clamp red, lifted, not restyled.
-          emissive: CLAMP_COLOR,
-          emissiveIntensity: 0.22,
+          emissive: moved ? COLOR.clamp : CLAMP_COLOR,
+          emissiveIntensity: moved ? 0.45 : 0.22,
         })
       );
       const mesh = new THREE.Mesh(g, m);
@@ -5520,6 +5613,18 @@ export function Viewport(props: ViewportProps) {
       mesh.userData.index = props.clamps.indexOf(c);
       mesh.castShadow = true;
       scene.add(mesh);
+    }
+    // Where a moved clamp stood BEFORE the stop — edges only, never a solid:
+    // nothing is there any more, and a solid would read as a second clamp.
+    // Not pickable (no `clamp:` name), hidden with the clamps.
+    for (const c of props.clampGhosts ?? []) {
+      const g = track(new THREE.EdgesGeometry(track(new THREE.BoxGeometry(c.w, c.h, c.height_mm))));
+      const m = track(new THREE.LineDashedMaterial({ color: COLOR.clamp, dashSize: 4, gapSize: 3 }));
+      const ghost = new THREE.LineSegments(g, m);
+      ghost.computeLineDistances();
+      ghost.position.set(c.x + c.w / 2, c.y + c.h / 2, -sz + c.height_mm / 2);
+      ghost.name = `clampghost:${c.name}`;
+      scene.add(ghost);
     }
     // The LOADED OBJECT — the mesh the user imported, as loaded.
     //
@@ -6082,19 +6187,21 @@ export function Viewport(props: ViewportProps) {
     let prev: RenderMove | null = null;
     for (let i = 0; i < upTo; i++) {
       const m = props.moves[i];
-      if (m.kind === 'change' || m.kind === 'probe') {
+      if (m.kind === 'change' || m.kind === 'probe' || m.kind === 'clamp' || m.kind === 'zero') {
         // 🔴 A tool change and a probe are POINTS, not travel: the core emits
         // them at the last position and safe Z. They used to be dropped from
         // the scene entirely, which would have made their toggles controls
         // that do nothing — and a dead control is worse than a missing one.
         // Drawn as a three-axis cross so the operator can see WHERE the
-        // program stops and asks for something.
-        (byKind[m.kind] ||= []).push(
+        // program stops and asks for something. A hand Z zero (no probe) is
+        // part of the cutter change it follows, so it is drawn on that layer.
+        const k = m.kind === 'zero' ? 'change' : m.kind;
+        (byKind[k] ||= []).push(
           m.x - cross, m.y, m.z, m.x + cross, m.y, m.z,
           m.x, m.y - cross, m.z, m.x, m.y + cross, m.z,
           m.x, m.y, m.z - cross, m.x, m.y, m.z + cross
         );
-        (idxOf[m.kind] ||= []).push(i, i, i);
+        (idxOf[k] ||= []).push(i, i, i);
         prev = m;
         continue;
       }
@@ -6129,8 +6236,8 @@ export function Viewport(props: ViewportProps) {
     const remByKind: Record<string, number[]> = {};
     for (let i = upTo; i < props.moves.length; i++) {
       const m = props.moves[i];
-      if (m.kind === 'change' || m.kind === 'probe') {
-        (remByKind[m.kind] ||= []).push(
+      if (m.kind === 'change' || m.kind === 'probe' || m.kind === 'clamp' || m.kind === 'zero') {
+        (remByKind[m.kind === 'zero' ? 'change' : m.kind] ||= []).push(
           m.x - cross, m.y, m.z, m.x + cross, m.y, m.z,
           m.x, m.y - cross, m.z, m.x, m.y + cross, m.z,
           m.x, m.y, m.z - cross, m.x, m.y, m.z + cross
@@ -6358,7 +6465,7 @@ export function Viewport(props: ViewportProps) {
         // core, gate P7 still checks the toolpath against every one of them,
         // and the snap in `neighboursFor` still treats them as neighbours —
         // that reads `state.current.clamps`, the declared data, not the scene.
-        else if (o.name.startsWith('clamp:')) o.visible = vis.clamps !== false;
+        else if (o.name.startsWith('clamp:') || o.name.startsWith('clampghost:')) o.visible = vis.clamps !== false;
         // 🔴 THE BOARD AND ITS BARE STRIPS GO TOGETHER. The strips are the
         // reachable area the board does NOT cover; leaving them on their own
         // would draw the absence of a thing that is not on screen, and leaving
@@ -6727,6 +6834,7 @@ export function Viewport(props: ViewportProps) {
           added here needs its own `pointerEvents: 'auto'`, exactly as `hover-panel`
           two blocks below already does. */}
       <div
+        className="vp-notes"
         style={{
           position: 'absolute',
           top: 8,

@@ -62,8 +62,11 @@ import { existsSync, readdirSync, rmSync } from 'node:fs';
 
 const DEV = `http://127.0.0.1:${process.env.E2E_DEV_PORT ?? 5179}`;
 const WORKER_URL = '/e2e/run18/streamer-fake.worker.ts';
-/* ~1.5 MB of program per leg: at the measured ~1.2-1.5 MB/s this is a ~10 s
- * leg — long enough to read the instrument, short enough for a suite. */
+/* ~16.8 MB of program per leg, NOT 1.5 MB (this said 1.5 until 2026-11-15; a
+ * `G1 X40.000 F2000` line is ~17 bytes, and the Mac Pro run logged
+ * "16775000 B"). At the ~1.2-1.5 MB/s measured on 2026-08-28 that is a ~12 s leg.
+ * ⚠ On the Mac Pro 2026-11-15 the VISIBLE leg ran at ~183 kB/s (91.8 s), so the
+ * hidden leg cannot finish inside runLeg's 120 s: open, see _WORKING. */
 const LINES = 1_000_000;
 
 function have(bin: string): boolean {
@@ -128,7 +131,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 test.describe('RUN-18', () => {
   test('RUN-18 — throughput survives document.visibilityState === "hidden" (test-only worker entry, zero product change)', async () => {
-    test.setTimeout(300_000);
+    test.setTimeout(900_000);
     test.skip(!have('Xvfb') || !have('openbox'), 'RUN-18 needs Xvfb + openbox for a REAL hidden page; headless chromium cannot produce one (measured 2026-08-28)');
 
     const disp = freeDisplay();
@@ -192,14 +195,14 @@ test.describe('RUN-18', () => {
        * 'sent' events per leg are NOT hoarded. The throughput read at 'done' is
        * event-driven, never timer-driven, so it works identically hidden. */
       await eval1(`(() => {
-        const c = { attached: false, failed: null, stalls: 0, done: null, doneThroughput: null, streamState: null, awaitingTput: false };
+        const c = { attached: false, failed: null, stalls: 0, done: null, doneThroughput: null, streamState: null, awaitingTput: false, sent: 0, total: 0 };
         const worker = new Worker(${JSON.stringify(WORKER_URL)}, { type: 'module' });
         worker.addEventListener('message', (e) => {
           const d = e.data;
           if (d.t === 'attached') c.attached = true;
           if (d.t === 'attach-failed') c.failed = d.error;
           if (d.t === 'stall') c.stalls += 1;
-          if (d.t === 'stream') { c.streamState = d.state; if (d.state === 'done' && !c.done) { c.done = { sent: d.sent, total: d.total }; c.awaitingTput = true; worker.postMessage({ t: 'throughput' }); } }
+          if (d.t === 'stream') { c.streamState = d.state; if (typeof d.sent === 'number') c.sent = d.sent; if (typeof d.total === 'number') c.total = d.total; if (d.state === 'done' && !c.done) { c.done = { sent: d.sent, total: d.total }; c.awaitingTput = true; worker.postMessage({ t: 'throughput' }); } }
           if (d.t === 'throughput' && c.awaitingTput) { c.awaitingTput = false; c.doneThroughput = d; }
         });
         window.__run18 = { worker, c };
@@ -216,7 +219,12 @@ test.describe('RUN-18', () => {
       }
       expect(attached, 'the unmodified streamer.worker attached through the test-only fake-serial entry').toBe(true);
 
-      const runLeg = async (label: string) => {
+      /* 🔴 THE CAP IS A HANG GUARD, NOT THE THROUGHPUT CHECK (2026-11-16). It was a flat 120 s, and on the Mac
+       * Pro (Xeon E5-1650 v2, shared with another fleet's builds at load 15-32) the hidden leg ran past it
+       * from 2026-11-15 11:54 while the same box had measured ratio 0.70-0.73 at 05:xx — the test was timing
+       * the BOX. The throughput claim is `ratio > 0.5` below; a leg allowed 4x the visible leg's wall time can
+       * still fail it, and then says by how much, where a timeout said nothing. The timeout names progress. */
+      const runLeg = async (label: string, capMs = 120_000) => {
         await eval1(`(() => {
           const c = window.__run18.c;
           c.done = null; c.doneThroughput = null; c.stalls = 0;
@@ -232,7 +240,12 @@ test.describe('RUN-18', () => {
           );
           if (st.t) return { ...st.t, bps: (st.t.bytes * 1000) / st.t.ms, stalls: st.stalls, wallMs: Date.now() - t0 };
           if (st.state === 'aborted') throw new Error(`${label}: stream aborted`);
-          if (Date.now() - t0 > 120_000) throw new Error(`${label}: stream did not finish in 120 s (state=${st.state})`);
+          if (Date.now() - t0 > capMs) {
+            const p = await eval1<{ sent: number; total: number }>(`({ sent: window.__run18.c.sent, total: window.__run18.c.total })`);
+            throw new Error(
+              `${label}: stream did not finish in ${Math.round(capMs / 1000)} s (state=${st.state}, sent ${p.sent}/${p.total}, stalls=${st.stalls})`,
+            );
+          }
           await sleep(400);
         }
       };
@@ -258,7 +271,7 @@ test.describe('RUN-18', () => {
       console.log(`RUN-18 hidden-page timer check: ${ticks} ticks/2s (visible ≈ 20)`);
       expect(ticks, 'page timers were NOT throttled — the hidden leg was not the condition under test').toBeLessThanOrEqual(8);
 
-      const hidden = await runLeg('hidden');
+      const hidden = await runLeg('hidden', Math.max(120_000, 4 * visible.wallMs));
       console.log(`RUN-18 leg B (hidden):  ${hidden.bytes} B in ${hidden.ms} ms = ${hidden.bps.toFixed(0)} B/s, stalls=${hidden.stalls}`);
 
       await cdp.call('Target.activateTarget', { targetId: tab1 });
@@ -287,7 +300,14 @@ test.describe('RUN-18', () => {
           /* already gone */
         }
       }
-      rmSync(profile, { recursive: true, force: true });
+      /* Retried, and never thrown: Chrome's children can still be writing the profile just after SIGKILL, and an
+       * ENOTEMPTY thrown from this `finally` REPLACED the test's own failure (measured 2026-11-15: a stalls=4 run
+       * reported only "ENOTEMPTY: directory not empty, rmdir …/Default"). */
+      try {
+        rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+      } catch (e) {
+        console.log(`RUN-18 cleanup: could not remove ${profile}: ${String(e)}`);
+      }
       /* SIGKILL leaves the X lock + socket behind, and a stale lock makes the
        * NEXT run's Xvfb refuse that display number. Remove only our own. */
       rmSync(`/tmp/.X${disp}-lock`, { force: true });

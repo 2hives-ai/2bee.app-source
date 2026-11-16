@@ -182,15 +182,28 @@ body {
 .app { display: flex; flex-direction: column; height: 100%; }
 
 .topbar {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; padding: 8px 14px;
+  display: flex; align-items: stretch;
+  flex: none; gap: 12px; padding: 0 14px; min-height: 44px;
   background: var(--header); border-bottom: 1px solid var(--line);
+}
+/* ONE ROW since 2026-10-15 (founder: "push the Designs … Tools to the top
+ * menu"): mark, name, tabs, then the controls at the far edge. The tabs keep
+ * their bottom-border underline, so the row stretches and they reach its edge. */
+.topbar > .mark, .topbar > .brand { align-self: center; }
+.topbar > .tabbar { flex: 1 1 auto; min-width: 0; overflow-x: auto; padding-left: 4px; }
+.topbar > .topright { margin-left: auto; align-self: center; gap: 8px; }
+@media (max-width: 600px) {
+  .topbar { flex-wrap: wrap; padding-top: 6px; }
+  .topbar > .tabbar { flex: 1 1 100%; order: 2; flex-wrap: wrap; overflow-x: visible; padding-left: 0; }
 }
 /* Mark + product name. Two flex children only — the mark, and a `.name` span
  * wrapping the existing <strong>/<span class="sub">, so those two keep their
  * inline baseline relationship instead of becoming flex items themselves. */
 .brand { display: flex; align-items: center; gap: 10px; }
-.brand .mark {
+/* Also the tab row: the mark MOVED there (2026-08-11) and this rule stayed scoped
+ * to `.brand`, so the tab-row copy rendered 0x0 — no mark on any view (seen in
+ * Safari, 2026-10-14). */
+.brand .mark, .tabrow .mark, .topbar > .mark {
   /* 24px is brand's stated minimum rendered width for the mark-only lockup
    * (style-guide-v1.md §2.5) — at the floor, not below it. The 10px gap above
    * clears the 1X clearspace rule at this size. */
@@ -251,6 +264,14 @@ label.inline { display: flex; align-items: center; gap: 6px; color: var(--muted)
  * (AGENTS.md) is that wide content scrolls INSIDE its own container and the body
  * never does; this is that rule applied to the tab bar. */
 .tabrow .tabbar { flex: 1 1 auto; padding-left: 0; min-width: 0; overflow-x: auto; }
+/* On a phone the bar showed about 2 of 6 tabs, with labels cut mid-word ("ee.cnc") and no hint
+ * that it scrolled (journey test, 2026-10-15). Below 600px the tabs WRAP onto a second line, so
+ * every tab is visible and the page still never scrolls sideways. */
+@media (max-width: 600px) {
+  .tabrow { flex-wrap: wrap; }
+  .tabrow .tabbar { flex: 1 1 100%; order: 2; flex-wrap: wrap; overflow-x: visible; }
+  .tabbar .tab { padding: 8px 10px; white-space: nowrap; }
+}
 .tabrow .mark { align-self: center; }
 .tabrow-right { display: flex; align-items: center; gap: 8px; padding-right: 12px; }
 
@@ -654,8 +675,14 @@ em.warn[data-testid="mm-only-slot"] {
 
 /* Wide content scrolls inside its own box; the page never scrolls sideways. */
 @media (max-width: 1100px) {
-  .body { grid-template-columns: 1fr; grid-template-rows: auto 60vh auto; }
-  .side, .report { border: none; border-bottom: 1px solid var(--line); max-height: 42vh; }
+  /* 🔴 FIXED ROW HEIGHTS, NOT `auto`. `.side` and `.report` scroll inside themselves, so their
+   * min-content height is 0, and `auto` rows in this fixed-height grid shrank them to a 20-73px
+   * strip on every phone and on iPad landscape: Machine, Workpiece, Tooling and Operation were
+   * unreachable (journey test, 2026-10-15). Each panel now gets its 42vh, the viewport its 60vh,
+   * and the column scrolls as a whole. */
+  .body { grid-template-columns: 1fr; grid-template-rows: 42vh 60vh 42vh; overflow-y: auto; }
+  .side, .report { border: none; border-bottom: 1px solid var(--line); }
+  .vsplit { display: none; }
 }
 
 /* Quarter-turn buttons in the workpiece panel. */
@@ -719,6 +746,19 @@ em.warn[data-testid="mm-only-slot"] {
 .pm-rapid  { background: #9e9e9e; }
 .pm-change { background: #c62828; }
 .pm-probe  { background: #6a1b9a; }
+/* The clamp-move STOP — the same orange the 3D draws a moved clamp in
+   (`Viewport.tsx` COLOR.clamp / CLAMP_MOVE_CSS). Not the clamp red: the stop is
+   an instruction to MOVE one, and the bar and the scene must read as one thing. */
+.pm-clamp  { background: #ef6c00; min-width: 3px; }
+.pm-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); align-items: center; }
+.pm-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; }
+.pm-legend b { margin-left: auto; font-weight: 600; }
+/* The hand Z zero after a cutter change (no Z probe): the cutter-change red,
+   striped — the same stop, its second half. */
+.pm-zero   { background: repeating-linear-gradient(45deg, #c62828 0 3px, #ffcdd2 3px 6px); min-width: 3px; }
+.pm-stops { margin: 2px 0 0; padding-left: 20px; font-size: 12px; }
+.pm-stop-warn { color: var(--warn); font-weight: 600; }
+.pm-clamp-note { margin: 0; font-size: 12px; border-left: 3px solid #ef6c00; padding: 2px 8px; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; }
 
 /* ── Auth gate (Cognito OIDC login) ───────────────────────────────────────────
@@ -758,6 +798,16 @@ em.warn[data-testid="mm-only-slot"] {
  * verdict is a status, not a new colour family.
  */
 .shop { padding: 24px 28px 48px; max-width: 1400px; margin: 0 auto; }
+/* `cols={44}` on the PnP textareas asks for ~375px, so on a 390px phone the whole tab scrolled
+ * sideways (journey test, 2026-10-15). `cols` stays as the WIDE-screen width; it may not push
+ * past the container. */
+.shop textarea { max-width: 100%; box-sizing: border-box; }
+.shop label { min-width: 0; }
+@media (max-width: 600px) {
+  .shop { padding: 16px 16px 40px; }
+  /* `max-width` alone did not do it: a textarea's min-content width is still its `cols`. */
+  .shop textarea { width: 100%; min-width: 0; }
+}
 .shop-head h1 { margin: 0 0 4px; font-size: 1.6rem; }
 .shop-sub { margin: 0 0 8px; color: var(--muted); }
 .shop-caveat {
@@ -827,6 +877,12 @@ em.warn[data-testid="mm-only-slot"] {
  * not only for Playwright. Full text stays reachable via the `title` attribute
  * and is never truncated in the DOM, so the warning is clipped on screen and
  * intact for anyone reading it. */
+.shop-card-retired,
+.pnp-board-retired {
+  /* pcb's retired / do-not-order marker (pnp/retired.ts): a board that must not be ordered */
+  color: var(--warn);
+  font-weight: 600;
+}
 .shop-card-trust {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   overflow: hidden; margin-top: 6px; font-size: 0.76rem; color: var(--muted);
@@ -863,3 +919,551 @@ em.warn[data-testid="mm-only-slot"] {
 .shop-foot code { font-family: var(--mono); }
 .shop-foot summary { cursor: pointer; }
 .shop-foot ul { max-height: 320px; overflow-y: auto; }
+
+/* ── Opening a design: progress, not a spinner ───────────────────────────────
+   🔴 THE PHASE TEXT IS THE POINT, NOT THE BAR. A spinner says "something is
+   happening"; this says which of three things, so a stall is attributable to a
+   network fetch or to the parse. The last phase is deliberately unmeasurable and
+   the note on screen says so — inventing a percentage for work this component
+   cannot sample is the same defect class as a thumbnail of a part the app will
+   not produce. */
+.shop-progress {
+  display: flex; flex-direction: column; gap: 4px;
+  margin: 0 0 14px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.shop-progress progress { width: 100%; height: 6px; }
+.shop-progress-phase { font-size: 0.85rem; }
+.shop-progress-note { font-size: 0.75rem; color: var(--muted); }
+
+/* ── The external shelf ──────────────────────────────────────────────────────
+   🔴 IT MUST NOT LOOK LIKE THE COMPANY'S OWN SHELF. A visitor who cannot tell
+   these apart has been misled about what 2bee has built, which is a claim
+   defect wearing a stylesheet. Hence the rule above it, the dashed card border,
+   and the licence line rendered on every card rather than stored and unseen. */
+.shop-external { margin-top: 40px; padding-top: 24px; border-top: 2px solid var(--line); }
+.shop-external h2 { margin: 0 0 4px; font-size: 1.25rem; }
+.shop-card-external { border-style: dashed; }
+.shop-card-licence {
+  display: block; margin-top: 6px; font-size: 0.72rem; color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.shop-badge-ext-opens { color: var(--ok); }
+.shop-badge-ext-untested { color: var(--muted); }
+.shop-badge-ext-refused-by-reader { color: var(--warn); }
+
+/* ── 2bee.cad: the model is being built ──────────────────────────────────────
+   The parse and the mesh are synchronous. This overlay exists because React can
+   paint ONE frame before them (see `useDeferredValue` in CadTab) and that frame
+   is the only chance to say the freeze is work rather than a hang. */
+.cad-building {
+  position: absolute; inset: 0; z-index: 3;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  padding: 24px; text-align: center;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(1px);
+}
+.cad-building progress { width: min(280px, 60%); height: 6px; }
+.cad-building-note { font-size: 0.75rem; color: var(--muted); max-width: 46ch; }
+
+/* ── The three-step first screen (src/make/MakeFlow.tsx, founder 2026-10-14) ──
+ * Tokens only. One column, large type, nothing on it that is not a step. */
+.make {
+  /* `.app` is a flex column: without an explicit width, `margin: 0 auto`
+   * shrinks this to its content and the design grid collapses to ONE column
+   * (seen 2026-10-14: a 12,384 px tall page at 1280 px wide). */
+  width: 100%; max-width: 1100px; margin: 0 auto; padding: 12px 20px 40px;
+  box-sizing: border-box; flex: 1 1 auto; overflow: auto;
+}
+.make-group { margin: 6px 0 22px; }
+.make-group h2 { font-size: 1.05rem; margin: 0 0 10px; color: var(--muted); font-weight: 600; }
+.make-steps { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+.make-steps ol { display: flex; gap: 22px; list-style: none; margin: 0; padding: 0; flex: 1; }
+.make-steps li { color: var(--muted); font-weight: 600; }
+.make-steps li.on { color: var(--ink); border-bottom: 2px solid var(--accent); }
+.make-steps li button { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
+.make-expert, .make-link { background: none; border: 0; color: var(--muted); text-decoration: underline; cursor: pointer; font: inherit; padding: 0; }
+.make-body h1 { font-size: 1.5rem; margin: 0 0 14px; }
+.make-body h2 { font-size: 1.1rem; margin: 18px 0 8px; }
+.make-muted { color: var(--muted); }
+.make-warn { color: var(--warn); max-width: 80ch; }
+.make-pic { max-width: 520px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.make-pic img { width: 100%; display: block; aspect-ratio: 3 / 2; object-fit: contain; }
+.make-ask { display: flex; flex-direction: column; gap: 6px; max-width: 520px; margin-top: 14px; }
+.make-ask textarea { font: inherit; padding: 8px 10px; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: var(--radius); }
+.make-change { margin-top: 12px; max-width: 80ch; }
+.make-next, .make-send { margin-top: 18px; font-size: 1.05rem; padding: 10px 22px; border-radius: var(--radius); border: 1px solid var(--accent); background: var(--accent); color: var(--bg); cursor: pointer; }
+.make-next:disabled, .make-send:disabled { opacity: 0.5; cursor: not-allowed; }
+.make-check { padding-left: 1.2em; max-width: 80ch; }
+.make-check li { margin: 8px 0; }
+.make-check small { display: block; color: var(--muted); margin-left: 1.6em; }
+/* The three-step view keeps the header row (mark, name, theme); it has no tabs. */
+
+/* ── The router page (src/run/RouterPage.tsx, founder 2026-10-14) ── */
+.router-top { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; margin-top: 10px; }
+.router-facts th { text-align: left; color: var(--muted); font-weight: 500; padding: 2px 12px 2px 0; }
+.router-facts td { font-family: var(--mono); }
+.router-flags { padding-left: 1.2em; }
+.router-measure { padding-left: 1.2em; }
+.router-measure > li { margin: 6px 0; }
+.router-m-head { background: none; border: 0; padding: 0; font: inherit; color: var(--ink); cursor: pointer; text-align: left; }
+.router-m-body { display: flex; gap: 14px; flex-wrap: wrap; margin: 8px 0 12px; }
+.router-m-body > div { flex: 1 1 280px; max-width: 70ch; }
+.router-input { display: block; margin: 6px 0; }
+.router-input input { width: 8em; }
+.router-v-ok { color: var(--ok); }
+.router-v-adjust { color: var(--warn); }
+.router-v-stop { color: var(--bad); }
+.router-v-pending { color: var(--muted); }
+.make-details { margin-top: 10px; } .make-details summary { cursor: pointer; color: var(--muted); }
+
+/* ── Printer path of the three-step screen: the print job (make/printJob/) ── */
+.print-job { margin-top: 18px; max-width: 80ch; }
+.print-slot { display: block; margin: 6px 0 10px; }
+.print-slot select { font: inherit; padding: 4px 6px; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: var(--radius); max-width: 100%; }
+.print-questions { list-style: none; padding: 0; margin: 0; }
+.print-questions li { margin: 8px 0; }
+.print-q { display: block; margin-bottom: 4px; }
+.print-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.print-chip { font: inherit; font-size: 0.92rem; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+.print-chip[aria-pressed='true'] { border-color: var(--accent); background: var(--accent); color: var(--bg); }
+.print-chip:disabled { opacity: 0.5; cursor: not-allowed; }
+.print-ai { margin-top: 10px; }
+.print-lines { padding-left: 1.2em; margin-top: 12px; }
+.print-lines li { margin: 6px 0; overflow-wrap: anywhere; }
+.print-refused { display: block; }
+.print-lines .make-link { margin-left: 8px; }
+.print-summary ul { padding-left: 1.2em; }
+.print-json { max-width: 100%; overflow-x: auto; font-size: 0.8rem; }
+
+/* ── 2bee.cnc and Jobs (src/cncjob/, founder 2026-10-14) ──────────────────────
+ * pnp's 2bee.3d layout: objects + assistant left, 3D centre, machine cards
+ * below. Brand tokens only. Idle is drawn NEUTRAL, never in the success colour:
+ * the card state is controller status, not safety (pcb 2026-10-15). */
+.cj { padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.cj h1 { font-size: 1.4rem; margin: 0; }
+.cj h2 { font-size: 1.05rem; margin: 0 0 8px; }
+.cj-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.cj-grid { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 16px; }
+@media (max-width: 860px) { .cj-grid { grid-template-columns: minmax(0, 1fr); } }
+.cj-left, .cj-centre { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.cj-panel, .cj-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; min-width: 0; }
+.cj button, .cj input, .cj select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 10px; cursor: pointer; }
+.cj input { cursor: text; }
+.cj button:disabled { opacity: 0.5; cursor: not-allowed; }
+.cj button:hover:not(:disabled) { border-color: var(--accent); }
+.cj button:focus-visible, .cj input:focus-visible, .cj select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cj .cj-primary { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
+.cj .cj-link { background: none; border: 0; text-decoration: underline; color: var(--muted); padding: 0; }
+.cj .cj-danger { border-color: var(--bad); color: var(--bad); }
+.cj-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.cj-muted { color: var(--muted); margin: 0; }
+.cj-small { font-size: 0.78rem; }
+.cj-warn { color: var(--warn); margin: 0; overflow-wrap: anywhere; }
+.cj-ok { color: var(--ok); margin: 0; }
+.cj-items, .cj-pick, .cj-tools, .cj-queue { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.cj-items li { display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: var(--radius); padding: 4px; }
+.cj-items li.on { border-color: var(--accent); }
+.cj .cj-item-pick, .cj-pick button { display: flex; align-items: center; gap: 8px; flex: 1; text-align: left; border: 0; background: none; padding: 2px; min-width: 0; }
+.cj-item-pick small { display: block; color: var(--muted); }
+.cj-item-pick img, .cj-pick img, .cj-noimg { width: 44px; height: 44px; object-fit: contain; background: var(--bg); border-radius: var(--radius); flex: none; }
+.cj-pick { max-height: 320px; overflow-y: auto; margin-top: 8px; }
+.cj-qty { display: inline-flex; align-items: center; gap: 2px; }
+.cj-qty button { padding: 2px 8px; }
+.cj-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.cj .cj-chip { border-radius: 999px; border-color: var(--accent); color: var(--accent); background: transparent; }
+.cj .cj-chip[aria-pressed='true'] { background: var(--accent); color: var(--bg); }
+.cj-ask input { width: 100%; box-sizing: border-box; }
+.cj-proposal { margin-top: 8px; border-left: 3px solid var(--accent); padding-left: 8px; }
+.cj-proposal ul { padding-left: 1.2em; margin: 4px 0; }
+.cj-view { width: 100%; height: 420px; position: relative; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; display: flex; }
+.cj-view > * { flex: 1 1 auto; min-width: 0; }
+.cj-view-empty { align-items: center; justify-content: center; color: var(--muted); padding: 12px; text-align: center; }
+.cj-results { font-family: var(--mono); margin: 0; min-height: 1.4em; }
+.cj-details summary { cursor: pointer; color: var(--muted); }
+.cj-h2 { margin-top: 8px !important; }
+.cj-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.cj-card { display: flex; flex-direction: column; gap: 6px; }
+.cj-card-on { border-color: var(--accent); }
+.cj-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.cj .cj-card-name { border: 0; background: none; padding: 0; font-weight: 600; font-size: 1.05rem; }
+.cj-badge { font-size: 0.75rem; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; text-align: right; }
+.cj-st-run { color: var(--accent); }
+.cj-st-hold { color: var(--warn); }
+.cj-st-alarm { color: var(--bad); }
+.cj-st-idle, .cj-st-off { color: var(--muted); }
+.cj-sim { margin: 0; font-weight: 700; color: var(--warn); letter-spacing: 0.03em; }
+.cj-card-job { display: flex; flex-direction: column; gap: 4px; }
+.cj-bar { height: 8px; background: var(--bg); border-radius: 999px; overflow: hidden; }
+.cj-bar > i { display: block; height: 100%; background: var(--accent); }
+.cj-bar-big { height: 18px; }
+.cj .cj-hold { background: var(--bad); color: var(--bg); border-color: var(--bad); font-weight: 700; }
+.cj-card-add form { display: flex; flex-direction: column; gap: 6px; }
+.cj-card-add label { display: flex; flex-direction: column; gap: 2px; color: var(--muted); font-size: 0.85rem; }
+/* Jobs page: the operator's, at the machine. Big targets. */
+.cj-jobs button { min-height: 44px; }
+.cj-switch { display: flex; flex-wrap: wrap; gap: 8px; }
+.cj .cj-mchip { border-radius: 999px; border-width: 2px; padding: 8px 16px; border-color: currentColor; background: var(--panel); }
+.cj .cj-mchip[aria-pressed='true'] { background: var(--bg); box-shadow: 0 0 0 2px var(--accent); }
+.cj-mchip small { display: block; font-size: 0.75rem; }
+.cj-queue li { display: flex; gap: 8px; align-items: stretch; border: 1px solid var(--line); border-radius: var(--radius); padding: 6px; }
+.cj .cj-qopen { flex: 1; text-align: left; display: flex; flex-direction: column; gap: 2px; border: 0; background: none; min-width: 0; }
+.cj-qopen small { overflow-wrap: anywhere; }
+.cj-qctl { display: flex; gap: 4px; align-items: center; }
+.cj-collet { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.cj-steps { display: flex; gap: 6px; list-style: none; padding: 0; margin: 0 0 12px; flex-wrap: wrap; }
+.cj-steps li button { min-width: 44px; border-radius: 999px; }
+.cj-steps li.on button { border-color: var(--accent); color: var(--accent); }
+.cj-steps li.done button { background: var(--accent); color: var(--bg); }
+.cj-step { display: flex; flex-direction: column; gap: 8px; max-width: 760px; }
+.cj-step p { margin: 0; font-size: 1.1rem; }
+.cj-tick { display: flex; gap: 10px; align-items: center; }
+.cj-tick-big { font-size: 1.2rem; font-weight: 600; padding: 10px 0; }
+.cj-tick-big input { width: 28px; height: 28px; }
+.cj .cj-big { font-size: 1.2rem; padding: 14px 28px; }
+.cj-photo { max-width: 320px; width: 100%; border-radius: var(--radius); }
+.cj-photo-none { padding: 24px; border: 1px dashed var(--line); color: var(--muted); }
+.cj-run { display: flex; flex-direction: column; gap: 12px; }
+.cj .cj-hold-big { font-size: 1.6rem; padding: 26px; width: 100%; }
+.cj .cj-resume { font-size: 1.2rem; padding: 14px 28px; }
+.cj-takeover { position: fixed; inset: 0; z-index: 60; background: var(--bg); padding: 24px; display: flex; flex-direction: column; gap: 12px; align-items: center; justify-content: center; text-align: center; overflow: auto; }
+.cj-takeover h2, .cj-alarm h2 { font-size: 1.8rem; }
+.cj-takeover p { font-size: 1.2rem; margin: 0; }
+.cj-alarm { border: 6px solid var(--bad); color: var(--ink); padding: 24px; text-align: center; border-radius: var(--radius); min-height: 40vh; display: flex; flex-direction: column; justify-content: center; gap: 12px; }
+.cj-note { width: 100%; box-sizing: border-box; }
+
+/* ── 2bee.cad chat view (founder 2026-10-15: "only a chat interface and a 3d
+ *    visualization ... may be a save button"). See cad/CadChat.tsx. ───────── */
+.cad-simple {
+  display: grid; grid-template-columns: minmax(280px, 360px) 1fr; gap: 12px;
+  padding: 12px; height: 100%; min-height: 0; box-sizing: border-box;
+}
+.cad-simple-view { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 8px; }
+.cad-simple-bar { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex: 0 0 auto; }
+.cad-simple-bar .note, .cad-simple-bar .bad { margin: 0; font-size: 13px; }
+.cad-simple-save { flex: 0 0 auto; }
+.cad-simple-canvas { position: relative; flex: 1; min-height: 240px; }
+.cad-chat {
+  display: flex; flex-direction: column; min-height: 0; background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; gap: 10px;
+}
+.cad-chat-head { display: flex; align-items: center; justify-content: space-between; }
+.cad-chat-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 8px; background: none; }
+.cad-chat-status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.cad-chat-status .dot.ok { background: var(--color-status-success, #2e7d4f); }
+.cad-chat-setup { max-height: 50%; overflow: auto; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+.cad-chat-log { flex: 1; min-height: 80px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.cad-chat-msg { padding: 8px 12px; border-radius: 12px; max-width: 92%; font-size: 14px; line-height: 1.45; white-space: pre-wrap; }
+.cad-chat-msg.user { align-self: flex-end; background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.cad-chat-msg.ai { align-self: flex-start; background: var(--bg); border: 1px solid var(--line); }
+.cad-chat-msg.ai.bad { border-color: var(--bad); }
+.cad-chat-msg.busy { color: var(--muted); font-style: italic; }
+.cad-chat-msg.busy { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cad-chat-spin { width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: cad-chat-spin 0.8s linear infinite; }
+@keyframes cad-chat-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .cad-chat-spin { animation-duration: 3s; } }
+.cad-chat-msg ul { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; color: var(--muted); }
+.cad-chat-undo { margin-top: 6px; font-size: 12px; padding: 2px 10px; }
+.cad-chat-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.cad-chat-chips button { border-radius: 999px; font-size: 13px; padding: 4px 12px; }
+.cad-chat-input { display: flex; gap: 8px; align-items: flex-end; }
+.cad-chat-input textarea {
+  flex: 1; resize: none; font: inherit; font-size: 14px; padding: 8px 10px; color: var(--ink);
+  background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius);
+}
+@media (max-width: 760px) {
+  .cad-simple { grid-template-columns: 1fr; grid-template-rows: minmax(300px, 55vh) auto; height: auto; }
+  .cad-simple-view { order: -1; }
+}
+.cad-simple button.primary {
+  background: var(--accent); border-color: var(--accent); color: var(--color-on-amber, #1a1a1a); font-weight: 600; padding: 6px 16px;
+}
+.cad-simple button.primary:disabled { opacity: .5; cursor: not-allowed; }
+.cad-chat-detail { margin-top: 6px; font-size: 12px; color: var(--muted); }
+.cad-chat-detail summary { cursor: pointer; }
+.cad-chat-msg.ai.undone { color: var(--muted); }
+.cad-quick-save { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: flex-end; flex: 1; }
+.cad-quick-save input {
+  flex: 1 1 200px; max-width: 320px; font: inherit; padding: 6px 10px; color: var(--ink);
+  background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.cad-quick-save .warn, .cad-quick-save .note, .cad-quick-save .bad { flex-basis: 100%; text-align: right; margin: 0; font-size: 13px; }
+
+/* ── 2bee.cnc chat view (founder 2026-10-15: "a chat window and a cnc view,
+ *    that is all"). The panels stay mounted and hidden; see App.tsx readCncView. */
+.cnc-chat-mode .cnc-menubar { display: none !important; }
+.cnc-chat-mode .body { grid-template-columns: minmax(280px, 360px) 1fr; gap: 12px; padding: 12px; }
+.cnc-chat-mode .body > .side, .cnc-chat-mode .body > .report, .cnc-chat-mode .body > .vsplit { display: none; }
+.cnc-chat-mode .body > .stage { border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line); }
+.cad-chat button.primary {
+  background: var(--accent); border-color: var(--accent); color: var(--color-on-amber, #1a1a1a); font-weight: 600;
+}
+.cad-chat button.primary:disabled { opacity: .5; cursor: not-allowed; }
+.cnc-chat-designs { flex: 0 0 auto; }
+.cnc-chat-plan { margin: 0; font-size: 12.5px; }
+.cad-chat-msg.ai.note { color: var(--muted); }
+@media (max-width: 760px) {
+  .cnc-chat-mode .body { grid-template-columns: 1fr; grid-template-rows: minmax(300px, 55vh) auto; height: auto; }
+  .cnc-chat-mode .body > .stage { order: -1; }
+}
+/* The canvas's reporting column (snap, unavailable layers, spoilboard notes) is
+ * the expert view's. The chat view shows the plan's verdict in the chat column. */
+.cnc-chat-mode .body > .stage .vp-notes { display: none !important; }
+.cnc-chat-designs { display: flex; flex-direction: column; gap: 6px; }
+/* cnc.machines (machines/MachinesTab.tsx) */
+.machine-view { position: absolute; inset: 0; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--bg); }
+.machine-view-legend { position: absolute; left: 10px; bottom: 8px; font-size: 12px; color: var(--muted); pointer-events: none; }
+.machine-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; margin: 0; font-size: 12.5px; }
+.machine-facts div { display: flex; justify-content: space-between; gap: 6px; }
+.machine-facts dt { color: var(--muted); } .machine-facts dd { margin: 0; font-family: var(--mono, monospace); }
+.cad-anim { position: absolute; top: 8px; left: 8px; z-index: 3; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; max-width: calc(100% - 16px); }
+.cad-anim button { font-weight: 600; }
+.cad-anim .note, .cad-anim .bad { margin: 0; font-size: 12.5px; background: color-mix(in srgb, var(--bg) 80%, transparent); padding: 2px 6px; border-radius: var(--radius); }
+
+/* ════════════════════════════════════════════════════════════════════════
+ * THE 2bee.3d LOOK, EVERY CHAT TAB (founder 2026-10-15: "use the same design as
+ * on http://127.0.0.1:8765/" · "this design goes everywhere"). Measured from that
+ * page: cream page, white cards (1px subtle border, radius-default, card shadow,
+ * 16px padding), a 320px left column, 16px gaps, pill chips, amber primary.
+ * Every value is a brand token; nothing here restates a colour.
+ * ══════════════════════════════════════════════════════════════════════ */
+.cad-simple,
+.cnc-chat-mode .body {
+  background: var(--color-bg);
+  gap: 16px;
+  padding: 16px;
+  grid-template-columns: 320px minmax(0, 1fr);
+}
+.cad-chat {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-default);
+  box-shadow: var(--shadow-card);
+  padding: 16px;
+}
+.cad-chat-head strong { font-size: 16px; font-weight: 600; color: var(--color-heading, var(--ink)); }
+.cad-chat-status { border: 0; background: none; color: var(--muted); }
+.cad-chat-status .dot.ok { background: var(--color-status-success); }
+.cad-chat-chips button {
+  border: 1px solid var(--color-border); background: var(--color-bg-secondary);
+  border-radius: 999px; padding: 6px 14px; font-size: 14px; text-align: left;
+}
+.cad-chat-chips button:hover:not(:disabled) { border-color: var(--color-amber); }
+.cad-chat-log { background: var(--color-bg-secondary); border-radius: var(--radius-sm); padding: 10px; }
+.cad-chat-msg.ai { background: var(--color-bg-card); border-color: var(--color-border-subtle); }
+.cad-simple-canvas,
+.cnc-chat-mode .body > .stage,
+.machine-view {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-default);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+.cad-simple button.primary, .cad-chat button.primary, .cnc-below button.primary {
+  background: var(--color-amber); border-color: var(--color-amber); color: var(--color-on-amber);
+}
+.cad-simple button.primary:hover:not(:disabled), .cad-chat button.primary:hover:not(:disabled) {
+  background: var(--color-interactive-hover); border-color: var(--color-interactive-hover);
+}
+/* cnc: chat spans both rows; machine + tool cards sit under the 3D. */
+.cnc-chat-mode .body { grid-template-rows: minmax(0, 1fr) auto; }
+.cnc-chat-mode .body > .cad-chat { grid-row: 1 / span 2; min-height: 0; }
+.cnc-below { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.cnc-card {
+  background: var(--color-bg-card); border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-default); box-shadow: var(--shadow-card); padding: 12px 16px;
+}
+@media (max-width: 760px) {
+  .cad-simple, .cnc-chat-mode .body { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
+  .cnc-chat-mode .body { grid-template-rows: auto; }
+  .cnc-chat-mode .body > .cad-chat { grid-row: auto; }
+  .cnc-below { grid-template-columns: 1fr; }
+}
+.cnc-below { grid-template-columns: 1fr 1fr auto; }
+.cnc-thumb { display: flex; align-items: center; }
+@media (max-width: 760px) { .cnc-below { grid-template-columns: 1fr; } }
+/* Founder 2026-10-15, on the cnc chat view: "I do not want to see these" — the
+ * never-cut strip, the perspective note and the restored-settings notice. They
+ * stay in the code view (?cnc=code); cnc.run keeps its own never-run banner,
+ * which is where a program meets a machine. */
+.cnc-chat-mode .cnc-unproven,
+.cnc-chat-mode .cnc-projection-warning,
+.cnc-chat-mode .cnc-restore-banner { display: none !important; }
+/* A picker row / chip the host marked as a problem (ObjectItem.warn). */
+.op-opt.op-warn, .op-opt.op-warn * { color: var(--color-status-error); }
+.op-chip.op-warn { border-color: var(--color-status-error); color: var(--color-status-error); background: color-mix(in srgb, var(--color-status-error) 10%, transparent); }
+.cnc-design-preview { margin: 0; border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm); background: var(--color-bg-secondary); padding: 6px; }
+.cnc-design-preview img, .cnc-design-preview svg { display: block; width: 100%; height: 140px; object-fit: contain; }
+.cnc-design-preview polygon { fill: color-mix(in srgb, var(--color-amber) 22%, transparent); stroke: var(--color-amber); stroke-width: 1.2; }
+.cnc-design-preview figcaption { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.cnc-below { grid-template-columns: 1fr 1fr 1.3fr; }
+.cnc-run-card { display: flex; flex-direction: column; gap: 6px; }
+.cnc-run-row { display: flex; gap: 6px; align-items: center; }
+.cnc-run-row select { flex: 1; min-width: 0; }
+.cnc-run-card .note, .cnc-run-card .bad { margin: 0; font-size: 12px; }
+@media (max-width: 1100px) { .cnc-below { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 760px) { .cnc-below { grid-template-columns: 1fr; } }
+.machine-kinds { display: flex; gap: 6px; }
+.machine-kinds button { border-radius: 999px; padding: 4px 14px; }
+.machine-kinds button[aria-selected='true'] { background: var(--color-amber); border-color: var(--color-amber); color: var(--color-on-amber); font-weight: 600; }
+.machine-empty { display: grid; place-items: center; }
+
+/* cnc: "Final product | Toolpath" over the 3D. */
+.cnc-chat-mode .body > .stage { position: relative; }
+.cnc-show-toggle { position: absolute; top: 10px; left: 10px; z-index: 5; display: flex; gap: 4px; }
+.cnc-show-toggle button { border-radius: 999px; padding: 4px 12px; font-size: 13px; background: var(--color-bg-card); }
+.cnc-show-toggle button[aria-selected='true'] { background: var(--color-amber); border-color: var(--color-amber); color: var(--color-on-amber); font-weight: 600; }
+.cad-chat-head { gap: 8px; }
+.cad-chat-head strong { margin-right: auto; }
+.cad-chat-clear { border: 0; background: none; color: var(--muted); font-size: 12px; padding: 2px 6px; }
+.cad-chat-clear:hover:not(:disabled) { color: var(--ink); text-decoration: underline; }
+.cad-chat-clear:disabled { opacity: .4; }
+.cnc-no-product {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4; max-width: 60%;
+  display: flex; flex-direction: column; gap: 6px; padding: 14px 18px; text-align: center;
+  background: var(--color-bg-card); border: 1px solid var(--color-status-error); border-radius: var(--radius-default); box-shadow: var(--shadow-card);
+}
+.cnc-no-product strong { color: var(--color-status-error); }
+.cnc-no-product span { font-size: 13px; }
+
+/* cnc: Machine · Tool · Material · Run on under the 3D. */
+.cnc-chat-mode .cnc-below { grid-template-columns: 1fr 1fr 1fr 1.3fr; }
+@media (max-width: 1250px) { .cnc-chat-mode .cnc-below { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 760px) { .cnc-chat-mode .cnc-below { grid-template-columns: 1fr; } }
+/* Run on: the machine select takes the free width; Test and Run never get cut off. */
+.cnc-run-card .cnc-run-row { flex-wrap: wrap; }
+.cnc-run-card .cnc-run-row select { flex: 1 1 120px; }
+.cnc-run-card .cnc-run-row button { flex: 0 0 auto; white-space: nowrap; }
+.cnc-no-product-fix { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.cnc-run-blockers { margin: 0; padding-left: 16px; color: var(--color-status-error); font-size: 12px; }
+.cnc-run-blockers li { margin: 2px 0; }
+
+/* Gates column (gates/GatesPanel.tsx) — the right-hand twin of the AI column. */
+.gates-panel {
+  background: var(--color-bg-card); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-default);
+  box-shadow: var(--shadow-card); padding: 16px; display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: auto;
+}
+.gates-head { display: flex; align-items: center; gap: 8px; }
+.gates-head strong { font-size: 16px; margin-right: auto; }
+.gates-summary { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; }
+.gates-summary.gates-fail { color: var(--color-status-error); }
+.gates-summary.gates-pending { color: var(--muted); }
+.gates-summary.gates-pass { color: var(--color-status-success); }
+.gates-toggle { border: 0; background: none; font-size: 18px; line-height: 1; padding: 2px 6px; color: var(--muted); }
+.gates-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.gate { display: grid; grid-template-columns: 22px 1fr; gap: 6px; padding: 8px; border-radius: var(--radius-sm); background: var(--color-bg-secondary); }
+.gate-icon { font-weight: 700; text-align: center; }
+.gate-pass .gate-icon { color: var(--color-status-success); }
+.gate-fail { background: color-mix(in srgb, var(--color-status-error) 8%, var(--color-bg-secondary)); }
+.gate-fail .gate-icon { color: var(--color-status-error); }
+.gate-pending .gate-icon { color: var(--muted); }
+.gate-name { font-weight: 600; font-size: 13px; }
+.gate-why { font-size: 12.5px; }
+.gate-guards { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.gates-foot { margin: 0; font-size: 11.5px; }
+.gates-collapsed { width: 44px; padding: 10px 4px; align-items: center; overflow: hidden; }
+.gates-strip-count { font-weight: 700; }
+.gates-collapsed.gates-fail .gates-strip-count { color: var(--color-status-error); }
+.gates-collapsed.gates-pass .gates-strip-count { color: var(--color-status-success); }
+.gates-strip-label { writing-mode: vertical-rl; transform: rotate(180deg); font-size: 12px; color: var(--muted); }
+/* cnc chat view: AI · 3D (+ cards) · Gates. */
+.cnc-chat-mode .body { grid-template-columns: 320px minmax(0, 1fr) auto; }
+.cnc-chat-mode .body > .gates-panel { grid-column: 3; grid-row: 1; width: 280px; }
+.cnc-chat-mode .body > .gates-panel.gates-collapsed { width: 44px; }
+.cnc-chat-mode .body > .cnc-below { grid-column: 2 / span 2; }
+@media (max-width: 1100px) { .cnc-chat-mode .body > .gates-panel { width: 220px; } }
+@media (max-width: 760px) { .cnc-chat-mode .body > .gates-panel { grid-column: auto; grid-row: auto; width: auto; } }
+.gates-panel .gates-fix { background: var(--color-amber); border-color: var(--color-amber); color: var(--color-on-amber); font-weight: 600; }
+.gates-fix-notes { margin: 0; padding-left: 16px; font-size: 12px; }
+.cnc-chat-tool-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.gate-action { margin-top: 6px; font-size: 12px; padding: 3px 10px; border-color: var(--color-amber); }
+/* cad chat view: AI · 3D · Gates. */
+.cad-simple:has(> .gates-panel) { grid-template-columns: 320px minmax(0, 1fr) auto; }
+.cad-simple > .gates-panel { width: 280px; }
+.cad-simple > .gates-panel.gates-collapsed { width: 44px; }
+@media (max-width: 760px) { .cad-simple > .gates-panel { width: auto; } }
+.machine-slots ul { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 2px; font-size: 12.5px; }
+.machine-slots li { display: flex; align-items: center; gap: 6px; }
+.machine-swatch { width: 12px; height: 12px; border-radius: 50%; border: 1px solid var(--color-border); display: inline-block; }
+.cnc-warnings { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 5; display: grid; gap: 6px; max-width: min(720px, 90%); }
+.cnc-warning { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; background: var(--color-bg-card); border: 1px solid var(--color-status-warn); font-size: 13px; }
+
+/* The design's variables (ParamsPanel.tsx). Colours from brand tokens only. */
+.params {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 8px 10px;
+  font-size: 13px;
+  max-height: 40vh;
+  overflow: auto;
+}
+.params-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.params-busy,
+.params-note,
+.params-section {
+  color: var(--muted);
+  font-size: 12px;
+}
+.params-note {
+  margin: 2px 0 6px;
+}
+.params-switches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.params-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
+  cursor: pointer;
+}
+.params-switch:has(input:checked) {
+  border-color: var(--accent);
+}
+.params-values {
+  margin-top: 8px;
+}
+.params-values summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.params-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+  margin-top: 6px;
+}
+.params-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px;
+  gap: 8px;
+  align-items: center;
+}
+.params-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.params-row input,
+.params-row select {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 2px 4px;
+}

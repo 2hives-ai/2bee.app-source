@@ -287,9 +287,12 @@ pub fn parse_obj_section(text: &str, z_mm: f64, tol: f64) -> Imported {
     }
     let mut result = section(&mesh, z_mm, tol);
     // Override the unit note to say OBJ instead of STL
-    result.unit_note = format!(
-        "OBJ SECTION at z = {z_mm:.3}mm — one flat slice through a 3D mesh, NOT 3D surfacing. \
-         OBJ carries no units — millimetres ASSUMED, not read"
+    relabel(
+        &mut result,
+        format!(
+            "OBJ SECTION at z = {z_mm:.3}mm — one flat slice through a 3D mesh, NOT 3D surfacing. \
+             OBJ carries no units — millimetres ASSUMED, not read"
+        ),
     );
     result
 }
@@ -308,13 +311,20 @@ pub fn looks_like_3mf(data: &[u8]) -> bool {
 /// Units are declared in the XML (`unit` attribute on `<model>`), but we
 /// report millimetres assumed — same policy as STL and OBJ.
 pub fn parse_3mf(data: &[u8]) -> Mesh {
+    parse_3mf_with_unit(data).0
+}
+
+/// [`parse_3mf`], plus the unit the model declared (`<model unit="…">`) and the
+/// factor applied to reach millimetres. `None` = not declared (3MF's default is
+/// millimetre).
+pub fn parse_3mf_with_unit(data: &[u8]) -> (Mesh, Option<(String, f64)>) {
     let mut mesh = Mesh::default();
 
     let archive = match zip::ZipArchive::new(std::io::Cursor::new(data)) {
         Ok(a) => a,
         Err(e) => {
             mesh.problems.push(format!("3MF: cannot open ZIP archive: {e} — NOT imported"));
-            return mesh;
+            return (mesh, None);
         }
     };
 
@@ -340,7 +350,7 @@ pub fn parse_3mf(data: &[u8]) -> Mesh {
         mesh.problems.push(
             "3MF: no 3D model file found (expected 3D/3dmodel.model) — NOT imported".into(),
         );
-        return mesh;
+        return (mesh, None);
     };
 
     let xml = match archive.by_name(&path) {
@@ -348,40 +358,191 @@ pub fn parse_3mf(data: &[u8]) -> Mesh {
             let mut buf = String::new();
             if let Err(e) = std::io::Read::read_to_string(&mut file, &mut buf) {
                 mesh.problems.push(format!("3MF: cannot read {path}: {e} — NOT imported"));
-                return mesh;
+                return (mesh, None);
             }
             buf
         }
         Err(e) => {
             mesh.problems.push(format!("3MF: cannot open {path}: {e} — NOT imported"));
-            return mesh;
+            return (mesh, None);
         }
     };
 
-    // Simple XML parsing — no dependency needed. The 3MF schema is predictable:
-    // <vertices><vertex x="..." y="..." z="..." /></vertices>
-    // <triangles><triangle v1="..." v2="..." v3="..." /></triangles>
+    // 🔴 THREE DEFECTS IN THE READER THIS REPLACES. (1) It went line by line,
+    // so a model written on one line read only its first vertex. (2) Vertex
+    // indices restart at 0 in every <object>, and it kept ONE vertex list: a
+    // second object's triangles indexed the first object's vertices — two cubes
+    // imported as one part with a hole equal to its outline, the second cube
+    // gone. (3) `unit` on <model> was not read: an inch model imported 25.4x
+    // small, with a note saying units cannot be declared. Tags are now split on
+    // '<', each <object> starts a fresh vertex list, and coordinates are scaled
+    // to millimetres by the declared unit (an unknown unit is refused).
+    let model_tag = xml.split('<').find(|t| t.starts_with("model") && t[5..].starts_with(char::is_whitespace));
+    let unit = model_tag.and_then(|t| xml_attr_str(t, "unit"));
+    let scale = match unit.as_deref() {
+        None | Some("millimeter") => 1.0,
+        Some("micron") => 0.001,
+        Some("centimeter") => 10.0,
+        Some("inch") => 25.4,
+        Some("foot") => 304.8,
+        Some("meter") => 1000.0,
+        Some(other) => {
+            mesh.problems.push(format!("3MF: unit \"{other}\" is not a 3MF unit this reader knows — NOT imported"));
+            return (mesh, None);
+        }
+    };
+    // 🔴 BUILD ITEMS AND COMPONENTS (2026-11-14). The reader above imported
+    // every <object>'s mesh at its OWN coordinates and never read <build>: an
+    // item's `transform` (how a slicer places a part on the plate) and a
+    // component's `transform` (how an assembly places its pieces) were both
+    // ignored, so a moved/rotated part sectioned where it was modelled, a
+    // component object referenced twice appeared once, and an object no build
+    // item names was imported anyway. Real contours of a wrong layout. Now the
+    // mesh is exactly what <build> makes: every item, through its transform and
+    // its components' transforms, and nothing else.
+    type Mat = [f64; 12];
+    const IDENTITY: Mat = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+    #[derive(Default)]
+    struct Obj {
+        tris: Vec<[[f64; 3]; 3]>,
+        comps: Vec<(String, Mat)>,
+    }
+    let mut objects: std::collections::HashMap<String, Obj> = std::collections::HashMap::new();
+    let mut items: Vec<(String, Mat)> = Vec::new();
+    let mut current: Option<String> = None;
     let mut verts: Vec<[f64; 3]> = Vec::new();
-    for line in xml.lines() {
-        let trimmed = line.trim();
-        if trimmed.contains("<vertex") {
-            let x = extract_xml_attr(trimmed, "x").unwrap_or(0.0);
-            let y = extract_xml_attr(trimmed, "y").unwrap_or(0.0);
-            let z = extract_xml_attr(trimmed, "z").unwrap_or(0.0);
-            verts.push([x, y, z]);
-        } else if trimmed.contains("<triangle") {
-            let v1 = extract_xml_attr(trimmed, "v1").unwrap_or(0.0) as usize;
-            let v2 = extract_xml_attr(trimmed, "v2").unwrap_or(0.0) as usize;
-            let v3 = extract_xml_attr(trimmed, "v3").unwrap_or(0.0) as usize;
+    let mut refusal: Option<String> = None;
+    let parse_mat = |t: &str| -> Result<Mat, String> {
+        let Some(v) = xml_attr_str(t, "transform") else { return Ok(IDENTITY) };
+        let n: Vec<f64> = v.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+        if n.len() != 12 || v.split_whitespace().count() != 12 || n.iter().any(|x| !x.is_finite()) {
+            return Err(format!("3MF: transform \"{v}\" is not 12 numbers — NOT imported"));
+        }
+        Ok(n.try_into().unwrap())
+    };
+    for tag in xml.split('<') {
+        let t = tag.trim_start();
+        let is = |name: &str| t.starts_with(name) && t[name.len()..].starts_with(|c: char| c.is_whitespace() || c == '>' || c == '/');
+        if is("object") {
+            verts.clear();
+            let id = xml_attr_str(t, "id").unwrap_or_default();
+            objects.entry(id.clone()).or_default();
+            current = Some(id);
+        } else if is("vertex") {
+            // A coordinate that is missing or not a number REFUSES the file: read
+            // as 0.0 it moved a vertex and the section was a plausible wrong part.
+            match (extract_xml_attr(t, "x"), extract_xml_attr(t, "y"), extract_xml_attr(t, "z")) {
+                (Some(x), Some(y), Some(z)) if x.is_finite() && y.is_finite() && z.is_finite() => verts.push([x, y, z]),
+                _ => {
+                    refusal.get_or_insert_with(|| format!("3MF: a <vertex> has a missing or non-numeric x/y/z (`<{}`) — NOT imported", t.trim_end().chars().take(120).collect::<String>()));
+                    verts.push([0.0, 0.0, 0.0]);
+                }
+            }
+        } else if is("triangle") {
+            // Indices are whole numbers: `v3="-1"` used to cast to 0 silently.
+            let idx = |n: &str| xml_attr_str(t, n).and_then(|v| v.trim().parse::<usize>().ok());
+            let (Some(v1), Some(v2), Some(v3)) = (idx("v1"), idx("v2"), idx("v3")) else {
+                refusal.get_or_insert_with(|| format!("3MF: a <triangle> has a missing or non-integer index (`<{}`) — NOT imported", t.trim_end().chars().take(120).collect::<String>()));
+                continue;
+            };
             if v1 < verts.len() && v2 < verts.len() && v3 < verts.len() {
-                mesh.tris.push([verts[v1], verts[v2], verts[v3]]);
+                if let Some(o) = current.as_ref().and_then(|id| objects.get_mut(id)) {
+                    o.tris.push([verts[v1], verts[v2], verts[v3]]);
+                }
             } else {
                 mesh.problems.push(format!(
                     "3MF: triangle references vertex out of range (v1={v1}, v2={v2}, v3={v3}, {} verts) — skipped",
                     verts.len()
                 ));
             }
+        } else if is("component") || is("item") {
+            // A `p:path` points into ANOTHER model file of the package (the
+            // production extension Bambu/Orca write); that file is not read.
+            if t.contains(":path=") {
+                refusal.get_or_insert_with(|| {
+                    "3MF: an object lives in another model file of the package (`p:path`, the production \
+                     extension slicers write) and this reader only reads the root model — NOT imported. \
+                     Export a plain 3MF/STL with the mesh in one file"
+                        .into()
+                });
+                continue;
+            }
+            let oid = xml_attr_str(t, "objectid").unwrap_or_default();
+            match parse_mat(t) {
+                Ok(m) if is("item") => items.push((oid, m)),
+                Ok(m) => {
+                    if let Some(o) = current.as_ref().and_then(|id| objects.get_mut(id)) {
+                        o.comps.push((oid, m));
+                    }
+                }
+                Err(e) => {
+                    refusal.get_or_insert(e);
+                }
+            }
         }
+    }
+    if refusal.is_none() && items.is_empty() && objects.values().any(|o| !o.tris.is_empty()) {
+        refusal = Some(
+            "3MF: <build> lists no items, so by the format this file makes nothing — NOT imported \
+             (importing every <object> would cut parts the file never placed)"
+                .into(),
+        );
+    }
+    if let Some(r) = refusal {
+        mesh.problems.push(r);
+        return (mesh, None);
+    }
+    // Row-vector convention (3MF core spec §3.3): p' = p·M, translation last.
+    fn mul(a: &Mat, b: &Mat) -> Mat {
+        // a then b
+        let mut r = [0.0; 12];
+        for i in 0..4 {
+            for j in 0..3 {
+                let mut v = if i == 3 { b[9 + j] } else { 0.0 };
+                for k in 0..3 {
+                    v += a[i * 3 + k] * b[k * 3 + j];
+                }
+                r[i * 3 + j] = v;
+            }
+        }
+        r
+    }
+    fn emit(
+        objects: &std::collections::HashMap<String, Obj>,
+        id: &str,
+        m: &Mat,
+        depth: u32,
+        scale: f64,
+        out: &mut Mesh,
+    ) {
+        let Some(o) = objects.get(id) else {
+            out.problems.push(format!("3MF: build/component references object id \"{id}\", which does not exist — NOT imported"));
+            return;
+        };
+        if depth > 32 {
+            out.problems.push("3MF: components nest more than 32 deep (a cycle?) — NOT imported".into());
+            return;
+        }
+        let ap = |p: [f64; 3]| {
+            let mut q = [0.0; 3];
+            for j in 0..3 {
+                q[j] = (p[0] * m[j] + p[1] * m[3 + j] + p[2] * m[6 + j] + m[9 + j]) * scale;
+            }
+            q
+        };
+        for t in &o.tris {
+            out.tris.push([ap(t[0]), ap(t[1]), ap(t[2])]);
+        }
+        for (cid, cm) in &o.comps {
+            emit(objects, cid, &mul(cm, m), depth + 1, scale, out);
+        }
+    }
+    for (id, m) in &items {
+        emit(&objects, id, m, 0, scale, &mut mesh);
+    }
+    if mesh.problems.iter().any(|p| p.contains("NOT imported")) {
+        mesh.tris.clear();
+        return (mesh, None);
     }
 
     if mesh.tris.is_empty() && mesh.problems.is_empty() {
@@ -390,12 +551,12 @@ pub fn parse_3mf(data: &[u8]) -> Mesh {
         );
     }
 
-    mesh
+    (mesh, unit.map(|u| (u, scale)))
 }
 
 /// Parse a 3MF file and section it at `z_mm`.
 pub fn parse_3mf_section(data: &[u8], z_mm: f64, tol: f64) -> Imported {
-    let mesh = parse_3mf(data);
+    let (mesh, unit) = parse_3mf_with_unit(data);
     if mesh.tris.is_empty() {
         let mut out = Imported::default();
         out.unit_note = format!(
@@ -405,28 +566,68 @@ pub fn parse_3mf_section(data: &[u8], z_mm: f64, tol: f64) -> Imported {
         return out;
     }
     let mut result = section(&mesh, z_mm, tol);
-    result.unit_note = format!(
-        "3MF SECTION at z = {z_mm:.3}mm — one flat slice through a 3D mesh, NOT 3D surfacing. \
-         3MF units may be declared in the file — millimetres ASSUMED"
+    let head = format!(
+        "3MF SECTION at z = {z_mm:.3}mm — one flat slice through a 3D mesh, NOT 3D surfacing. {}",
+        match &unit {
+            Some((u, f)) if (*f - 1.0).abs() > 1e-12 => format!("3MF declares unit \"{u}\" — scaled x{f} to millimetres"),
+            Some((u, _)) => format!("3MF declares unit \"{u}\""),
+            None => "3MF declares no unit — millimetres, the 3MF default".to_string(),
+        }
     );
+    relabel(&mut result, head);
     result
+}
+
+/// Replace the STL header of a section's note with the real format's, KEEPING
+/// any warning `section` appended after it (". ⚠ …").
+fn relabel(result: &mut Imported, head: String) {
+    let tail = result.unit_note.find(". ⚠").map(|i| result.unit_note[i..].to_string()).unwrap_or_default();
+    result.unit_note = head + &tail;
 }
 
 /// Extract a floating-point XML attribute value from a tag string.
 ///
 /// Looks for `name="value"` or `name='value'` and parses the value as f64.
-fn extract_xml_attr(tag: &str, name: &str) -> Option<f64> {
-    // Try double quotes first, then single quotes
-    for quote in ['"', '\''] {
-        let pattern = format!("{name}={quote}");
-        if let Some(start) = tag.find(&pattern) {
-            let val_start = start + pattern.len();
-            if let Some(end) = tag[val_start..].find(quote) {
-                return tag[val_start..val_start + end].parse().ok();
-            }
+/// A string attribute matched as a WHOLE name: `id=` must not match inside
+/// `objectid=` or `pid=`.
+fn xml_attr_str(tag: &str, name: &str) -> Option<String> {
+    // 🔴 XML allows whitespace around `=` (`unit = "inch"`, `z ="1"`). The old
+    // reader matched `name="` literally, missed those, and the callers fell back
+    // to millimetres / 0.0: an inch part imported 25.4x small with a note saying
+    // the file declared no unit, and one vertex at z=0 notched a corner off the
+    // part (bughunt 2026-11-15).
+    let b = tag.as_bytes();
+    let mut from = 0;
+    while let Some(k) = tag[from..].find(name) {
+        let at = from + k;
+        from = at + name.len();
+        let whole = at == 0 || tag[..at].chars().next_back().is_some_and(char::is_whitespace);
+        if !whole {
+            continue;
         }
+        let mut p = at + name.len();
+        while p < b.len() && (b[p] as char).is_whitespace() {
+            p += 1;
+        }
+        if p >= b.len() || b[p] != b'=' {
+            continue;
+        }
+        p += 1;
+        while p < b.len() && (b[p] as char).is_whitespace() {
+            p += 1;
+        }
+        if p >= b.len() || (b[p] != b'"' && b[p] != b'\'') {
+            continue;
+        }
+        let q = b[p] as char;
+        let rest = &tag[p + 1..];
+        return rest.find(q).map(|e| rest[..e].to_string());
     }
     None
+}
+
+fn extract_xml_attr(tag: &str, name: &str) -> Option<f64> {
+    xml_attr_str(tag, name)?.trim().parse().ok()
 }
 
 /// Detect a STEP file by its ISO-10303-21 header.
@@ -659,6 +860,53 @@ fn push_unique(pts: &mut Vec<(f64, f64)>, p: (f64, f64), tol: f64) {
 /// every report). An operator who imported a 3D part must be told that what they
 /// are looking at is one slice through it — before the spindle turns, not after
 /// they measure the part.
+/// Join open chains whose ends lie within `max_gap` (own ends -> closed; two chains
+/// -> one), nearest first. Returns the chains, the number of bridges and the widest.
+fn bridge_gaps(mut cs: Vec<Contour>, max_gap: f64) -> (Vec<Contour>, usize, f64) {
+    let d = |a: &Vertex, b: &Vertex| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+    let mut bridged = 0usize;
+    let mut widest = 0.0f64;
+    loop {
+        let open: Vec<usize> = (0..cs.len()).filter(|&i| !cs[i].closed && cs[i].verts.len() >= 2).collect();
+        // (gap, i, j, reverse_j); j == i means "close i on itself".
+        let mut best: Option<(f64, usize, usize, bool)> = None;
+        for &i in &open {
+            let ie = *cs[i].verts.last().unwrap();
+            let is = cs[i].verts[0];
+            let g = d(&ie, &is);
+            if cs[i].verts.len() >= 3 && g <= max_gap && best.map_or(true, |b| g < b.0) {
+                best = Some((g, i, i, false));
+            }
+            for &j in &open {
+                if j == i {
+                    continue;
+                }
+                let js = cs[j].verts[0];
+                let je = *cs[j].verts.last().unwrap();
+                for (g, rev) in [(d(&ie, &js), false), (d(&ie, &je), true)] {
+                    if g <= max_gap && best.map_or(true, |b| g < b.0) {
+                        best = Some((g, i, j, rev));
+                    }
+                }
+            }
+        }
+        let Some((g, i, j, rev)) = best else { break };
+        bridged += 1;
+        widest = widest.max(g);
+        if i == j {
+            cs[i].closed = true;
+            continue;
+        }
+        let mut tail = std::mem::take(&mut cs[j].verts);
+        if rev {
+            tail.reverse();
+        }
+        cs[i].verts.extend(tail);
+        cs.remove(j);
+    }
+    (cs, bridged, widest)
+}
+
 pub fn section(mesh: &Mesh, z_mm: f64, tol: f64) -> Imported {
     let mut out = Imported::default();
     // 🔴 Two facts in one always-visible line, and neither may be dropped:
@@ -786,7 +1034,23 @@ pub fn section(mesh: &Mesh, z_mm: f64, tol: f64) -> Imported {
         return out;
     }
 
-    let (chained, open) = chain(pieces, tol);
+    let (chained, _open) = chain(pieces, tol);
+    /* 🔴 BOUNDED GAP BRIDGING (2026-10-16). A CSG mesh carries sliver triangles whose
+     * two crossing points merge within `tol`; each such piece is dropped as a sliver,
+     * leaving a gap of a few hundredths of a mm, and the OUTER profile of a part then
+     * fails to close and is NOT cut. Measured: 2bee_hive_super_panel_wcnc laid flat,
+     * z = 9.5 -> 6 open chains with gaps ~0.03 mm; the job planned "OK" with only its
+     * 28 holes, so the panel itself would never have been cut free.
+     * Ends within BRIDGE_GAP_MM (5 x tol) are joined with a straight segment; every
+     * bridge is counted and reported, and a larger gap is still refused as before. */
+    let (chained, bridged, widest) = bridge_gaps(chained, (tol * 5.0).max(1e-6));
+    if bridged > 0 {
+        out.unsupported.push(format!(
+            "{bridged} gap(s) in the section outline, the widest {widest:.3}mm, were bridged with a straight edge (gaps up to {:.3}mm come from sliver triangles in the mesh, not from the design) — check the outline",
+            tol * 5.0
+        ));
+    }
+    let open = chained.iter().filter(|c| !c.closed).count();
     out.open_contours = open;
     for mut c in chained {
         if c.closed {
@@ -812,7 +1076,136 @@ pub fn section(mesh: &Mesh, z_mm: f64, tol: f64) -> Imported {
         }
     }
 
+    let nested = out.contours.iter().filter(|c| c.closed).count() > 1;
+    if nested && consistently_oriented(mesh) {
+        if let Some(why) = nesting_disagrees_with_solid(mesh, &out.contours, z_mm) {
+            out.unsupported.push(why);
+            out.contours.clear();
+        }
+    } else if nested {
+        out.unit_note.push_str(
+            ". ⚠ The mesh's triangles are not consistently wound, so a loop inside another is read as a HOLE \
+             by nesting alone — a solid body modelled inside another would be cut as a hole and this cannot tell",
+        );
+    }
     out
+}
+
+/// Whether every edge is shared by exactly two triangles that run it in
+/// OPPOSITE directions — the condition under which the surface's winding
+/// means anything. Hand-made and many exported STLs fail it; then the solid
+/// test below is not asked, and the note says so.
+fn consistently_oriented(mesh: &Mesh) -> bool {
+    let key = |v: [f64; 3]| [(v[0] * 1e5).round() as i64, (v[1] * 1e5).round() as i64, (v[2] * 1e5).round() as i64];
+    let mut edges: std::collections::HashMap<([i64; 3], [i64; 3]), i32> = std::collections::HashMap::new();
+    for t in &mesh.tris {
+        for k in 0..3 {
+            let (a, b) = (key(t[k]), key(t[(k + 1) % 3]));
+            if a == b {
+                continue;
+            }
+            *edges.entry((a, b)).or_insert(0) += 1;
+        }
+    }
+    edges.iter().all(|((a, b), n)| *n == 1 && edges.get(&(*b, *a)) == Some(&1))
+}
+
+/// 🔴 THE SECTION THROWS AWAY WHICH SIDE OF EACH LOOP IS SOLID, and the parts
+/// step then reads every loop inside another as a hole. A second closed shell
+/// INSIDE the first (a multi-body export; normals outward) is material, and it
+/// was planned as a 20x20 through-hole, ok:true (bughunt 2026-11-15).
+///
+/// The mesh still knows: the signed winding of the surface round a point just
+/// inside a loop is 1 for material bounded by one outward shell, 0 for a void,
+/// 2 for a shell inside a shell (magnitudes: a mesh wound wholly inside-out
+/// negates them all). The nesting the parts step will use expects 1
+/// inside an outline (even depth) and 0 inside a hole (odd depth). Any loop
+/// where the two disagree is a section this reader cannot turn into parts
+/// truthfully, so it is REFUSED with the loop named. `None` = they agree.
+fn nesting_disagrees_with_solid(mesh: &Mesh, loops: &[Contour], z_mm: f64) -> Option<String> {
+    let closed: Vec<&Contour> = loops.iter().filter(|c| c.closed && c.verts.len() >= 3).collect();
+    for (k, c) in closed.iter().enumerate() {
+        let Some(p) = point_just_inside(c) else { continue };
+        // A coincident COPY of a shell (the same body exported twice) is one
+        // solid to the parts step, which drops the copy; count it as such.
+        let same = |o: &Contour| {
+            (o.signed_area().abs() - c.signed_area().abs()).abs() <= 1e-6 * c.signed_area().abs().max(1.0)
+                && o.bounds().zip(c.bounds()).is_some_and(|(a, b)| {
+                    (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6 && (a.2 - b.2).abs() < 1e-6 && (a.3 - b.3).abs() < 1e-6
+                })
+        };
+        let copies = closed.iter().filter(|o| same(o)).count() as i32;
+        let depth = closed.iter().enumerate().filter(|(j, o)| *j != k && !same(o) && o.contains_point(p.0, p.1)).count();
+        let expected = if depth % 2 == 0 { 1 } else { 0 };
+        // |w|: a WHOLE mesh wound inside-out (a common export fault) is still
+        // one consistent solid, and read correctly before this check existed.
+        let w = winding_at(mesh, p.0, p.1, z_mm).abs();
+        if w != expected && !(expected == 1 && w == copies) {
+            let (x0, y0, x1, y1) = c.bounds().unwrap_or_default();
+            return Some(format!(
+                "the section loop at X {x0:.3}..{x1:.3} Y {y0:.3}..{y1:.3} (z = {z_mm:.3}mm) reads as {} by nesting, \
+                 but the mesh around it is {} (surface winding {w}) — a solid shell inside another, an inside-out \
+                 shell, or overlapping bodies. NOT imported: cutting it as drawn would make {} where the model has {}",
+                if expected == 1 { "MATERIAL" } else { "a HOLE" },
+                if w == 0 { "EMPTY" } else { "SOLID" },
+                if expected == 1 { "material" } else { "a hole" },
+                if w == 0 { "none" } else { "material" },
+            ));
+        }
+    }
+    None
+}
+
+/// A point a hair inside a closed loop, beside the middle of its longest edge.
+fn point_just_inside(c: &Contour) -> Option<(f64, f64)> {
+    let n = c.verts.len();
+    let (mut best, mut len) = (0usize, 0.0f64);
+    for i in 0..n {
+        let (a, b) = (c.verts[i], c.verts[(i + 1) % n]);
+        let l = (b.x - a.x).hypot(b.y - a.y);
+        if l > len {
+            (best, len) = (i, l);
+        }
+    }
+    if !(len > 0.0) {
+        return None;
+    }
+    let (a, b) = (c.verts[best], c.verts[(best + 1) % n]);
+    let (mx, my) = ((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+    let (nx, ny) = (-(b.y - a.y) / len, (b.x - a.x) / len);
+    let eps = (len * 1e-3).clamp(1e-4, 0.05);
+    [1.0, -1.0].into_iter().map(|s| (mx + s * nx * eps, my + s * ny * eps)).find(|p| c.contains_point(p.0, p.1))
+}
+
+/// Signed winding of the closed surface round (x, y, z): a ray to +X, each
+/// crossed triangle counted +1 when its normal points along the ray (leaving
+/// the solid) and -1 when against it.
+fn winding_at(mesh: &Mesh, x: f64, y: f64, z: f64) -> i32 {
+    // Off any edge or vertex: a ray through the diagonal shared by two
+    // triangles of a face counted it twice (a plain box read as winding 2 at
+    // mid-height). The offsets are far below any tolerance that matters here.
+    let (y, z) = (y + 1.234_567_89e-7, z + 7.654_321_9e-8);
+    let mut w = 0i32;
+    for t in &mesh.tris {
+        let (a, b, c) = (t[0], t[1], t[2]);
+        // Barycentric in the YZ projection.
+        let d = (b[1] - a[1]) * (c[2] - a[2]) - (c[1] - a[1]) * (b[2] - a[2]);
+        if d.abs() < 1e-15 {
+            continue;
+        }
+        let u = ((y - a[1]) * (c[2] - a[2]) - (c[1] - a[1]) * (z - a[2])) / d;
+        let v = ((b[1] - a[1]) * (z - a[2]) - (y - a[1]) * (b[2] - a[2])) / d;
+        if u < 0.0 || v < 0.0 || u + v > 1.0 {
+            continue;
+        }
+        let hx = a[0] + u * (b[0] - a[0]) + v * (c[0] - a[0]);
+        if hx <= x {
+            continue;
+        }
+        // Normal X component = sign of the YZ determinant.
+        w += if d > 0.0 { 1 } else { -1 };
+    }
+    w
 }
 
 /// Parse and section in one step — the entry point [`crate::import`] dispatches
@@ -837,6 +1230,26 @@ pub fn parse_stl_section(data: &[u8], z_mm: f64, tol: f64) -> Imported {
 
 #[cfg(test)]
 mod tests {
+    /// 2026-10-16: the founder's Hive super panel planned "OK" with only its holes:
+    /// sliver gaps (~0.03 mm) left the OUTER profile open and it was dropped.
+    #[test]
+    fn a_sliver_gap_in_an_outline_is_bridged_and_reported_but_a_real_hole_is_not() {
+        let open = |pts: &[(f64, f64)]| Contour { verts: pts.iter().map(|&(x, y)| Vertex::line(x, y)).collect(), closed: false };
+        // A square broken into two chains with 0.03 mm gaps at both joins.
+        let a = open(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]);
+        let b = open(&[(10.0, 10.03), (0.0, 10.0), (0.0, 0.03)]);
+        let (cs, n, widest) = bridge_gaps(vec![a, b], 0.05);
+        assert_eq!(cs.len(), 1, "the two chains were not joined");
+        assert!(cs[0].closed, "the joined outline did not close");
+        assert_eq!(n, 2);
+        assert!((widest - 0.03).abs() < 1e-9);
+        // A 1 mm gap is a real hole in the mesh: still open, still refused downstream.
+        let c = open(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0), (0.0, 1.0)]);
+        let (cs, n, _) = bridge_gaps(vec![c], 0.05);
+        assert_eq!(n, 0);
+        assert!(!cs[0].closed);
+    }
+
     use super::*;
 
     /// An axis-aligned box from (0,0,0) to (sx,sy,sz), 12 triangles, closed.
@@ -933,6 +1346,24 @@ mod tests {
         assert_eq!(binary_triangle_count(&bytes), Some(12), "length arithmetic did not fire");
         let m = parse_stl(&bytes).expect("STL not recognised at all");
         assert_eq!(m.tris.len(), 12, "the binary body was read as ASCII text");
+    }
+
+    #[test]
+    fn a_solid_shell_inside_another_is_refused_not_cut_as_a_hole() {
+        // bughunt 2026-11-15: a 40x40 box with a 20x20 box inside it, both closed,
+        // sectioned to two loops; the parts step made the inner one a through-hole.
+        let shift = |t: Vec<Tri>, d: f64| -> Vec<Tri> { t.into_iter().map(|tr| tr.map(|v| [v[0] + d, v[1] + d, v[2]])).collect() };
+        let flip = |t: Vec<Tri>| -> Vec<Tri> { t.into_iter().map(|[a, b, c]| [a, c, b]).collect() };
+        let outer = box_tris(40.0, 40.0, 10.0);
+        let nested = Mesh { tris: [outer.clone(), shift(box_tris(20.0, 20.0, 10.0), 10.0)].concat(), problems: Vec::new() };
+        let r = section(&nested, 5.0, 0.01);
+        assert!(r.contours.is_empty() && r.unsupported.iter().any(|u| u.contains("shell inside another")), "{:?}", r.unsupported);
+        // Controls: the same inner box wound as a VOID is a hole, read as before;
+        // one box alone, and one box wholly inside-out, are one loop.
+        let void = Mesh { tris: [outer.clone(), shift(flip(box_tris(20.0, 20.0, 10.0)), 10.0)].concat(), problems: Vec::new() };
+        assert_eq!(section(&void, 5.0, 0.01).contours.iter().filter(|c| c.closed).count(), 2);
+        assert_eq!(section(&Mesh { tris: outer.clone(), problems: Vec::new() }, 5.0, 0.01).contours.len(), 1);
+        assert_eq!(section(&Mesh { tris: flip(outer), problems: Vec::new() }, 5.0, 0.01).contours.len(), 1);
     }
 
     #[test]
@@ -1202,6 +1633,133 @@ f -3 -2 -1
             zip.finish().unwrap();
         }
         buf.into_inner()
+    }
+
+    /// A 3MF whose model XML is given whole (unit, objects, line breaks).
+    fn zip_model(xml: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("3D/3dmodel.model", options).unwrap();
+            zip.write_all(xml.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    /// One box as a 3MF <object>, vertex indices from 0 as the format requires.
+    fn box_object(id: u32, x0: f64, x1: f64, y0: f64, y1: f64, z1: f64) -> String {
+        let v = [[x0, y0, 0.0], [x1, y0, 0.0], [x1, y1, 0.0], [x0, y1, 0.0], [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]];
+        let t = [[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5], [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]];
+        let mut s = format!("<object id=\"{id}\"><mesh><vertices>");
+        for p in v {
+            s += &format!("<vertex x=\"{}\" y=\"{}\" z=\"{}\"/>", p[0], p[1], p[2]);
+        }
+        s += "</vertices><triangles>";
+        for k in t {
+            s += &format!("<triangle v1=\"{}\" v2=\"{}\" v3=\"{}\"/>", k[0], k[1], k[2]);
+        }
+        s + "</triangles></mesh></object>"
+    }
+
+    #[test]
+    fn threemf_objects_units_and_one_line_files_are_read_as_written() {
+        // 🔴 One vertex list across objects (indices restart per object), the
+        // `unit` attribute ignored, and a line-by-line reader: two cubes became
+        // one part with a hole equal to its outline; an inch model read 25.4x
+        // small; a one-line model read one vertex.
+        let model = |unit: &str, objs: &str| {
+            // One build item per object id present: <build/> makes nothing.
+            let items: String = (1..=2)
+                .filter(|i| objs.contains(&format!("<object id=\"{i}\"")))
+                .map(|i| format!("<item objectid=\"{i}\"/>"))
+                .collect();
+            format!("<?xml version=\"1.0\"?><model unit=\"{unit}\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\"><resources>{objs}</resources><build>{items}</build></model>")
+        };
+        // Written on ONE line on purpose.
+        let two = zip_model(&model("millimeter", &(box_object(1, 10.0, 60.0, 10.0, 60.0, 20.0) + &box_object(2, 100.0, 130.0, 10.0, 40.0, 20.0))));
+        let r = parse_3mf_section(&two, 5.0, 0.01);
+        assert!(r.unsupported.is_empty(), "{:?}", r.unsupported);
+        let xs: Vec<f64> = r.contours.iter().filter_map(|c| c.bounds()).map(|b| b.2).collect();
+        assert_eq!(r.contours.len(), 2, "two cubes did not section to two outlines: {xs:?}");
+        assert!(xs.iter().any(|&x| (x - 130.0).abs() < 1e-6), "the second cube is missing: max x {xs:?}");
+        let inch = zip_model(&model("inch", &box_object(1, 1.0, 3.0, 1.0, 3.0, 1.0)));
+        let r = parse_3mf_section(&inch, 12.7, 0.01);
+        let b = r.contours[0].bounds().expect("an outline");
+        assert!((b.2 - b.0 - 50.8).abs() < 1e-6, "an inch model sectioned {:.3} mm wide, not 50.8", b.2 - b.0);
+        assert!(r.unit_note.contains("inch"), "{}", r.unit_note);
+        let bad = parse_3mf(&zip_model(&model("furlong", &box_object(1, 0.0, 1.0, 0.0, 1.0, 1.0))));
+        assert!(bad.tris.is_empty() && bad.problems.iter().any(|p| p.contains("furlong")), "{:?}", bad.problems);
+    }
+
+    #[test]
+    fn threemf_attributes_with_spaces_round_the_equals_are_read_and_bad_ones_refused() {
+        // bughunt 2026-11-15: `unit = "inch"` and `z ="1"` are legal XML. Matched
+        // literally, the unit fell back to mm (25.4x small, "declares no unit")
+        // and the vertex to z=0 (a corner notched off the part). `v3="-1"` cast to 0.
+        let wrap = |unit_attr: &str, obj: &str| {
+            zip_model(&format!("<?xml version=\"1.0\"?><model {unit_attr} xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\"><resources>{obj}</resources><build><item objectid=\"1\"/></build></model>"))
+        };
+        let inch = wrap("unit = \"inch\"", &box_object(1, 1.0, 3.0, 1.0, 3.0, 1.0));
+        let r = parse_3mf_section(&inch, 12.7, 0.01);
+        let b = r.contours[0].bounds().expect("an outline");
+        assert!((b.2 - b.0 - 50.8).abs() < 1e-6, "a spaced inch unit sectioned {:.3} mm wide, not 50.8", b.2 - b.0);
+        let spaced_z = box_object(1, 0.0, 4.0, 0.0, 2.0, 1.0).replacen("z=\"1\"", "z =\"1\"", 1);
+        let r = parse_3mf_section(&wrap("unit=\"millimeter\"", &spaced_z), 0.5, 0.01);
+        let b = r.contours[0].bounds().expect("an outline");
+        assert_eq!(r.contours.len(), 1);
+        assert!((b.2 - 4.0).abs() < 1e-6 && (b.3 - 2.0).abs() < 1e-6 && r.contours[0].verts.len() == 4, "{:?}", r.contours[0].verts);
+        let neg = box_object(1, 0.0, 4.0, 0.0, 2.0, 1.0).replacen("v3=\"1\"", "v3=\"-1\"", 1);
+        let m = parse_3mf(&wrap("unit=\"millimeter\"", &neg));
+        assert!(m.problems.iter().any(|p| p.contains("non-integer index")), "{:?}", m.problems);
+    }
+
+    #[test]
+    fn threemf_build_items_and_components_are_placed_by_their_transforms() {
+        // 🔴 Before 2026-11-14 <build> was never read: an item's transform (a
+        // slicer's plate placement) and a component's transform were ignored,
+        // so a moved part sectioned where it was modelled; an object no item
+        // names was imported anyway; a component used twice appeared once.
+        let model = |body: &str| {
+            zip_model(&format!(
+                "<model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">{body}</model>"
+            ))
+        };
+        let cube = box_object(1, 0.0, 10.0, 0.0, 10.0, 10.0);
+        // Item moved +100 in X, rotated 90 deg about Z (x' = -y, y' = x).
+        let r = parse_3mf_section(
+            &model(&format!(
+                "<resources>{cube}{}</resources><build><item objectid=\"1\" transform=\"0 1 0 -1 0 0 0 0 1 100 0 0\"/></build>",
+                box_object(9, 500.0, 510.0, 0.0, 10.0, 10.0)
+            )),
+            5.0,
+            0.01,
+        );
+        assert!(r.unsupported.is_empty(), "{:?}", r.unsupported);
+        assert_eq!(r.contours.len(), 1, "an object no item names was imported: {}", r.contours.len());
+        let b = r.contours[0].bounds().unwrap();
+        assert!((b.0 - 90.0).abs() < 1e-6 && (b.2 - 100.0).abs() < 1e-6 && b.1.abs() < 1e-6, "item transform not applied: {b:?}");
+        // Assembly: object 2 = object 1 twice, at +0 and +50 in Y; item at +20 X.
+        let r = parse_3mf_section(
+            &model(&format!(
+                "<resources>{cube}<object id=\"2\"><components><component objectid=\"1\"/><component objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 0 50 0\"/></components></object></resources><build><item objectid=\"2\" transform=\"1 0 0 0 1 0 0 0 1 20 0 0\"/></build>"
+            )),
+            5.0,
+            0.01,
+        );
+        let mut ys: Vec<(f64, f64)> = r.contours.iter().filter_map(|c| c.bounds()).map(|b| (b.0, b.1)).collect();
+        ys.sort_by(|a, b| a.1.total_cmp(&b.1));
+        assert_eq!(ys.len(), 2, "component used twice must section twice: {ys:?}");
+        assert!((ys[0].0 - 20.0).abs() < 1e-6 && (ys[1].1 - 50.0).abs() < 1e-6, "{ys:?}");
+        // Empty build and an external p:path are refused by name.
+        let empty = parse_3mf(&model(&format!("<resources>{cube}</resources><build/>")));
+        assert!(empty.tris.is_empty() && empty.problems.iter().any(|p| p.contains("no items")), "{:?}", empty.problems);
+        let ext = parse_3mf(&model(&format!(
+            "<resources>{cube}<object id=\"2\"><components><component p:path=\"/3D/Objects/a.model\" objectid=\"1\"/></components></object></resources><build><item objectid=\"2\"/></build>"
+        )));
+        assert!(ext.tris.is_empty() && ext.problems.iter().any(|p| p.contains("p:path")), "{:?}", ext.problems);
     }
 
     #[test]

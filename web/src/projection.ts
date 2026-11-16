@@ -210,6 +210,94 @@ export function worldPerPixel(radius: number, viewH: number): number {
  * tab exists to be OpenSCAD-shaped and the founder has said *"like openscad"*
  * four times; a different default here would be a divergence bought for nothing.
  */
+/**
+ * ZOOM TOWARD THE POINTER — how far the orbit centre must move so the world
+ * point under the cursor stays under the cursor while `radius` changes.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 🔴 WHY THIS IS A SHARED PURE FUNCTION AND NOT TWO COPIES
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Both viewports must zoom identically — `tests/cad-camera-parity.test.ts`
+ * exists because a CAD tab and a CNC tab that move differently under the same
+ * gesture is the same defect as an inverted axis. The existing conventions are
+ * guarded by COMPARING THE TEXT of two copies, because `AXIS_COLOR` is
+ * module-private. Nothing forces that here: `projection.ts` is already imported
+ * by both, so this is one definition and there is no copy to drift.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 🔴 IT DOES NOT TOUCH ANY OF THE FOUR GUARDED SIGN CONVENTIONS
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * `radius = radius * (deltaY > 0 ? 1.12 : 0.9)` is unchanged, byte for byte, in
+ * both files — scrolling toward you still zooms OUT by the same factor, which is
+ * the convention measured against OpenSCAD 2026.08.07 and asserted in that test.
+ * What is added is a LATERAL shift of the orbit centre, which OpenSCAD does not
+ * do.
+ *
+ * ⚠ SO IT IS A DELIBERATE DIVERGENCE FROM THE TOOL THIS TAB MIRRORS, and it is
+ * recorded as one. The founder asked for the mouse behaviour of a different
+ * viewer (2026-09-09, *"2bee.cad mouse interaction, mouse, center of view"*);
+ * zoom-to-cursor is the single behaviour that most decides whether a 3D view
+ * feels right, and zooming toward the middle of the screen when the thing you
+ * are looking at is in a corner is what makes a viewer feel like it is fighting
+ * you. **A divergence chosen and written down is not the same as a sign flipped
+ * because it felt better** — the four directions are untouched and still match
+ * both references.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * THE DERIVATION
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * `worldPerPixel` is LINEAR in `radius`, so the same screen offset covers
+ * `after/before` as much world after the zoom as before it. The point under the
+ * cursor therefore slides by `(1 − after/before)` of its offset from the centre,
+ * and moving the orbit centre by exactly that puts it back.
+ *
+ * The screen basis is the one `pan` already uses — screen-right and screen-up
+ * projected onto the model plane, including the same `fore` factor, so that a
+ * zoom and a pan that cover the same pixels move the world by the same amount.
+ * ⚠ Only X and Y move, again as `pan` does: the orbit centre stays on its own
+ * Z plane, and a zoom that also drifted vertically would be a third motion
+ * nobody asked for.
+ */
+export function zoomTowardCursor(o: {
+  /** Pointer offset from the viewport CENTRE, in CSS pixels. `y` grows DOWN. */
+  offsetX: number;
+  offsetY: number;
+  /** Viewport height, in CSS pixels — the scale `worldPerPixel` is defined on. */
+  viewH: number;
+  /** Orbit radius before and after the wheel notch. */
+  before: number;
+  after: number;
+  theta: number;
+  phi: number;
+}): { x: number; y: number } {
+  const { offsetX, offsetY, viewH, before, after, theta, phi } = o;
+  /* 🔴 A ZERO OR NEGATIVE `before` WOULD DIVIDE BY ZERO AND CORRUPT `target`
+   * WITH NO PICTURE TO SAY WHY — the same failure mode the `NaN` pan had. A
+   * camera that cannot be at radius 0 is not a case to handle gracefully; it is
+   * one to refuse, and refusing means moving nothing. */
+  if (!(before > 0) || !Number.isFinite(after) || viewH < 1) return { x: 0, y: 0 };
+
+  const k = worldPerPixel(before, viewH);
+  const f = 1 - after / before;
+  const rightX = -Math.sin(theta);
+  const rightY = Math.cos(theta);
+  const cz = Math.cos(phi);
+  const upX = -Math.sign(cz) * Math.cos(theta);
+  const upY = -Math.sign(cz) * Math.sin(theta);
+  const fore = 1 / Math.max(0.2, Math.abs(cz));
+  /* Screen y runs DOWN, so a pointer BELOW the centre is a NEGATIVE step along
+   * screen-up. One negation, here, where the two conventions meet. */
+  const alongRight = offsetX * k * f;
+  const alongUp = -offsetY * k * f * fore;
+  return {
+    x: alongRight * rightX + alongUp * upX,
+    y: alongRight * rightY + alongUp * upY,
+  };
+}
+
 export const CAD_DEFAULT_PROJECTION: Projection = 'perspective';
 
 /**

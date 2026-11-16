@@ -370,7 +370,7 @@ async function partTable(page: Page, attr: 'bboxes' | 'probes') {
  * are shipped to demonstrate. A test needing a runnable program cannot use one.
  */
 test.describe('2bee.slicer', () => {
-  test('the default multi-tool fixture is REFUSED for want of a Z reference, and both resolutions clear it', async ({
+  test('the default multi-tool fixture is re-zeroed BY HAND without a probe, and each setting changes the program', async ({
     page,
   }) => {
     /* 🔴 THE SEAM `readyRunnable()` EXISTS FOR, ASSERTED ONCE, HERE, SO THAT
@@ -390,30 +390,36 @@ test.describe('2bee.slicer', () => {
      * says the state is REACHABLE AND ESCAPABLE, and the sentence is asserted
      * rather than the status word, because *"refused"* with the wrong reason
      * beside it is the same green. */
+    /* ⚠ RE-STATED 2026-11-15. This used to assert the probe-less fixture was REFUSED. bac988e441 (2026-10-16)
+     * replaced that refusal by design — *"Cutter change on a probe-less machine - DECISION: build the manual
+     * re-zero, not a refusal"* — and the test stayed red, unseen, while the browser suite could not run. The three
+     * arms now assert the EMITTED PROGRAM (lane rule: never the setting): a hand re-zero, its withdrawal with the
+     * warning that says Z is not re-referenced, and the probe. Each arm goes red if its line stops being emitted. */
     await page.goto('/?fixtures=1');
     await ready(page);
+    // The program text is behind the G-code panel AND its text toggle (see the rotate test below).
+    await openGcode(page);
+    await page.getByTestId('toggle-gcode').click();
+    const gcode = page.getByTestId('gcode');
 
-    // (1) The default state refuses, and NAMES the thing the operator must fix.
-    await expect(page.getByTestId('status')).toHaveText('refused');
-    await expect(page.getByTestId('blocked')).toContainText(
-      'a Z re-reference was requested but the machine has no probe'
-    );
-
-    // (2) Resolution A — withdraw the request. This is what `readyRunnable` does.
-    await page.getByTestId('probe-after-change').uncheck();
+    // (1) Default: no probe, re-reference requested -> a manual SET Z ZERO stop after the tool change.
     await expect(page.getByTestId('status')).toHaveText('runnable');
+    await expect(gcode).toContainText('( SET Z ZERO ->');
 
-    // ...and it is genuinely the refusal that moved, not the panel: put the
-    // request back and the same refusal returns.
+    // (2) Withdraw the request: no re-zero, and the program SAYS Z is not re-referenced.
+    await page.getByTestId('probe-after-change').uncheck();
+    await expect(gcode).not.toContainText('( SET Z ZERO ->');
+    await expect(gcode).toContainText('WARNING Z IS NOT RE-REFERENCED');
+
+    // ...and putting it back brings the hand re-zero back.
     await page.getByTestId('probe-after-change').check();
-    await expect(page.getByTestId('status')).toHaveText('refused');
+    await expect(gcode).toContainText('( SET Z ZERO ->');
 
-    // (3) Resolution B — declare the probe and the plate top. Both halves are
-    // required: `probe-enabled` with no `touch-plate-mm` is an undeclared plate,
-    // which is the state decision #43 refuses BY DESIGN rather than defaults.
+    // (3) Declare the probe and the plate top: the re-reference is a probe move.
     await page.getByTestId('probe-enabled').check();
     await page.getByTestId('touch-plate-mm').fill('1.6');
     await expect(page.getByTestId('status')).toHaveText('runnable');
+    await expect(gcode).toContainText('G38.2');
   });
 
   test('loads, plans, and renders without console errors', async ({ page }) => {
@@ -2819,7 +2825,9 @@ test.describe('2bee.slicer', () => {
     // by `svg[data-tool-shape]` alone: the panel is the surface under test, and
     // a selector that would still pass if the drawing reappeared somewhere else
     // is not asserting where it is.
-    const shape = page.getByTestId('tool-picker-shape').locator('svg[data-tool-shape]');
+    // ⚠ The pane is a 3D canvas since f1fbf5ffb0 (2026-10-15), the flat drawing only its no-WebGL fallback; the
+    // wrapper carries the same tip/helix the drawing did. Either is "drawn"; neither is the red case.
+    const shape = page.getByTestId('tool-picker-shape').locator('[data-testid="tool-3d"], svg[data-tool-shape]');
 
     const ids = await rows.evaluateAll((els) =>
       els.map((e) => (e.getAttribute('data-testid') ?? '').replace('tool-picker-opt-', ''))
@@ -2848,7 +2856,9 @@ test.describe('2bee.slicer', () => {
         drawn,
         tip: drawn ? await shape.getAttribute('data-tool-tip') : null,
         helix: drawn ? await shape.getAttribute('data-tool-helix') : null,
-        label: drawn ? ((await shape.getAttribute('aria-label')) ?? '') : '',
+        label: drawn
+          ? await shape.evaluate((el) => el.getAttribute('aria-label') ?? el.querySelector('canvas')?.getAttribute('aria-label') ?? '')
+          : '',
       });
       if (i < ids.length - 1) await page.keyboard.press('ArrowDown');
     }
@@ -3662,8 +3672,10 @@ test.describe('2bee.slicer', () => {
 
     const shape = page.getByTestId('tool-picker-shape');
     await expect(shape).toHaveCount(1);
-    // It is the SAME component at the pane frame, not a second drawing.
-    await expect(shape.locator('svg[data-tool-shape="pane"]')).toHaveCount(1);
+    // The pane picture: the 3D solid since f1fbf5ffb0 (2026-10-15), or the pane-frame drawing where there is no
+    // WebGL. Exactly one of them.
+    const panePic = shape.locator('[data-testid="tool-3d"] canvas, svg[data-tool-shape="pane"]');
+    await expect(panePic).toHaveCount(1);
     // 🔴 THE ROW DRAWING IS GONE — founder, 2026-08-10, landed in `7140829eb6`
     // by DELETING `ObjectItem.icon`, not by declining to render it: an
     // accepted-and-ignored prop is a control that looks live. This assertion
@@ -3683,7 +3695,7 @@ test.describe('2bee.slicer', () => {
     // reader if ANY ancestor is `aria-hidden`. That is exactly how it is
     // rendered in the row, so checking the svg alone would pass on the wrong
     // arrangement.
-    const hidden = await shape.locator('svg').evaluate(
+    const hidden = await panePic.evaluate(
       (el) => el.closest('[aria-hidden="true"]') !== null
     );
     expect(hidden, 'the property-panel shape is hidden from assistive tech').toBe(false);
@@ -5010,7 +5022,9 @@ test.describe('2bee.slicer', () => {
     await expect(page.getByTestId('status')).toBeVisible({ timeout: 30_000 });
     await expect(uncut).toHaveAttribute('data-uncut-state', 'finding');
     await expect(uncut).toHaveClass(/bad/);
-    expect(Number(await uncut.textContent())).toBeGreaterThan(100);
+    // POLLED: `status` is already visible from the pocket plan, so a one-shot read raced the re-plan and saw the
+    // pocket's count (84, measured 2026-11-15, 1 run in 3) instead of the outline-only one.
+    await expect.poll(async () => Number(await uncut.textContent()), { timeout: 30_000 }).toBeGreaterThan(100);
   });
 
   // =========================================================================
@@ -5239,13 +5253,18 @@ test.describe('2bee.slicer', () => {
      * MEASURED HERE, through the release CLI, on the box this was written on:
      *
      *   $ cat > /tmp/spoil.json <<'EOF'
-     *     {"machine":{"spoilboard":{"name":"measured 250x900","x_mm":0,"y_mm":0,
-     *       "size_x_mm":250,"size_y_mm":900}},"stock":{"thickness_mm":17.8}}
+     *     {"machine":{"probe_enabled":false,"spoilboard":{"name":"measured 250x900","x_mm":0,"y_mm":0,
+     *       "size_x_mm":250,"size_y_mm":900}},"stock":{"thickness_mm":17.8},"probe_after_toolchange":true}
      *     EOF
      *   $ ./target/release/2bee-slice job plate --config /tmp/spoil.json
-     *   sim: cell=0.6mm gouge=0 uncut=0 spoilboard=2204
-     *        below_sheet=over-spoilboard:0 past-spoilboard-edge:2204
-     *        spoilboard-undeclared:0
+     *   sim: cell=0.6mm gouge=0 uncut=0 spoilboard=2278 below_sheet=over-spoilboard:0
+     *        past-spoilboard-edge:2278 spoilboard-undeclared:0
+     *
+     * ⚠ 2204 UNTIL 2026-11-15, and that number was measured ON A DEFECT: 06a2cc8e4d fixed tabs that were cut as
+     * long wedges ("every tabbed profile, default settings"), which moves this count to 2277 on the old recipe and
+     * 2278 on the config the browser actually sends (probe off, re-reference by hand — bac988e441). Re-measured
+     * through the CLI on the Mac Pro on 2026-11-15; a wasm sweep of every build since 2026-08-10 puts the step at
+     * 06a2cc8e4d. Still EXACT equality: the browser and the CLI must agree.
      *
      * MEASURED INDEPENDENTLY by the spoilboard change itself (`043788cb09`)
      * through the browser's own wasm with the config object `App` builds:
@@ -5285,8 +5304,8 @@ test.describe('2bee.slicer', () => {
     await expect(page.getByTestId('spoilboard-strike')).toContainText('PAST THE EDGE');
 
     // The measurement, from the two runs above.
-    await expect(past).toHaveText('2204');
-    await expect(page.getByTestId('spoilboard-past')).toHaveText('2204');
+    await expect(past).toHaveText('2278');
+    await expect(page.getByTestId('spoilboard-past')).toHaveText('2278');
   });
 
   test('the bare reach says WHICH of the two kinds of nothing it is', async ({ page }) => {

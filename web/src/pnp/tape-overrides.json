@@ -1,0 +1,45 @@
+{
+  "_about": "Per-Mfr_PN tape for parts the package default cannot place. Values are pnp's, read from hardware/datasheets/ (pnp tickets 2026-10-11-09-34-58, 09-54-25). verified=false means the source does NOT state the tape, and the tool says 'tape unverified' on every run. Our '16' variant is itself typical EIA-481, not measured (cad).",
+  "TPS568230RJER": {
+    "variant": "12",
+    "pocketPitchMm": 8,
+    "verified": true,
+    "source": "TI tps568230_slvsee8_datasheet.pdf tape table: W 12.0, P1 8.0"
+  },
+  "XGL4030-222MEC": {
+    "variant": "12",
+    "pocketPitchMm": 8,
+    "verified": true,
+    "source": "Coilcraft datasheet: 12 mm wide, 8 mm pocket spacing"
+  },
+  "RLP25FEGMR010": {
+    "variant": "12",
+    "pocketPitchMm": 8,
+    "verified": false,
+    "source": "JLC_C393072 datasheet: embossed, reel W 13 mm; tape width inferred, pitch NOT stated — 8 is pnp's conservative case"
+  },
+  "TPS54360DDAR": {
+    "variant": "12",
+    "pocketPitchMm": 8,
+    "verified": true,
+    "source": "TI tape table in JLC_C44377_TPS54360DDAR.pdf: W 12.0, P1 8.0"
+  },
+  "CKST0603-10uH/M": {
+    "variant": "16",
+    "pocketPitchMm": 8,
+    "verified": false,
+    "source": "JLC_C3002639 datasheet: body 7.4 x 6.6 x 3.0 mm; tape table omits CKST0603 — 16 mm / 8 mm assumed from body size"
+  },
+  "B560C-13-F": {
+    "variant": "16",
+    "pocketPitchMm": 8,
+    "verified": false,
+    "source": "JLC_C85100 datasheet: 'SMC, 3000, Tape & Reel' only — 16 mm / 8 mm is the usual SMC tape, not read"
+  },
+  "BZT52C12": {
+    "variant": "8emb",
+    "pocketPitchMm": 4,
+    "verified": false,
+    "source": "JLC_C43491_BZT52C12.pdf p.5 is the tape drawing with no extractable text — 8 mm embossed / 4 mm pitch is the usual SOD-123 tape, NOT read (added by 2bee_app 2026-11-15: pcb 3274ec279e put it on the outlet BOM and every outlet plan was refused 'no tape known'; the pnp lane that owned these values is retired)"
+  }
+}

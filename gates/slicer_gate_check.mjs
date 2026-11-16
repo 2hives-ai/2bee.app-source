@@ -38,27 +38,70 @@
  *   node gates/slicer_gate_check.mjs --quick    skip the release rebuild + the browser
  *   node gates/slicer_gate_check.mjs --list     print the gate table and exit
  *   node gates/slicer_gate_check.mjs --self-plant <name>   see SELF_PLANTS below
+ *   node gates/slicer_gate_check.mjs --json <path>   also write the fleet report (see JSON_OUT)
  *
- *   Those four are the WHOLE vocabulary. Anything else — a typo, a flag from
+ *   Those five are the WHOLE vocabulary. Anything else — a typo, a flag from
  *   the CLI, a flag that never existed, a stray word — is REFUSED with exit 2
  *   and an empty stdout, BEFORE this file builds, spawns or writes anything.
  *   See `checkRunnerFlags` below for why that is a safety property and not a
  *   politeness one, and gate FLAG's harness limb for what asserts it.
  *
- * Exit codes — three states, because there are three answers:
+ * Exit codes — the fleet contract (canon/gate-audit-2026-09.md check 5):
  *   0  GO          every gate ran and passed
- *   1  NO-GO       a gate ran and did not pass
- *   3  INCOMPLETE  nothing failed, but a gate could not run HERE. Not a pass.
+ *   1  NO-GO       a gate ran and did not pass — INCLUDING a core that does not
+ *                  compile and a malformed baseline in this file, which are
+ *                  defects found, not an inability to run
+ *   2  INCOMPLETE  nothing failed, but a gate could not run HERE. Not a pass.
+ *                  Also: an invocation REFUSED before anything ran (empty
+ *                  stdout) and a --quick run with no binary to drive.
+ *
+ * 🔴 INCOMPLETE WAS EXIT 3 UNTIL 2026-09-26. Moved to 2 on ceo's ruling when
+ * this gate was first registered in fleet_gate_check.py, whose contract reads 2
+ * as "did not run" and scored our 3 as NO-GO. Both things now exiting 2 ran
+ * nothing that can be certified; STDOUT tells them apart — a refusal prints
+ * nothing, an INCOMPLETE prints the whole scorecard and a VERDICT line.
  */
 
-import { execSync, spawnSync } from 'node:child_process';
+import { execSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, renameSync } from 'node:fs';
+import { tmpdir, setPriority } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+// Where this run writes its own scratch files: generated configs, DXFs, the
+// DOOR sweep, the oracle report, the RUN fake log, the probe dump. It is
+// `target/` for a normal run. Gate SPLNT sets SLICER_GATE_SCRATCH to a private
+// directory for each `--quick` child, which is what lets those children run in
+// parallel: before this they all wrote the same fixed paths, so two at once
+// would read each other's files. ⚠ This covers the harness's OWN files only.
+// Shared build outputs (`target/release`, the wasm, the `target/cad-head-<tree
+// hash>` caches — one per hash, never replaced in place) stay in `target/` on purpose, and the one plant that writes into the
+// source tree (`tsc-error-blind`, `web/src/__tsc_selfplant__.ts`) is run alone.
+const SCRATCH = process.env.SLICER_GATE_SCRATCH || join(ROOT, 'target');
+
+// 🔴 THIS GATE YIELDS THE MACHINE, WHOEVER STARTS IT. On 2026-11-14 it was
+// measured (ceo ticket 20-50-28) driving jamesave's load through its own
+// `--quick` self-plant children and the cad oracle — the box that also carries
+// the 2hives live streams, whose YouTube leg drops above load 20. The founder's
+// ruling the same night moves heavy work to the Mac Pro (`tools/mac_run.sh`,
+// AGENTS.md "WHERE HEAVY WORK RUNS"), but the fleet timers and the nightly
+// audit start this file wherever they run, so the throttle lives HERE, at the
+// top, before anything is built or spawned: lowest CPU priority, idle IO class,
+// and four cargo jobs unless the caller chose a number. Every child — cargo,
+// tsc, the oracle, each SPLNT `--quick` run — inherits all three.
+// ⚠ It slows a run on an idle box only by what other work wants the CPU.
+// SLICER_GATE_NO_THROTTLE=1 opts out (e.g. a dedicated runner).
+if (process.env.SLICER_GATE_NO_THROTTLE !== '1') {
+  try {
+    setPriority(19);
+  } catch {
+    /* not permitted here: still correct, only less polite */
+  }
+  spawnSync('ionice', ['-c3', '-p', String(process.pid)], { stdio: 'ignore' });
+  process.env.CARGO_BUILD_JOBS ??= '4';
+}
 
 // ---------------------------------------------------------------------------
 // THE RUNNER'S OWN FLAGS — refused BEFORE anything is built, spawned or written.
@@ -102,6 +145,7 @@ const RUNNER_FLAGS = {
   '--quick': { takesValue: false, why: 'skip the release rebuild, the wasm rebuild and the browser suite' },
   '--list': { takesValue: false, why: 'print the gate table + the PENDING budget, then exit 0' },
   '--self-plant': { takesValue: true, why: 'name a negative control for a defect that lives IN THIS HARNESS' },
+  '--json': { takesValue: true, why: 'also write the fleet_gate_check.py report (domain verdict + per-gate status) to <path>' },
 };
 // Named refusals, because "unknown flag" is a true answer that teaches nothing
 // about the two flags people have actually typed at this file.
@@ -181,6 +225,59 @@ checkRunnerFlags(process.argv.slice(2));
 const QUICK = process.argv.includes('--quick');
 const LIST = process.argv.includes('--list');
 
+// ---------------------------------------------------------------------------
+// `--json <path>` — the report fleet_gate_check.py tallies (added 2026-09-26,
+// when this gate was first registered there). Without it the fleet runner can
+// read only the exit code and scores the lane "verified NOTHING".
+//
+// Shape is ceo's, and the split is deliberate: `status` lives on GATES only
+// (PASS|FAIL|WARN|SKIP), `verdict` on the DOMAIN only
+// (GO|GO_WITH_WARN|NO-GO|INCONCLUSIVE). A PENDING gate is SKIP — never PASS —
+// and INCOMPLETE is INCONCLUSIVE, which the fleet paints blue ("could not run;
+// not a defect, not clean"), the same meaning it has here.
+//
+// ⚠ Written on EVERY exit path that ran gates, and on the aborts after the
+// flag check too: a run that ended early must not leave a stale report from a
+// previous run at the same path reading as this one's. So the file is REMOVED
+// first thing, before the banner.
+const JSON_OUT = (() => {
+  const i = process.argv.indexOf('--json');
+  return i < 0 ? null : process.argv[i + 1];
+})();
+const JSON_VERDICT_OF = { GO: 'GO', INCOMPLETE: 'INCONCLUSIVE', 'NO-GO': 'NO-GO' };
+const JSON_STATUS_OF = { PASS: 'PASS', FAIL: 'FAIL', PENDING: 'SKIP' };
+function writeJsonReport(verdictWord, rows, note) {
+  if (!JSON_OUT) return;
+  // Every caller runs after GATES is declared; `typeof` would NOT protect a
+  // const in its temporal dead zone (it throws), so the guard is a try.
+  let kinds;
+  try {
+    kinds = new Map(GATES.map((g) => [g[0], g[2]]));
+  } catch {
+    kinds = new Map();
+  }
+  const results = {};
+  // A try, not `typeof`: an abort before `RUN_T0`'s line is its temporal dead zone.
+  let prev = null;
+  try {
+    prev = RUN_T0;
+  } catch {
+    /* aborted before timing started — no gaps to report */
+  }
+  for (const r of rows) {
+    results[r.id] = { status: JSON_STATUS_OF[r.state] ?? 'FAIL', detail: r.msg, hard: kinds.get(r.id) === 'HARD' };
+    // Seconds since the previous result (or run start) — see RUN_T0's comment.
+    if (typeof r.at === 'number' && prev !== null) {
+      results[r.id].since_previous_result_s = Math.round((r.at - prev) / 100) / 10;
+      prev = r.at;
+    }
+  }
+  const body = { domain: '2bee_app', verdict: JSON_VERDICT_OF[verdictWord] ?? 'NO-GO', results };
+  if (note) body.note = note;
+  writeFileSync(JSON_OUT, JSON.stringify(body, null, 2) + '\n');
+}
+if (JSON_OUT) rmSync(JSON_OUT, { force: true });
+
 // Set by gate SPLNT on the `--quick` children it spawns to audit the
 // `--self-plant` registry, and it does two things. It stops a child auditing its
 // own audit — SPLNT's DRIVE limb is full-pass-only, so `--quick` already
@@ -192,7 +289,36 @@ const LIST = process.argv.includes('--list');
 // vocabulary this runner accepts and gate FLAG asserts it refuses everything
 // else; adding a fifth flag would widen the surface FLAG exists to hold shut.
 const SPLNT_CHILD = process.env.SLICER_GATE_SPLNT_CHILD === '1';
+// 🔴 ONE cad TREE PER PASS (2026-10-15). Every SPLNT child used to read `HEAD:hardware/cad` at
+// the moment IT started, so a cad commit during the ~25-min SPLNT phase gave the children
+// different inputs from each other and from the parent. Measured on full passes #10 and #11:
+// cad committed 3x mid-pass each time, and 7-12 plants came back "DRIFTED mid-pass,
+// UNMEASURABLE". The plants were never broken; the population moved under them. The parent
+// now hands its own tree hash to every child (env, not a flag, for the reason given above),
+// so every row in one pass is measured against one input. Set by the CAD1/CAD1H block.
+let CAD_TREE_THIS_PASS = null;
 const SPLNT_ROWS_TAG = 'SPLNT-ROWS ';
+// ── ONE SET OF GITHUB API ANSWERS PER FULL PASS (2026-10-14) ───────────────
+// 🔴 THIS WAS THE `AGPL` NOISE, MEASURED. AGPL's correspondence limb makes 3
+// anonymous api.github.com calls (repo, commit, tree). GitHub allows 60
+// anonymous calls an hour per IP, and a full pass ran AGPL 52 times — itself
+// plus 51 SPLNT children — so ~156 calls: over the limit SERIALLY (the 10-11
+// serial nightly saw AGPL drift b1->b3) and faster still in parallel. A child
+// that hit the limit read `API rate limit exceeded`, AGPL went PASS -> PENDING
+// in that child only, and SPLNT called it a noisy row, a drift, or "parallel
+// changed a row" — and marked all ten AGPL plants UNMEASURABLE.
+// So a full pass keeps the SUCCESSFUL answers of those three calls in one
+// directory, keyed by URL, and its children read them instead of asking again.
+// The parent's own AGPL row is still a live measurement; the children's
+// purpose is to compare a plant against a clean baseline INSIDE ONE PASS, and
+// for that every child must see the same mirror — the same reason cad-head is
+// pinned by tree hash. ⚠ Error answers (rate limit, 404) are NEVER cached, so a
+// child is never told a failure that it did not see itself.
+const GH_CACHE = SPLNT_CHILD
+  ? process.env.SLICER_GATE_GH_CACHE || null
+  : !QUICK
+    ? join(SCRATCH, `gh-cache-${process.pid}`)
+    : null;
 
 // ---------------------------------------------------------------------------
 // `--self-plant` — the negative control for defects that live IN THIS HARNESS.
@@ -221,14 +347,32 @@ const SPLNT_ROWS_TAG = 'SPLNT-ROWS ';
 //
 // Do not let a self-plant into a real run. It prints a banner on every line of
 // the scorecard for exactly that reason.
+/**
+ * Self-plants whose ONLY target limb runs in a FULL pass (`!QUICK`). SPLNT drives
+ * `--quick` children, so it cannot exercise these; it names them instead. Each is
+ * proved by a full pass run with the plant, recorded here with the date and result.
+ */
+// PROVED 2026-10-15 by full passes with the plant (SLICER_GATE_SPLNT_CHILD=1 so SPLNT did not drive, own scratch):
+//   --self-plant cad1h-pending-tight -> SELF-PLANTED FAIL CAD1H "UNDECIDABLE GREW: 160 of 373 PENDING, against a
+//     pinned RATE of 160/373 which allows 159"
+//   --self-plant cad1h-pending-slack -> SELF-PLANTED FAIL CAD1H "RATCHET: only 160 of 373 PENDING and the pinned
+//     rate 160/373 still allows 161. Lower it"
+// Re-prove when either limb changes: a control nobody drives is only as good as its last run.
+const FULL_ONLY_PLANTS = new Map([
+  ['cad1h-pending-slack', 'PENDING ratchet-DOWN limb (full pass only; proved 2026-10-15)'],
+  ['cad1h-pending-tight', 'UNDECIDABLE-GREW limb (full pass only; proved 2026-10-15)'],
+]);
+
 const SELF_PLANTS = {
+  'fdm-empty-run': 'filter the twobee-fdm test run down to a name that matches nothing — FDM must go red on its test floor, because a run that tested nothing exits 0',
   'pend-unbudgeted': 'inject a PENDING for a gate that is NOT in PENDING_BUDGET — must become FAIL, verdict NO-GO',
-  'pend-budgeted': 'inject a PENDING for a budgeted gate — must stay PENDING, verdict INCOMPLETE, exit 3',
+  'pend-budgeted': 'inject a PENDING for a budgeted gate — must stay PENDING, verdict INCOMPLETE, exit 2',
   'stale-core': 'salt the recomputed core digest — STALE must go red on a tree that is genuinely current',
   'p4-count-all': 'count EVERY canned cycle as a relief, the pre-fix behaviour — P4 must go red on the plate leg',
   'p8-expect-shift': 'shift P8’s independently computed expectation by 1mm — P8 must go red',
   'doc-roster': 'ask GDOC for a gate id that has no row in SLICER-GATES.md — GDOC must go red',
   'verdict-go-on-gaps': 'restore the pre-2026-08-10 verdict rule (pending discarded) — VERD must go red',
+  'verdict-exit-3': 'put INCOMPLETE back on exit 3, the pre-2026-09-26 code the fleet scored as a defect — VERD must go red (its distinctness limb alone passed it)',
   'cad1-oracle-plant': 'run scad_oracle under its own --plant mesh-scale — CAD1 and CAD1H must go red on cases that are not in the baseline',
   // ⚠ THE SECOND HALF OF THIS DESCRIPTION USED TO CLAIM CAD1H'S RATCHET-DOWN LIMB
   // AND NEVER DROVE IT (corrected 2026-08-11, by running it rather than reading
@@ -368,6 +512,8 @@ const SELF_PLANTS = {
     'drop `machine.probe_enabled` from DECLARED_HOST_DIVERGENCE — HOST must go red on the UNDECLARED limb, which is the limb that would have caught 158658175e’s seam on the day it was introduced instead of two days later',
   'host-stale-entry':
     'declare `machine.safe_z_mm` — a field the two hosts AGREE on — as an intended divergence. HOST must go red as a STALE DECLARATION. This is the half that fails in the other direction: an exemption outliving the thing it exempts reads exactly like a live one, and this lane has found two stale reds today',
+  'host-context-blind':
+    'drop LIVENESS_CONTEXT, so `auto_reclamp` is swept alone on fixtures where no cut crosses a clamp. HOST must go red on it as INERT — a key that only acts in a context reads dead without one, and the context is the thing that must keep being supplied',
   'host-extract-blind':
     'return an EMPTY browser config from the App.tsx extraction. HOST must report a DEAD INSTRUMENT and go red, never "0 divergences found" — an extractor that reads nothing and a pair of hosts that agree produce the same number of findings, and only one of them is a pass',
   // Two for G2, added with the input-set widening of 2026-08-12. One per limb,
@@ -414,6 +560,12 @@ const SELF_PLANTS = {
     '2026-09-09 state, in which the mirror answered 200 and was FOUR COMMITS BEHIND the served build and this gate ' +
     'went PASS on it. AGPL must go RED when 2bee.app is served and PEND when it is not; the one thing it may never ' +
     'do is pass. This is the control on the limb whose absence produced the green legal called "worse than no gate"',
+  'agpl-mirror-ahead':
+    'force the correspondence probe to DRIFT against the DEPLOYED commit in the AHEAD direction — the mirror publishing a ' +
+    'bundle-affecting file the served build does not have. AGPL must go RED. \u26a0 Every instrument on the 2026-09-09 thread ' +
+    'asked only whether the mirror was BEHIND, and re-cutting the mirror at HEAD after a commit is exactly how the other ' +
+    'direction arises: `legal` measured `main` two commits ahead of the served bundle and NO GATE ASKED. It is also the ' +
+    'ONLY plant that drives the deployed-basis branch, where no probe-4 evidence is consulted',
   'agpl-mirror-undisclosed':
     'delete MIRROR.md from the mirror side of the correspondence probe while every other file still matches — the ' +
     'state `ceo`\u2019s automated-push recipe would have created on its FIRST run, since that recipe builds the pushed ' +
@@ -484,6 +636,7 @@ const SELF_PLANT_TARGETS = {
   'p8-expect-shift': { moves: ['P8'] },
   'doc-roster': { moves: ['GDOC'] },
   'verdict-go-on-gaps': { moves: ['VERD'] },
+  'verdict-exit-3': { moves: ['VERD'] },
   'cad1-oracle-plant': { moves: ['CAD1', 'CAD1H'] },
   'cad1-verdict-unknown': { moves: ['CAD1', 'CAD1H'] },
   // ✅ UNMASKED 2026-08-14, and the tripwire did exactly what it was built to
@@ -516,11 +669,15 @@ const SELF_PLANT_TARGETS = {
   'cad1h-pending-slack': { moves: ['CAD1H'] },
   'cad1h-pending-tight': { moves: ['CAD1H'] },
   'cad1-baseline-slack': { moves: ['CAD1'] },
-  'cad1-undecided-unlisted': { moves: ['CAD1', 'CAD1H'] },
+  // CAD1 only since 2026-10-15 (as cad1-baseline-slack's narrowing 2026-09-02): SPLNT's --quick children
+  // cannot redden CAD1H's undecided limb, so the CAD1H leg read "MOVED THE MESSAGE, NOT THE VERDICT" on every
+  // full pass. GIVEN UP, named: under SPLNT this control no longer proves the CAD1H half; CAD1 still must go red.
+  'cad1-undecided-unlisted': { moves: ['CAD1'] },
   'run-needle-drift': { moves: ['RUN'] },
   'run-plant-inert': { moves: ['RUN'] },
   'run-persona-instrument': { moves: ['RUN'] },
   'agpl-hijack-blind': { moves: ['AGPL'] },
+  'fdm-empty-run': { moves: ['FDM'] },
   'mark-depth-window': { moves: ['MARK'] },
   'mark-banner-blind': { moves: ['MARK'] },
   'tsc-error-blind': { moves: ['TSC'] },
@@ -535,6 +692,7 @@ const SELF_PLANT_TARGETS = {
   'host-undeclared': { moves: ['HOST'] },
   'host-stale-entry': { moves: ['HOST'] },
   'host-extract-blind': { moves: ['HOST'] },
+  'host-context-blind': { moves: ['HOST'] },
   'g2-input-narrow': { moves: ['G2'] },
   'g2-comment-escape': { moves: ['G2'] },
   'agpl-published': { moves: ['AGPL'] },
@@ -545,6 +703,7 @@ const SELF_PLANT_TARGETS = {
   'agpl-mirror-unchecked': { moves: ['AGPL'] },
   'agpl-served-elsewhere': { moves: ['AGPL'] },
   'agpl-mirror-undisclosed': { moves: ['AGPL'] },
+  'agpl-mirror-ahead': { moves: ['AGPL'] },
   'splant-orphan': { moves: ['SPLNT'] },
 };
 
@@ -577,14 +736,29 @@ const selfPlanted = (name) => SELF_PLANT === name;
 let BIN = join(ROOT, 'target/release/2bee-slice');
 
 const results = [];
+// ⏱ WHERE THE TIME GOES (2026-10-11, ceo `10-05-10-36-34`: the full pass hit the
+// fleet's 4800 s ceiling ten nights running and nothing said which gate grew).
+// Every result is stamped as it is pushed — by ANY route, including the direct
+// `results.push({...})` calls below — so the report can say how long passed since
+// the previous result. ⚠ That is the gap BETWEEN RESULTS, not a per-gate timer:
+// it includes setup that sits between two gate blocks, and a block that emits
+// several results charges all of its time to the first. It locates the slow
+// stretch; it does not time a gate exactly.
+const RUN_T0 = Date.now();
+results.push = function (...rows) {
+  for (const r of rows) if (r && r.at === undefined) r.at = Date.now();
+  return Array.prototype.push.apply(this, rows);
+};
 const pass = (id, msg) => results.push({ id, state: 'PASS', msg });
 const fail = (id, msg) => results.push({ id, state: 'FAIL', msg });
 const pend = (id, msg) => results.push({ id, state: 'PENDING', msg });
 
-function fatal(msg) {
+function fatal(msg, code = 2) {
   console.error(`  FATAL ${msg}`);
   console.error('\nGATE ABORTED — results would be meaningless.');
-  process.exit(2);
+  // 1 = a defect was found (it just stopped the run); 2 = nothing could run.
+  writeJsonReport(code === 1 ? 'NO-GO' : 'INCOMPLETE', [], `ABORTED: ${msg.split('\n')[0]}`);
+  process.exit(code);
 }
 
 /**
@@ -652,6 +826,7 @@ const GATES = [
   ['B2B4', 'DATUM + MATERIAL', 'HARD', 'a setting consumed by nothing reads as configured'],
   ['DOC', 'DEPTH + CHIP CEILING', 'HARD', 'a pass deeper than this machine class supports deflects the cutter into an out-of-tolerance wall, burns the glue line, and leaves the tool buried when the part lets go — and the first failure is SILENT, a joint that does not fit and gets blamed on the CAD'],
   ['TECH', 'TECHNOLOGY SEAM', 'HARD', 'an unimplemented process must be refused, never posted as CNC. ⚠ DOWNGRADED 2026-08-10 AND SAY SO: no product path takes a technology, so that failure CANNOT OCCUR and this gate cannot go red for the reason it exists. What it does check is real but smaller — the declaration, a refusal of an unknown technology, and that each ban list BITES the other technology’s program'],
+  ['FDM', 'FDM ENGINE (twobee-fdm)', 'HARD', 'a slicer whose tests run nothing, or whose parity controls cannot fail, would be trusted with the X2D on no evidence — and its parity against OrcaSlicer is not measured here, so this row is PENDING at best, never PASS'],
   ['C6', 'TOOL LIBRARY I/O', 'HARD', 'a tool fed at somebody else\u0027s numbers burns the edge'],
   ['MARK', 'PART MARKING', 'HARD', '36 identical blanks cannot be sorted without an ID'],
   ['LEAD', 'LEAD IN/OUT', 'HARD', 'entering along the wall leaves a witness mark on the finished edge'],
@@ -666,7 +841,7 @@ const GATES = [
   ['AGPL', 'SOURCE OFFER (\u00a713)', 'HARD', 'this lane is AGPL-3.0-or-later: the moment it is SERVED, every user must be offered its Corresponding Source. The link in the footer IS the offer, and a 404 is not an offer. \ud83d\udd34 AND AN ANSWERING LINK IS NOT AN OFFER EITHER \u2014 widened 2026-09-09 after `legal` measured the mirror four commits behind the served build while this gate passed on link-present + link-200. \u00a713 owes the source OF THE WORK BEING SERVED, so the gate also compares the mirror tree to this tree, blob by blob, at a resolved COMMIT SHA'],
   ['SPEC', 'SPEC CITATIONS', 'HARD', 'a spec row naming a gate that does not exist reads as gated and is not'],
   ['CAD1', 'SCAD SUBSET vs OPENSCAD', 'HARD', 'a .scad source our CAD tab evaluates into a DIFFERENT PART from the one the author wrote and OpenSCAD renders. Nothing downstream can notice: every contour is a real contour of a real solid, so it posts, simulates, gates green and cuts a plausible-looking wrong part. `edge_modifier_root` emits the OPPOSITE OBJECT today'],
-  ['CAD1H', 'SCAD SUBSET vs OUR OWN MODELS', 'HARD', 'the same failure on the 296 LIVE .scad files under hardware/cad/ — recursive, minus 288 in archive/ and ref_models/ which are excluded WITH THEIR REASON PRINTED at run time (superseded / vendor reference: not cut, not shipped). Of those, 16 are _wcnc CNC cut files and 6 diverge. ⚠ THIS LINE READ "the 73 .scad files this company actually cuts" UNTIL 2026-09-02 AND SCANNED NONE OF THEM: the collector was non-recursive and every cut file is in a subdirectory, so the set was 6 top-level files plus 79 in lib/, parsed with no library host. The number was true of what it measured and false of what it was called — corrected here because the TABLE line is what a reader sees first, and ratcheting a baseline onto a gate that misdescribes its own population re-creates the defect at a larger number. A REFUSAL is safe (nothing is emitted); a DIVERGENCE is a wrong part with no warning — so the tracked number is DIVERGES+ERROR, and REFUSED->DIVERGES counts as getting WORSE even though it looks like new capability'],
+  ['CAD1H', 'SCAD SUBSET vs OUR OWN MODELS', 'HARD', 'the same failure on the 296 LIVE .scad files under hardware/cad/ — recursive, minus 288 in archive/ and ref_models/ which are excluded WITH THEIR REASON PRINTED at run time (superseded / vendor reference: not cut, not shipped). Of those, ~~16 are _wcnc CNC cut files and 6 diverge~~ — 🔴 RE-MEASURED 2026-09-17: 17 cut files, 4 diverge (brood_panel, fan_box_panel, panels_18mm_inner, panels_4mm). ⚠ ATTRIBUTION, AND ONLY WHAT WAS MEASURED: 5 → 4 is THIS LANE\'S #165 import-budget and cycled-assignment fixes — 2bee_hive_panels_18mm_outer_wcnc.scad now AGREES with OpenSCAD, verified by restoring scad.ts from 48b1a5304b and re-running (5 of 17 before, 4 of 17 after). 16 → 17 and 6 → 5 happened earlier, in cad\'s tree or this reader, and were NOT measured by me — they are not claimed. ⚠ This line is the one a reader sees first, which is the reason its own text gives for correcting the TABLE rather than only the run output. ⚠ THIS LINE READ "the 73 .scad files this company actually cuts" UNTIL 2026-09-02 AND SCANNED NONE OF THEM: the collector was non-recursive and every cut file is in a subdirectory, so the set was 6 top-level files plus 79 in lib/, parsed with no library host. The number was true of what it measured and false of what it was called — corrected here because the TABLE line is what a reader sees first, and ratcheting a baseline onto a gate that misdescribes its own population re-creates the defect at a larger number. A REFUSAL is safe (nothing is emitted); a DIVERGENCE is a wrong part with no warning — so the tracked number is DIVERGES+ERROR, and REFUSED->DIVERGES counts as getting WORSE even though it looks like new capability'],
   ['BRND', 'VENDORED BRAND MARK', 'HARD', 'a vendored copy of another lane\u2019s asset silently stops matching its master \u2014 the app renders a logo brand has since changed, and the copy\u2019s own header is the only thing claiming it is current'],
   ['RUN', 'THE RUN TAB’S SENDER', 'HARD', 'a sender that stalls mid-cut leaves a TURNING CUTTER STATIONARY in the material — it burns the edge and on a small cutter it snaps — and a sender that misreads the machine’s state starts a job on a machine whose position is unknown, or rapids DOWNWARD through the stock because the stored G54 Z belonged to the last job. ⚠ AND EVERY GREEN HERE IS ABOUT OUR OWN READING: the fake was written from grblHAL’s C by this lane, so it can prove the sender self-consistent and can never discover the reading is wrong. 🔴 Until 2026-08-11 the 147 assertions about this tab were run by NO GATE — `npm run test:node` sat in web/package.json and nothing invoked it'],
   ['CADT', 'THE CAD TAB’S OWN SUITE', 'HARD', 'the 2bee.cad tab and the app’s own state — the SCAD parser, its import host, the degree trigonometry, the mesh/record round trip, the store’s schema and collections, the preview’s stale banner, the model-proposal path and the no-WebGL degradation — assert 509 things that NO GATE RAN. `npm run test:node` runs `tests/*.test.ts`; gate RUN drives two of those files and nothing drove the other 27. A suite nobody schedules is a file that agrees with itself whenever somebody remembers to look at it. 14 branches are NAMED because a rename there silently unguards a wrong-part failure; the rest are held by "the suite is green", and the file set is DISCOVERED rather than enumerated so a new test file cannot land outside the gate'],
@@ -714,6 +889,14 @@ const GATES = [
 //   when: 'always' — the gap is a property of the box or of the world.
 //   when: 'quick'  — honest under `--quick` and a FAIL in a full run.
 const PENDING_BUDGET = {
+  FDM: {
+    when: 'always',
+    why:
+      'parity of the FDM engine against OrcaSlicer needs the Orca CLI and Orca\'s own G-code for the same model ' +
+      '(pnp\'s matrix, `parity --matrix`, needs the local Orca server on :8765). This gate proves the engine\'s ' +
+      'own tests ran and that the parity tool\'s negative controls fire — it does NOT measure parity, so the row ' +
+      'stays PENDING when those pass. Last parity, per pnp 2026-10-14: cube 73/0/0, ring 73/0/0, coupon 83/4/4.',
+  },
   DISC: {
     when: 'always',
     why:
@@ -799,7 +982,11 @@ const PENDING_BUDGET = {
       'TWO reasons now, and only the first is an absence. (1) same binary, same reason as CAD1 — the hardware leg ' +
       'reads hardware/cad/ through the same oracle and cannot answer without openscad. (2) under `--quick` it runs ' +
       'the CUT-FILE SUBSET by design (ceo cadence ruling 2026-09-02): the full live population is 296 files and ' +
-      '~25 min, which belongs to the nightly cadence, while the 17 files that are actually CUT run in ~16s and are ' +
+      '~25 min, which the ruling assigned to a nightly cadence — the fleet nightly (fleet_gate_check.py --full, ' +
+      'row added 2026-09-26) scored the full population from then until 2026-10-12 (85 vs baseline 72), and the ' +
+      'founder PAUSED that cron 2026-10-13. ⚠ Whether it runs NOW is a crontab fact, not a fact this text can ' +
+      'hold — check `crontab -l | grep local_ci_nightly`. Without it, the full population is scored only when a ' +
+      'human runs a full pass — while the 17 files that are actually CUT run in ~16s and are ' +
       'the ones with a physical consequence. A subset is reported as a subset and never as a pass — see the ' +
       'verdict text, which names the diverging files. ⚠ THIS SECOND REASON WAS NOT ADDED WHEN THE SPLIT WAS: the ' +
       'entry said only "cannot answer without openscad" while the binary was present and the gate had CHOSEN to ' +
@@ -830,8 +1017,9 @@ const PENDING_BUDGET = {
     when: 'quick',
     why:
       'the DRIVE half spawns ' + (Object.keys(SELF_PLANTS).length + 3) + ' `--quick` children — one per self-plant (' + Object.keys(SELF_PLANTS).length + ') plus THREE clean baselines ' +
-      '(an opening pair and a closing one) — and took 22.8 min when it was measured at 33 children on 2026-08-12, against a ' +
-      '2.4-min full pass, so it is full-pass-only. The STATIC half still runs under --quick ' +
+      '(one opening run ALONE, one inside the parallel pool as the parallel==serial witness, one closing), at a printed ' +
+      'parallel cap (SLICER_GATE_SPLNT_JOBS, default 4) — and took 22.8 min when it was measured at 33 children on 2026-08-12, ' +
+      'and 4988 s SERIALLY at 51 on 2026-10-11, so it is full-pass-only. The STATIC half still runs under --quick ' +
       'and fails inside the gate; what is given up here is whether each plant still MOVES anything',
   },
 };
@@ -1109,10 +1297,31 @@ const CAD1_KNOWN = {
  * edited, and the edit is where the wrong prediction was found.
  */
 const CAD1H_STRICTER_KNOWN = [
+  // 2026-10-15, full pass #10 (cad-tree@1c75bf401150, reader 0ef841ae5847, work-budget mesher):
+  // TWELVE STRICTER refusals pinned at once. NOT new defects: every file below is weeks old and
+  // its refusal predates this pass. They were never PRINTED because this limb sat last in an
+  // else-if chain and passes #2..#9 each failed an earlier limb — fixed in the same commit (a
+  // later limb's finding now rides on whichever limb reports). Openscad exports a solid for each,
+  // so each is a capability we lack; the safe direction (nothing emitted), never a wrong shape.
+  { file: 'hardware/2bee_cnc_machine/cnc_limit_switch_plate_3d.scad', cause: 'difference() [kernel] (over the 200k-polygon budget)', since: '2026-10-15' },
+  { file: 'hardware/2bee_cnc_machine/probe_spindle_clear.scad', cause: 'union() + intersection() [kernel] (over the 200k-polygon budget)', since: '2026-10-15' },
+  { file: 'hardware/2bee_cnc_machine/probe_wheel_seat.scad', cause: 'intersection() [kernel] (over the 200k-polygon budget)', since: '2026-10-15' },
+  { file: 'hardware/2bee_hive/hive_variants.scad', cause: 'the deterministic work budget (spends 3.67e10 > MAX_WORK 3.3e10, the calibration in mesh.ts) + modifier % in hive_top_assembly/solar_box_assembly', since: '2026-10-15' },
+  { file: 'hardware/2bee_pnp/maxfeeder_parts_native/maxfeeder_base_native_3d.scad', cause: 'search() + assert() + for() in _shared.scad:30', since: '2026-10-15' },
+  { file: 'hardware/2bee_pnp/maxfeeder_parts_native/maxfeeder_cover_native_3d.scad', cause: 'search() + assert() + for() in _shared.scad:30', since: '2026-10-15' },
+  { file: 'hardware/2bee_pnp/maxfeeder_parts_native/maxfeeder_pressure_arm_native_3d.scad', cause: 'search() + assert() + for() in _shared.scad:30, cascading into translate()/cylinder()', since: '2026-10-15' },
+  { file: 'hardware/2bee_pnp/maxfeeder_parts_native/maxfeeder_qr_cap_native_3d.scad', cause: 'search() + assert() + for() in _shared.scad:30', since: '2026-10-15' },
+  { file: 'hardware/2bee_pnp/maxfeeder_parts_native/maxfeeder_tape_lever_native_3d.scad', cause: 'search() + assert() + for() in _shared.scad:30, cascading into translate()/cylinder()', since: '2026-10-15' },
+  { file: 'hardware/2bee_pnp/pnp_board_holder_3d.scad', cause: 'include <../../pcb/…> outside the hardware/cad root + for() in list comprehension (x2)', since: '2026-10-15' },
+  { file: 'hardware/2bee_sensor_pod_v3/sensor_pod_v3_enclosure_assembly.scad', cause: 'for() in list comprehension (sensor_pod_v3_enclosure_3d.scad:155/156/160)', since: '2026-10-15' },
+  { file: 'hardware/lib/openbuilds/ob_gantry_plate_xl.scad', cause: 'difference() [kernel] (over the 200k-polygon budget)', since: '2026-10-15' },
+  // REMOVED 2026-10-15 (pass #10): 2bee_hive_panels_18mm_inner_wcnc, _outer_wcnc and
+  // 2bee_hive_panels_18mm.scad no longer refuse — under the work budget they mesh, and are now
+  // pinned where their calm verdict lives (inner: CAD1H_DIVERGENT_CUT_FILES; outer:
+  // CAD1H_UNDECIDABLE_CUT_FILES; 18mm.scad: inside the DIVERGES count).
   { file: 'hardware/2bee_entrance/2bee_entrance_top_panel_3d.scad', cause: 'difference() [kernel]', since: '2026-09-02' },
   { file: 'hardware/2bee_feeder/feeder_half_3d.scad', cause: 'union() [kernel]', since: '2026-09-02' },
   { file: 'hardware/2bee_feeder/feeder_molded.scad', cause: 'union() [kernel]', since: '2026-09-02' },
-  { file: 'hardware/2bee_hive/2bee_hive_panels_18mm.scad', cause: 'use <> of the brood/super panel cut files, which refuse first', since: '2026-09-02' },
   { file: 'hardware/2bee_hive/side_hive.scad', cause: 'linear_extrude(twist/scale) + for(c=...) in list comprehension', since: '2026-09-02' },
   { file: 'hardware/2bee_honey_tank/collection_lid.scad', cause: 'union() [kernel] + text() [kernel]', since: '2026-09-02' },
   { file: 'hardware/2bee_honey_tank/strainer_basket.scad', cause: 'difference() [kernel]', since: '2026-09-02' },
@@ -1152,9 +1361,9 @@ const CAD1H_STRICTER_KNOWN = [
 const REGISTRY_FLOOR = { PLANT: 21, SPLNT: 42 };
 
 const CAD1H_BASELINE = {
-  max: 72,
-  since: '2026-09-04',
-  input: 'cad-tree@e856a01710af (extracted, not the working tree)',
+  max: 54,
+  since: '2026-10-15',
+  input: 'cad-tree@1c75bf401150 (extracted, not the working tree)',
   // 🔴 THE BARE HASH, BECAUSE THE PROSE ABOVE IS AN ANNOTATION AND NOTHING READ
   // IT. Found 2026-09-04 by parking the caches for ceo's fresh-checkout run: the
   // gate extracts CURRENT HEAD's `hardware/cad` tree, this pair was measured
@@ -1168,8 +1377,14 @@ const CAD1H_BASELINE = {
   // `cad` had committed — same 7 audit-not-closed files too. ⇒ Evidence the pair
   // measures OUR READER rather than their models, which is what a baseline on
   // this leg is supposed to be.
-  inputTree: '88cc2346fb97',
+  inputTree: '1c75bf401150',
   why:
+    'CORRECTED BACK TO 54, 2026-10-15 ~09:1x — THE 53 WAS WRONG TWICE OVER. It came from full pass #5 at load ~75 (wall-clock budget refusing measurable files — since fixed, 2891411235) and was then "confirmed" from target/scad-oracle-gate.json read after something else had overwritten it. Calm full pass #8 on the deterministic budget (cad-tree@1c75bf401150, reader 0ef841ae5847): 54 DIVERGES+ERROR, and the SET is file-for-file identical to the 10-14 pin. Lesson: read the run\'s own message, never a shared scratch file. ' +
+    'RATCHETED DOWN 2026-10-15 (full pass, rc 1, 5412 s): cad-tree@fd69029707a5, reader 7fb9f49882c7 unchanged — 53 DIVERGES+ERROR (from 54) and 159 PENDING of 373 (from 160). Down needs no attribution beyond the measurement; the two 18 mm panels moved to STRICTER (named in CAD1H_STRICTER_KNOWN) on this tree. PRIOR: ' +
+    'RE-DERIVED 2026-10-14 at cad-tree@8c6127346c91 (clean `git archive`, 373 hardware files) with the reader at cad-src 7fb9f49882c7 — BOTH instruments moved since the 09-04 pin, so this is a new pin, not a delta. ' +
+    'Measured: 54 DIVERGES+ERROR, 160 PENDING of 373. Attribution, file by file against the same day\'s pre-fix full run (fullbefore, 439 files on a DIRTY tree, so 66 files are not comparable): ' +
+    '25 DIVERGES -> PENDING, and every one had diverged on the TREE leg ("the trees differ") — largely the oracle printer writing every offset as r= with $fn=0 (canon.mjs, fixed 187f6a74ec) and the use/scope leak (187f6a74ec). With the trees now agreeing, each file falls into a long-ruled undecidable class: 10 `$preview`-dependent geometry, 15 overlapping/touching top-level solids. ' +
+    'That is the instrument becoming able to read the tree, NOT a file made undecidable to game the count; luckfox_pico_zero is the one that left a real mesh divergence (area rel 0.30) for a PENDING class. 4 DIVERGES -> SAME, 1 STRICTER -> SAME, 12 STRICTER -> REFUSED-BOTH. PRIOR: ' +
     '72 DIVERGES+ERROR of 318 hardware files at cad-tree@88cc2346fb97. \ud83d\udd34 RAISED, and raising is a ' +
     'DECISION \u2014 so here is the attribution rather than the number: 59 + 11 (of 14 files `cad` ADDED) + 2 ' +
     '(pre-existing, REGRESSED) - 0 (improved) = 72, measured file-by-file against the previous run rather than ' +
@@ -1303,9 +1518,9 @@ const CAD1H_BASELINE = {
  * files `cad` added since the pin. Nothing unexplained remains on this leg.
  */
 const CAD1H_PENDING_BASELINE = {
-  count: 126,
-  population: 318,
-  input: 'cad-tree@e856a01710af (extracted, not the working tree)',
+  count: 160,
+  population: 373,
+  input: 'cad-tree@1c75bf401150 (extracted, not the working tree)',
   // 🔴 THE BARE HASH, BECAUSE THE PROSE ABOVE IS AN ANNOTATION AND NOTHING READ
   // IT. Found 2026-09-04 by parking the caches for ceo's fresh-checkout run: the
   // gate extracts CURRENT HEAD's `hardware/cad` tree, this pair was measured
@@ -1319,7 +1534,7 @@ const CAD1H_PENDING_BASELINE = {
   // `cad` had committed — same 7 audit-not-closed files too. ⇒ Evidence the pair
   // measures OUR READER rather than their models, which is what a baseline on
   // this leg is supposed to be.
-  inputTree: '88cc2346fb97',
+  inputTree: '1c75bf401150',
   readerNote: 'scad.ts+mesh.ts+canon.mjs as of 2026-09-04 (CSG cap, budget tick, canon multmatrix, mirror/winding)',
   // 🔴 THE INSTRUMENT THIS PAIR WAS MEASURED WITH, as the same sha256-over-
   // CAD_SRC_FILES digest every CAD1/CAD1H message already prints.
@@ -1342,9 +1557,16 @@ const CAD1H_PENDING_BASELINE = {
   // Moved again 2026-09-04 with the linear_extrude local-frame fix in mesh.ts.
   // Moved 2026-09-04 when `library.ts` entered the digest — the value changing is
   // the ONLY visible sign that the previous pin had been blind to a reader file.
-  readerSha: 'da2a3d44a5c7',
-  since: '2026-09-02',
+  readerSha: '0ef841ae5847',
+  since: '2026-10-15',
   why:
+    'READER MOVED 2026-10-15 (mesh.ts: deterministic WORK budget replaces the 6 s wall-clock one). Counts carried, not re-pinned: on cad-tree@1c75bf401150 the uncapped reader changed exactly ONE of 460 calm verdicts (hive_variants, refused by the old clock even on a calm box), and MAX_WORK = 3.3e10 sits below its 3.67e10 units, reproducing it. The calm full pass after this commit is the check. ' +
+    'CORRECTED 2026-10-15 07:2x — BACK TO 160, AND THE 159 BELOW WAS A LOAD ARTEFACT: full pass #5 ran at load ~75 and our mesher\'s 6 s WALL-CLOCK budget (mesh.ts MAX_MS) turned files that are measurable when the box is calm into refusals, so PENDING and DIVERGES both read low. Calm full pass #6 (load ~5, cad-tree@1c75bf401150, reader 7fb9f49882c7): 53 DIVERGES+ERROR, 160 PENDING of 373 — the 160 attributed file by file at the 10-14 pin. ⚠ A verdict that depends on machine load is an instrument defect, tracked in _WORKING. ' +
+    'RATCHETED DOWN 2026-10-15 (full pass, rc 1, 5412 s): cad-tree@fd69029707a5, reader 7fb9f49882c7 unchanged — 53 DIVERGES+ERROR (from 54) and 159 PENDING of 373 (from 160). Down needs no attribution beyond the measurement; the two 18 mm panels moved to STRICTER (named in CAD1H_STRICTER_KNOWN) on this tree. PRIOR: ' +
+    'RE-DERIVED 2026-10-14 at cad-tree@8c6127346c91 (clean `git archive`, 373 hardware files) with the reader at cad-src 7fb9f49882c7 — BOTH instruments moved since the 09-04 pin, so this is a new pin, not a delta. ' +
+    'Measured: 54 DIVERGES+ERROR, 160 PENDING of 373. Attribution, file by file against the same day\'s pre-fix full run (fullbefore, 439 files on a DIRTY tree, so 66 files are not comparable): ' +
+    '25 DIVERGES -> PENDING, and every one had diverged on the TREE leg ("the trees differ") — largely the oracle printer writing every offset as r= with $fn=0 (canon.mjs, fixed 187f6a74ec) and the use/scope leak (187f6a74ec). With the trees now agreeing, each file falls into a long-ruled undecidable class: 10 `$preview`-dependent geometry, 15 overlapping/touching top-level solids. ' +
+    'That is the instrument becoming able to read the tree, NOT a file made undecidable to game the count; luckfox_pico_zero is the one that left a real mesh divergence (area rel 0.30) for a PENDING class. 4 DIVERGES -> SAME, 1 STRICTER -> SAME, 12 STRICTER -> REFUSED-BOTH. PRIOR: ' +
     '113 PENDING of 293 live hardware files — the `_`-prefixed scratch exclusion landed and took the two _mtest files (and one more) out of the count, which is the CLASS fix rather than the instance. ' +
     '115 PENDING of 298 live hardware files, pinned the day the second ratchet was added. \u26a0 IT WAS 113 OF 296 WHEN MEASURED 40 MINUTES EARLIER: `cad` added two `_`-prefixed scratch files (export/school-cnc-hive/tierA-1to5/_mtest.scad, _mtest2.scad), both PENDING, and D+E did not move. \ud83d\udd34 THIS IS THE SECOND OCCURRENCE OF A KNOWN PROBLEM: handover 2026-08-22-2bee_app-underscore-scratch-scad-files-redden-cad1h raised it when 12 such files entered the scan set, and it was closed by `cad` DELETING them — which fixes the instance and not the class. Three live `_*.scad` files exist today. \u21d2 RECOMMENDED TO ceo, NOT DONE HERE because population is their ruling: exclude `_`-prefixed scratch files the way `archive/` is excluded, stated and counted. Until then this number tracks another lane\'s scratch directory. ' +
     '113 PENDING of 296 live hardware files, pinned the day the second ratchet was added. It rose 104 -> 113 in ' +
@@ -1396,12 +1618,49 @@ const cad1hPendingAllowed = (population) => {
  * reason as the two new ones. Listing only the two that MOVED would have made
  * this list a diff instead of a state.
  */
+// 2026-10-14 (cad-tree@8c6127346c91, reader 7fb9f49882c7): brood, super and box
+// panel REMOVED — all three now SAME as OpenSCAD after the offset/2D-boolean/
+// scope fixes (187f6a74ec, 252d0d763a, af383e81da). fan_box_panel, 18 mm outer
+// and 4 mm panels ADDED: their trees now agree, so they reach the mesh leg and
+// land in its ruled undecidable classes.
 const CAD1H_UNDECIDABLE_CUT_FILES = [
-  { file: 'hardware/2bee_hive/2bee_hive_brood_panel_wcnc.scad', cause: 'our kernel audits the solid as OPEN', since: '2026-09-02' },
-  { file: 'hardware/2bee_hive/2bee_hive_super_panel_wcnc.scad', cause: 'our kernel audits the solid as OPEN', since: '2026-09-02' },
-  { file: 'hardware/2bee_hive/2bee_hive_box_panel_wcnc.scad', cause: 'our kernel audits the solid as OPEN', since: '2026-09-02' },
   { file: 'hardware/2bee_feeder/feeder_box_panel_wcnc.scad', cause: "$preview straddle — the oracle's own two legs disagree", since: '2026-09-02' },
   { file: 'hardware/2bee_hive/sc133_wood_base_18mm_wcnc.scad', cause: "$preview straddle — the oracle's own two legs disagree", since: '2026-09-02' },
+  { file: 'hardware/2bee_hive/2bee_hive_fan_box_panel_wcnc.scad', cause: "$preview straddle — the oracle's own two legs disagree", since: '2026-10-14' },
+  { file: 'hardware/2bee_hive/2bee_hive_panels_4mm_wcnc.scad', cause: '33 top-level solids overlap; mesh.ts does not union top-level siblings (F5 semantics), so summed invariants are not comparable', since: '2026-10-14' },
+  // Back 2026-10-15 on the DETERMINISTIC budget: it was STRICTER only because the old 6 s clock refused it.
+  { file: 'hardware/2bee_hive/2bee_hive_panels_18mm_outer_wcnc.scad', cause: 'top-level solids overlap; mesh.ts does not union top-level siblings (F5 semantics)', since: '2026-10-15' },
+];
+
+/**
+ * CNC CUT FILES THAT DIVERGE FROM OPENSCAD, BY NAME — the set `--quick` scores.
+ *
+ * 🔴 ADDED 2026-09-26 (ceo gate audit, checks 1 and 4). Under `--quick`, CAD1H
+ * ran the 17 cut files, NAMED the diverging ones, and PENDED WHATEVER THE COUNT
+ * WAS. So the one subset this lane chose because "being wrong ends at a
+ * spindle" could not go red on being wrong. Measured, not inferred:
+ * `--quick --self-plant cad1-oracle-plant` took the cut subset from 4 to 14 of
+ * 17 diverging — ten new wrong parts — and CAD1H stayed PENDING. SPLNT counted
+ * that plant as moving CAD1H because the row's TEXT changed; the verdict never
+ * did. A control that moves the message and not the verdict is the one this
+ * lane's CLAUDE.md forbids by name.
+ *
+ * The full-population count is still not scored on a subset (that ratchet is
+ * over 318 files and a subset cannot satisfy it). What a subset CAN answer is
+ * "is any cut file diverging that nobody has written down?" — so a cut file not
+ * in this list that diverges is a FAIL under `--quick`, and a listed one that
+ * no longer diverges is a FAIL too (prune it: a pin that outlives its defect
+ * reads exactly like a live one). Measured on cad-tree@5882d23b5762.
+ */
+// 2026-10-14: pruned to the one cut file still diverging. brood -> SAME; fan_box
+// and 4 mm -> undecidable (named above). 18 mm inner still diverges on mesh
+// invariants caused by NAMED refusals (text(); a 3D difference() over the
+// 200k-polygon budget) — a gap, not a silent wrong part.
+// 2026-10-15 07:2x: 18 mm inner DIVERGES on a calm box (full pass #6) and REFUSES under load, when the
+// mesher's 6 s wall-clock budget runs out — the load-dependent verdict is an instrument defect, tracked in
+// _WORKING. Pinned in its calm state; its STRICTER entry stays for the loaded case.
+const CAD1H_DIVERGENT_CUT_FILES = [
+  'hardware/2bee_hive/2bee_hive_panels_18mm_inner_wcnc.scad',
 ];
 
 const CAD1H_UNDECIDED_KNOWN = [
@@ -1529,7 +1788,7 @@ const CAD1_UNDECIDED_KNOWN = [
     // A budget entry for a gate that does not exist is a permission granted to
     // nothing — and it would sit here looking like coverage of something.
     console.error(`  FATAL PENDING_BUDGET names gates that do not exist: ${unknown.join(', ')}`);
-    process.exit(2);
+    writeJsonReport('NO-GO', [], 'ABORTED: malformed harness table'); process.exit(1); // a defect IN this file, found — not an inability to run
   }
 }
 
@@ -1559,7 +1818,7 @@ const CAD1_UNDECIDED_KNOWN = [
   }
   if (bad.length) {
     console.error(`  FATAL malformed CAD1 baseline — an accepted divergence must name itself and its date: ${bad.join(' | ')}`);
-    process.exit(2);
+    writeJsonReport('NO-GO', [], 'ABORTED: malformed harness table'); process.exit(1); // a defect IN this file, found — not an inability to run
   }
 }
 
@@ -1588,7 +1847,7 @@ const CAD1_UNDECIDED_KNOWN = [
   }
   if (bad.length) {
     console.error(`  FATAL malformed SOURCE_OFFER_RULED — a §13 target must name its ruling and its date: ${bad.join(' | ')}`);
-    process.exit(2);
+    writeJsonReport('NO-GO', [], 'ABORTED: malformed harness table'); process.exit(1); // a defect IN this file, found — not an inability to run
   }
 }
 
@@ -1601,7 +1860,7 @@ const CAD1_UNDECIDED_KNOWN = [
   const dupes = ids.filter((id, i) => ids.indexOf(id) !== i);
   if (dupes.length) {
     console.error(`  FATAL duplicate gate ids: ${[...new Set(dupes)].join(', ')}`);
-    process.exit(2);
+    writeJsonReport('NO-GO', [], 'ABORTED: malformed harness table'); process.exit(1); // a defect IN this file, found — not an inability to run
   }
 }
 
@@ -1611,7 +1870,7 @@ if (LIST) {
   }
   console.log(`\n${GATES.length} gates. PENDING is budgeted, not discarded — a gate allowed to say`);
   console.log('"could not run here" must be named in PENDING_BUDGET, and the run then reads');
-  console.log('INCOMPLETE (exit 3), never GO. Anything else that pends is scored as a FAIL.');
+  console.log('INCOMPLETE (exit 2 — the fleet\'s "could not run"), never GO. Anything else that pends is scored as a FAIL.');
   for (const [id, b] of Object.entries(PENDING_BUDGET)) {
     console.log(`  budgeted PENDING  ${id.padEnd(5)} (--${b.when}) ${b.why}`);
   }
@@ -1628,7 +1887,23 @@ if (!QUICK) {
   try {
     execSync('cargo build --release', { cwd: ROOT, stdio: 'pipe' });
   } catch (e) {
-    fatal(`release build failed:\n${e.stderr?.toString() ?? e.message}`);
+    // 🔴 TWO DIFFERENT FAILURES LAND IN THIS CATCH, AND THEY GET DIFFERENT CODES.
+    // Measured 2026-09-27: the 04:30 nightly ran this gate under cron's PATH,
+    // which has no ~/.cargo/bin, so `cargo` never started — /bin/sh exit 127 —
+    // and this line reported "release build failed:" with an EMPTY cause
+    // (`e.stderr` is an empty Buffer, not null, so `??` never reached
+    // e.message), exit 1, 0.04 s. A red that says "the core does not compile"
+    // about a core nobody compiled. Exit 127 = the TOOL is missing = could not
+    // run (2); anything else = the build ran and failed = G0's defect (1).
+    const err = (e.stderr?.toString() ?? '').trim();
+    if (e.status === 127) {
+      fatal(
+        `cargo was not found, so the release build could NOT RUN — this is not a build failure. ` +
+          `PATH=${process.env.PATH ?? '(unset)'}${err ? ` — ${err}` : ''}`,
+        2
+      );
+    }
+    fatal(`release build failed (exit ${e.status ?? '?'}):\n${err || e.message}`, 1);
   }
 }
 if (!existsSync(BIN)) fatal(`binary missing at ${BIN} — run without --quick`);
@@ -1759,7 +2034,9 @@ console.log(` binary ${BIN_HASH_0}\n`);
 }
 
 try {
-  const out = execSync('cargo test --workspace 2>&1', { cwd: ROOT, encoding: 'utf8' });
+  // Explicit CNC packages, never `--workspace`: since 540c5eac59 the workspace also holds `fdm` (twobee-fdm, pnp's lane), and a half-delivered fdm change must not turn this CNC gate red and blame the core — fdm gets its own gate row, built with `-p twobee-fdm`.
+  const G0_PACKAGES = ['twobee-cam', 'twobee-slice', 'twobee-cam-wasm'];
+  const out = execSync(`cargo test ${G0_PACKAGES.map((p) => `-p ${p}`).join(' ')} 2>&1`, { cwd: ROOT, encoding: 'utf8' });
   const failed = /(\d+) failed/.exec(out);
   const suites = (out.match(/test result: ok/g) || []).length;
   /* 🔴 THE SUITE COUNT WAS PRINTED AND NEVER ASSERTED (found 2026-09-07).
@@ -1785,7 +2062,7 @@ try {
   if (ranTests < G0_TEST_FLOOR) {
     fail(
       'G0',
-      `cargo test --workspace ran ${ranTests} test(s) across ${suites} suite(s), below the floor ` +
+      `cargo test -p ${G0_PACKAGES.join(' -p ')} ran ${ranTests} test(s) across ${suites} suite(s), below the floor ` +
         `of ${G0_TEST_FLOOR}. A workspace that runs no tests exits 0 and would otherwise read as ` +
         '"unit tests green". ⚠ Two of this workspace\'s suites legitimately report 0 passed, so a ' +
         'SUITE count cannot carry this floor. Raise it with the suite, or find the member that ' +
@@ -1924,7 +2201,7 @@ try {
   // hangs over three of its edges — NOT a fixture, so nothing else in this file
   // enumerates it, and not a plant, because the core is behaving correctly: it
   // is telling the operator the cutter has left the material.
-  const offCfg = join(ROOT, 'target', 'gatecfg-g2-offmaterial.json');
+  const offCfg = join(SCRATCH, 'gatecfg-g2-offmaterial.json');
   writeFileSync(
     offCfg,
     JSON.stringify({ stock: { size_x_mm: 190, size_y_mm: 250, origin_x_mm: 55, origin_y_mm: 55 } })
@@ -2362,7 +2639,7 @@ function pocketFloorZ(gcode) {
 // armed, which is exactly what `PLANT`'s registry exists to stop.
 {
   const cfgFile = (name, body) => {
-    const p = join(ROOT, 'target', `move-${name}.json`);
+    const p = join(SCRATCH, `move-${name}.json`);
     writeFileSync(p, JSON.stringify(body));
     return p;
   };
@@ -2561,7 +2838,7 @@ function pocketFloorZ(gcode) {
 // apart and MUST emit.
 {
   const cfgFile = (name, body) => {
-    const p = join(ROOT, 'target', `multi-${name}.json`);
+    const p = join(SCRATCH, `multi-${name}.json`);
     writeFileSync(p, JSON.stringify(body));
     return p;
   };
@@ -2909,7 +3186,7 @@ function pocketFloorZ(gcode) {
 // halves of the defect are inert.
 {
   const countsAt = (dx, dy) => {
-    const cfgPath = join(ROOT, 'target', `dinv-${dx}-${dy}.json`);
+    const cfgPath = join(SCRATCH, `dinv-${dx}-${dy}.json`);
     writeFileSync(
       cfgPath,
       JSON.stringify({
@@ -2962,7 +3239,7 @@ function pocketFloorZ(gcode) {
   // the identical-program half is asserted rather than assumed — if the plant
   // ever starts changing the motion it has stopped being a control for the
   // CHECK and has become one for the cut.
-  const dinvCfg = join(ROOT, 'target', 'dinv-plant.json');
+  const dinvCfg = join(SCRATCH, 'dinv-plant.json');
   writeFileSync(
     dinvCfg,
     JSON.stringify({
@@ -3191,9 +3468,13 @@ function pocketFloorZ(gcode) {
 // naming the tool-length error. "Refused" and "done quietly" are different
 // facts and only the first is safe to leave unstated.
 {
+  // The last CUTTER-CHANGE `M0`, not the last `M0`: since 2026-11-15 a probe
+  // against a plate on the work ends in its own stop (`( TOUCH PLATE -> … )`),
+  // which comes AFTER the re-probe — anchored there, the tail never holds one.
   const afterLastChange = (g) => {
-    const lines = g.split('\n');
-    const last = lines.map((l) => l.trim()).lastIndexOf('M0');
+    const lines = g.split('\n').map((l) => l.trim());
+    let last = -1;
+    for (let i = 1; i < lines.length; i++) if (lines[i] === 'M0' && lines[i - 1].startsWith('( TOOL CHANGE ->')) last = i;
     return last < 0 ? null : lines.slice(last).join('\n');
   };
 
@@ -3309,7 +3590,7 @@ function pocketFloorZ(gcode) {
 // turns the box. That leg is I1's, and this row does not imply it.
 {
   const cfgPath = (name, obj) => {
-    const p = join(ROOT, 'target', `p7r-${name}.json`);
+    const p = join(SCRATCH, `p7r-${name}.json`);
     writeFileSync(p, JSON.stringify({ clamps: [obj] }));
     return p;
   };
@@ -3468,7 +3749,7 @@ function pocketFloorZ(gcode) {
 // the half that is easy to write so that it always agrees.
 {
   const TOOL = 'End Mill - Down-cut 6mm 2F';
-  const cfg = join(ROOT, 'target', 'p8-nest.json');
+  const cfg = join(SCRATCH, 'p8-nest.json');
   writeFileSync(cfg, JSON.stringify({ tool_id: TOOL }));
   const DXF = join(ROOT, 'gates/fixtures/plate.dxf');
   const nest = (rot, dx, dy) =>
@@ -3647,7 +3928,7 @@ function pocketFloorZ(gcode) {
 // --- B2/B4: datum and material both reach the emitted program ---------------
 {
   const write = (obj) => {
-    const f = join(ROOT, 'target', `gatecfg-${Object.keys(obj).join('-')}.json`);
+    const f = join(SCRATCH, `gatecfg-${Object.keys(obj).join('-')}.json`);
     writeFileSync(f, JSON.stringify(obj));
     return f;
   };
@@ -3672,22 +3953,44 @@ function pocketFloorZ(gcode) {
 
   // B4: material must change the program, and refuse what it cannot take.
   const alu = rep(write({ material: 'Aluminium', op: { depth_per_pass_mm: 6, rpm: 24000 } }));
+  /* 🔴 THE FEED IS ASSERTED HERE BECAUSE THE PASS LINE CLAIMS IT — added
+   * 2026-09-26 by the gate audit (`canon/gate-audit-2026-09.md` check 1: "is the
+   * VERB in the PASS string what the command PROVES?").
+   *
+   * This gate's PASS line has read "material bounds feed/depth/rpm" since it was
+   * written, and it asserted the depth NOTE, the spindle NOTE and a >3x run time.
+   * ⚠ NOTHING CHECKED THE FEED. The behaviour was correct all along — measured
+   * the same day, `cutting_feeds_mm_min` goes `[300, 1800, 3600]` on ply to
+   * `[300, 420, 840]` on aluminium — so the fix is to assert the claim rather
+   * than to narrow it; a true claim nobody checks is one refactor away from a
+   * false one nobody notices.
+   *
+   * ⚠ AND IT IS THE MAX, NOT THE LIST: the 300 mm/min entry is identical in both
+   * because it is the plunge feed, which is not material-clamped. A whole-list
+   * comparison would have gone red on correct output. */
+  const maxFeed = (r) => Math.max(...(r?.cutting_feeds_mm_min ?? [0]));
   const aluClamped =
     alu &&
     alu.notes.some((n) => n.includes('depth per pass reduced')) &&
     alu.notes.some((n) => n.includes('spindle reduced')) &&
+    maxFeed(alu) < maxFeed(base) &&
     alu.estimated_seconds > (base?.estimated_seconds ?? 0) * 3;
   // ...and an unknown material must NOT silently become plywood.
   const bogus = rep(write({ material: 'Unobtainium' }));
   const bogusReported = bogus && bogus.notes.some((n) => n.includes("unknown material"));
 
   if (datumMoves && datumBounds && aluClamped && bogusReported) {
-    pass('B2B4', 'the datum shifts the program and the limit check; material bounds feed/depth/rpm');
+    pass(
+      'B2B4',
+      'the datum shifts the program and the limit check; material bounds depth, rpm and the ' +
+        `cutting feed (max ${maxFeed(base)} -> ${maxFeed(alu)} mm/min)`,
+    );
   } else {
     fail(
       'B2B4',
       `datumMoves=${!!datumMoves} datumChecked=${!!datumBounds} ` +
-        `materialClamped=${!!aluClamped} unknownReported=${!!bogusReported}`
+        `materialClamped=${!!aluClamped} (maxFeed ${maxFeed(base)} -> ${maxFeed(alu)}) ` +
+        `unknownReported=${!!bogusReported}`
     );
   }
 }
@@ -3756,7 +4059,7 @@ function pocketFloorZ(gcode) {
 
   /** Emitted pass floors, spindle speed and cutting feed of the outer profile. */
   const measure = (material) => {
-    const f = join(ROOT, 'target', `gatecfg-doc-${material}.json`);
+    const f = join(SCRATCH, `gatecfg-doc-${material}.json`);
     writeFileSync(
       f,
       JSON.stringify({
@@ -3790,7 +4093,12 @@ function pocketFloorZ(gcode) {
       const s = /^M3 S([\d.]+)/.exec(l);
       if (s) rpm = Number(s[1]);
       if (!inProfile) continue;
-      const z = /^G1 Z(-?[\d.]+) F[\d.]+$/.exec(l);
+      // ⚠ The F word is OPTIONAL. F is modal: when the previous block already
+      // ran at the plunge feed the post omits it — since 2026-11-14 a G83 at
+      // plunge feed precedes this profile, its first plunge carries no F, and
+      // requiring one dropped the first floor and read 0 -> -6 as one 6mm bite
+      // (doc=1.000xD on all six materials, a false red).
+      const z = /^G1 Z(-?[\d.]+)(?: F[\d.]+)?$/.exec(l);
       if (z) floors.push(Number(z[1]));
       const fw = /F([\d.]+)/.exec(l);
       // The cutting feed is the fast one; the other F in the section is the
@@ -4018,7 +4326,7 @@ function pocketFloorZ(gcode) {
 // --- C6: user tool library --------------------------------------------------
 {
   const w = (name, obj) => {
-    const f = join(ROOT, 'target', `gatecfg-${name}.json`);
+    const f = join(SCRATCH, `gatecfg-${name}.json`);
     writeFileSync(f, JSON.stringify(obj));
     return f;
   };
@@ -4162,8 +4470,8 @@ function pocketFloorZ(gcode) {
 
 // --- LEAD: lead in / out ---------------------------------------------------
 {
-  const cfgNo = join(ROOT, 'target', 'gatecfg-lead0.json');
-  const cfgYes = join(ROOT, 'target', 'gatecfg-lead4.json');
+  const cfgNo = join(SCRATCH, 'gatecfg-lead0.json');
+  const cfgYes = join(SCRATCH, 'gatecfg-lead4.json');
   writeFileSync(cfgNo, JSON.stringify({ op: { lead_mm: 0, entry: 'Plunge' } }));
   writeFileSync(cfgYes, JSON.stringify({ op: { lead_mm: 4, entry: 'Plunge' } }));
   const arcsIn = (p) => {
@@ -4205,7 +4513,7 @@ function pocketFloorZ(gcode) {
 // because they are testing leads. The default path had no assertion at all.
 {
   const cfgPath = (name, obj) => {
-    const p = join(ROOT, 'target', name);
+    const p = join(SCRATCH, name);
     writeFileSync(p, JSON.stringify(obj));
     return p;
   };
@@ -4271,20 +4579,32 @@ function pocketFloorZ(gcode) {
     const plunges = [];
     let rampMoves = 0;
     for (const s of through) {
+      // The deepest Z a CUTTING move has already reached at each XY in this op.
+      // A vertical descent that stays at or above it moves through a slot that
+      // is already open — later passes of a ramped profile start exactly there,
+      // at the floor the previous pass's finishing lap left (2026-11-14: they
+      // used to restart the ramp from Z0, and every pass got steeper).
+      // ⚠ Keyed on the exact endpoint, so it only credits a descent onto a point
+      // a cut ENDED at; it never credits "near" a cut.
+      const floor = new Map();
+      const key = (x, y) => `${x.toFixed(3)},${y.toFixed(3)}`;
       for (const m of s.moves) {
         const [fx, fy, fz] = m.from;
         const [tx, ty, tz] = m.to;
         if (![fx, fy, fz, tx, ty, tz].every(Number.isFinite)) continue;
         const dxy = Math.hypot(tx - fx, ty - fy);
         const dz = tz - fz;
-        // Descending, no XY component, ending BELOW the workpiece top. Stopping at
-        // Z0 is not a plunge — that is the tool arriving at the surface, and
-        // the ramp does the rest. Rapids count too: a G0 that descends into
-        // the material is the same failure at ten times the speed.
-        if (dz < -1e-6 && dxy < 1e-6 && tz < -1e-6) {
+        // Descending, no XY component, ending BELOW the workpiece top AND below
+        // anything already cut there. Stopping at Z0 is not a plunge — that is
+        // the tool arriving at the surface, and the ramp does the rest. Rapids
+        // count too: a G0 that descends into the material is the same failure
+        // at ten times the speed.
+        const open = floor.get(key(tx, ty)) ?? 0;
+        if (dz < -1e-6 && dxy < 1e-6 && tz < -1e-6 && tz < open - 1e-6) {
           plunges.push(`${s.name} ${m.g} Z${tz.toFixed(3)}`);
         }
         if (dz < -1e-6 && dxy > 1e-6) rampMoves += 1;
+        if (m.g !== 'G0') floor.set(key(tx, ty), Math.min(open, tz));
       }
     }
     return { sections: through.length, plunges, rampMoves };
@@ -4449,7 +4769,7 @@ function pocketFloorZ(gcode) {
     for (const [cx, cy] of [[390, 60], [460, 60], [390, 100], [460, 100]]) s += circ(cx, cy, 2.0);
     return s + '0\nENDSEC\n0\nEOF\n';
   })();
-  const dxfPath = join(ROOT, 'target', 'gate-rel-twopart.dxf');
+  const dxfPath = join(SCRATCH, 'gate-rel-twopart.dxf');
   // THE SAME GEOMETRY UNDER A FILENAME THAT USED TO DEFEAT THE CLASSIFIER
   // (TODO #146, added 2026-08-29) — and 🔴 IT DOES NOT DISCRIMINATE. Read the
   // next paragraph before quoting this case as coverage.
@@ -4483,8 +4803,8 @@ function pocketFloorZ(gcode) {
   // ⚠ Reachability measured rather than assumed, because it decides how big #146
   // was: `import` and the BROWSER both send synthetic ids (`drawing`, `0:1`), so
   // neither could reach it. `nest` and `layout` carry the filename.
-  const dxfHostilePath = join(ROOT, 'target', 'gate-rel-sensor-hole-jig.dxf');
-  const relCfg = join(ROOT, 'target', 'gatecfg-rel.json');
+  const dxfHostilePath = join(SCRATCH, 'gate-rel-sensor-hole-jig.dxf');
+  const relCfg = join(SCRATCH, 'gatecfg-rel.json');
   writeFileSync(dxfPath, dxf);
   writeFileSync(dxfHostilePath, dxf);
   writeFileSync(
@@ -4846,11 +5166,11 @@ function pocketFloorZ(gcode) {
 // thing: I1/K3 compare CLI and wasm on the fixtures, which do not declare a
 // corner plate.
 {
-  const dumpDir = join(ROOT, 'target/probe-gate');
+  const dumpDir = join(SCRATCH, 'probe-gate');
   const gen = spawnSync(
     'cargo',
     ['test', '-p', 'twobee-cam', '--lib', 'probe_gate_dump', '--', '--exact', '--quiet'],
-    { cwd: ROOT, encoding: 'utf8' }
+    { cwd: ROOT, encoding: 'utf8', env: { ...process.env, PROBE_GATE_DIR: dumpDir } }
   );
 
   const read = (name) => {
@@ -5043,7 +5363,7 @@ function pocketFloorZ(gcode) {
     // `--config` carrying `stock.corner_plate` + a moved origin must produce the
     // same displaced datum: the dump is one build of the core, the product is
     // another, and a claim proved only in a test is proved in the wrong place.
-    const cfgPath = join(ROOT, 'target', 'gatecfg-probe-xyz.json');
+    const cfgPath = join(SCRATCH, 'gatecfg-probe-xyz.json');
     writeFileSync(
       cfgPath,
       JSON.stringify({
@@ -5344,7 +5664,7 @@ function pocketFloorZ(gcode) {
 // posts is gate G13's failure mode, not a refusal.
 {
   const cfgFile = (name, obj) => {
-    const f = join(ROOT, 'target', `gatecfg-${name}.json`);
+    const f = join(SCRATCH, `gatecfg-${name}.json`);
     writeFileSync(f, JSON.stringify(obj));
     return f;
   };
@@ -5562,7 +5882,7 @@ function pocketFloorZ(gcode) {
 // that does not run. The re-drive through `job` below is proportional to the
 // number of DISAGREEMENTS, so it costs ~3s today and ~0 once the core is fixed.
 {
-  const DIR = join(ROOT, 'target', 'gate-door');
+  const DIR = join(SCRATCH, 'gate-door');
   mkdirSync(DIR, { recursive: true });
   const cfgPath = (side, i) => join(DIR, `${side}${i}.json`);
   // Instrument faults are kept apart from divergences on purpose. A divergence
@@ -5903,7 +6223,7 @@ function pocketFloorZ(gcode) {
 {
   const DXF = join(ROOT, 'gates/fixtures/plate.dxf');
   const cfg = (name, obj) => {
-    const f = join(ROOT, 'target', `gatecfg-${name}.json`);
+    const f = join(SCRATCH, `gatecfg-${name}.json`);
     writeFileSync(f, JSON.stringify(obj));
     return f;
   };
@@ -5958,7 +6278,7 @@ function pocketFloorZ(gcode) {
   const jobTiny = slice(['job', 'plate', '--config', TINY]);
   const configBites = jobTiny.code === 1 && jobTiny.stdout.length === 0 && ok(jobPlain);
   // A `--config` that cannot be opened or parsed is exit 2, never a shrug.
-  const jobMissing = slice(['job', 'plate', '--config', join(ROOT, 'target', 'no-such-config.json')]);
+  const jobMissing = slice(['job', 'plate', '--config', join(SCRATCH, 'no-such-config.json')]);
   const jobBadJson = slice(['job', 'plate', '--config', DXF]);
   const configStrict = refusedTwo(jobMissing) && refusedTwo(jobBadJson);
 
@@ -6323,7 +6643,7 @@ function pocketFloorZ(gcode) {
   // the fix; exempting the import path from the refusal would have re-opened
   // the hole in the one place that looks at it. The id resolves to the same
   // cutter the old fallback returned, so nothing F1 asserts has moved.
-  const F1CFG = join(ROOT, 'target', 'gatecfg-f1.json');
+  const F1CFG = join(SCRATCH, 'gatecfg-f1.json');
   writeFileSync(F1CFG, JSON.stringify({ tool_id: 'End Mill - Down-cut 6mm 2F' }));
   const imp = (f) => {
     const r = slice(['import', join(ROOT, 'gates/fixtures', f), '--config', F1CFG, '--json']);
@@ -6352,7 +6672,7 @@ function pocketFloorZ(gcode) {
   // Written here rather than committed as a fixture, on the same reasoning REL's
   // hostile-filename drawing gives: the gate carries its own evidence, and a new
   // file under `gates/fixtures/` is a new thing to keep in step.
-  const XFORM_SVG = join(ROOT, 'target', 'gate-f1-transform.svg');
+  const XFORM_SVG = join(SCRATCH, 'gate-f1-transform.svg');
   writeFileSync(
     XFORM_SVG,
     '<svg width="200" height="100">' +
@@ -6383,7 +6703,7 @@ function pocketFloorZ(gcode) {
   // transform: plate.svg declares 900 and the reference workpiece IS 900, so the
   // wrong number and the right one were the same number.
   const svgAt = (sizeY) => {
-    const cfg = join(ROOT, 'target', `gatecfg-f1-y${sizeY}.json`);
+    const cfg = join(SCRATCH, `gatecfg-f1-y${sizeY}.json`);
     writeFileSync(
       cfg,
       JSON.stringify({
@@ -6576,6 +6896,8 @@ function pocketFloorZ(gcode) {
   };
 
   const problems = [];
+  /** Contradictions a human must resolve; see DENIES_EXECUTION. Never a failure. */
+  const specAdvisories = [];
   let rows = [];
   let citations = 0;
   let uncovered = 0;
@@ -6593,6 +6915,72 @@ function pocketFloorZ(gcode) {
     const gateIds = new Set(GATES.map((g) => g[0]));
     rows = specRows(readFileSync(specPath, 'utf8'));
     if (rows.length === 0) problems.push('no spec row with a Gate column was parsed — the parser matched nothing');
+
+    /* ═════════════════════════════════════════════════════════════════════
+     * 🔴 A STATUS CELL THAT SAYS ITS OWN CITATIONS DO NOT RUN. Added 2026-09-17
+     * after the SAME defect hit this document TWICE.
+     * ═════════════════════════════════════════════════════════════════════
+     *
+     * `SPEC` reads the Gate cell, a human reads the Status cell, and neither
+     * can see the other disagreeing:
+     *
+     *   I7  (2026-08-27) Gate cell cited two real Playwright tests while Status
+     *                    read "PARTIAL, and still UNCOVERED"
+     *   B10 (2026-09-17) Gate cell cited three real PASSING tests while Status
+     *                    read "I1 cannot pass on this box … declared, not
+     *                    passing" — stale since 2026-08-12, five weeks live
+     *
+     * ⇒ ***One row, two answers, and the machine's answer was the right one
+     * both times.*** Two instances is a rate, and this lane builds a check on a
+     * rate.
+     *
+     * ⚠ WHAT IT DOES AND DOES NOT MATCH, because a prose scanner that overreaches
+     * gets disarmed. It fires ONLY on phrases asserting the cited tests DO NOT
+     * EXECUTE. It deliberately does NOT fire on "no gate of its own" or "nothing
+     * gates this" — I7 says exactly that TODAY and is CORRECT: those tests run
+     * under `I1` with no gate of their own. **A check that reds on correct work
+     * is one people turn off** (`ceo`/`legal`, and #167's rejected `scanned`
+     * ratchet).
+     *
+     * ⚠ AND IT IS ADVISORY, NOT A FAILURE. It cannot know whether a test passes —
+     * only `I1` knows that. What it knows is that a row cites something runnable
+     * and simultaneously claims nothing ran, which is a contradiction a human
+     * must resolve. Reporting it as HARD would make this gate fail on a row that
+     * might be telling the truth. */
+    const DENIES_EXECUTION = [
+      /declared,\s*not\s*passing/i,
+      /cannot\s+pass\s+on\s+this\s+box/i,
+      /never\s+run\b/i,
+      /never\s+executed\b/i,
+      /do(es)?\s+not\s+run\b/i,
+    ];
+    for (const r of rows) {
+      const runnable = [...r.cell.matchAll(/`([^`]+)`/g)]
+        .map((m) => m[1].trim())
+        .filter((t) => /^(core:|e2e:)/.test(t));
+      if (runnable.length === 0) continue;
+      /* 🔴 A QUOTED RETRACTION IS NOT A LIVE CLAIM, AND THE FIRST VERSION OF
+       * THIS LIMB COULD NOT TELL THEM APART. It fired on B10 **after** B10 was
+       * corrected, because this lane's convention is to keep the wrong sentence
+       * in place — *"This cell read '… declared, not passing'"* — so the phrase
+       * survives inside its own retraction. ⇒ ***A check that reds on every
+       * correctly-corrected row is worse than no check: it is a standing false
+       * positive on exactly the behaviour the convention asks for.***
+       *
+       * ⚠ THE LIMIT, STATED: a cell carrying a dated correction marker is
+       * treated as resolved, so a row that was corrected for one thing and went
+       * stale about another is invisible here. That is accepted rather than
+       * hidden — the alternative fires on every corrected row and gets removed. */
+      const resolved = /(CORRECTED|SUPERSEDED)\s+20\d\d-\d\d-\d\d/.test(r.status) || /~~/.test(r.status);
+      const denial = resolved ? undefined : DENIES_EXECUTION.find((re) => re.test(r.status));
+      if (denial) {
+        specAdvisories.push(
+          `${r.id} (line ${r.line}): Gate cell cites ${runnable.length} runnable check(s) ` +
+            `while Status says they do not execute (matched ${denial}). One of the two is stale — ` +
+            'the Gate cell resolves, so re-read the Status cell against a real run.'
+        );
+      }
+    }
 
     for (const r of rows) {
       const toks = [...r.cell.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim());
@@ -6634,7 +7022,12 @@ function pocketFloorZ(gcode) {
     pass(
       'SPEC',
       `${rows.length} rows, ${citations} citations all resolve; ` +
-        `${uncovered} row(s) cite \`none\` — UNCOVERED and saying so`
+        `${uncovered} row(s) cite \`none\` — UNCOVERED and saying so` +
+        /* 🔴 THE COUNT IS PRINTED EVEN WHEN IT IS ZERO. A limb that emits
+         * nothing on success cannot prove it ran — delete the loop above and
+         * this line reads identically without it. */
+        `; ${specAdvisories.length} status/gate contradiction(s)` +
+        (specAdvisories.length ? `: ${specAdvisories.join(' | ')}` : '')
     );
   } else {
     fail('SPEC', `${problems.length} dangling citation(s): ${problems.slice(0, 6).join(' | ')}${problems.length > 6 ? ` | …+${problems.length - 6} more` : ''}`);
@@ -6731,7 +7124,7 @@ function pocketFloorZ(gcode) {
   const NOTCH = 'gates/fixtures/notch-unreachable.dxf';
   // Local, not borrowed: `cfgFile`/`TOOL` are block-scoped in MULTI and this
   // gate must not depend on another block's internals to run.
-  const cfgReach = join(ROOT, 'target', 'reach-tool.json');
+  const cfgReach = join(SCRATCH, 'reach-tool.json');
   writeFileSync(cfgReach, JSON.stringify({ tool_id: 'End Mill - Down-cut 6mm 2F' }));
   // Driven exactly as `PLANT` drives it — `nest <path> --config` and nothing
   // else — because a gate that needs flags its own plant-auditor does not pass
@@ -6784,7 +7177,7 @@ function pocketFloorZ(gcode) {
 }
 {
   const ORACLE = join(ROOT, 'tools/scad_oracle/oracle.mjs');
-  const OUT = join(ROOT, 'target', 'scad-oracle-gate.json'); // target/ is gitignored
+  const OUT = join(SCRATCH, 'scad-oracle-gate.json'); // target/ is gitignored
   // 🔴 `canon.mjs` IS PART OF THE INSTRUMENT AND WAS NOT IN THIS DIGEST. The
   // fingerprint existed to make a red legible — "baseline measured over cad-src
   // X, this run is Y" — and it could not see the file that reduces BOTH sides to
@@ -6922,7 +7315,7 @@ function pocketFloorZ(gcode) {
     // child would be ~12 GB of writes per run. The first process to see a new
     // HEAD extracts into a temp dir and MOVES it into place, so a child can
     // never read a half-written tree.
-    const CAD_HEAD = join(ROOT, 'target/cad-head');
+    let CAD_HEAD = null; // target/cad-head-<tree hash>, set below once the hash is known
     // 🔴 GIT RUNS FROM THE REPO ROOT, NOT THE LANE. `ROOT` is `software/2bee.app`
     // and `hardware/cad` is repo-relative, so `git archive HEAD hardware/cad`
     // with `cwd: ROOT` dies with *"pathspec did not match any files"*.
@@ -6950,7 +7343,55 @@ function pocketFloorZ(gcode) {
       // reader cannot tell "the input changed" from "the repo moved on". Two
       // commits with identical `cad` content must compare EQUAL, and only the
       // tree hash says so.
-      cadHeadSha = execSync('git rev-parse HEAD:hardware/cad', { cwd: REPO_ROOT, encoding: 'utf8' }).trim();
+      const pinnedTree = SPLNT_CHILD ? process.env.SLICER_GATE_CAD_TREE : undefined;
+      if (pinnedTree !== undefined && !/^[0-9a-f]{40}$/.test(pinnedTree)) {
+        // A malformed pin is refused, never ignored: falling back to HEAD would bring back the drift silently.
+        throw new Error(`SLICER_GATE_CAD_TREE is not a 40-hex tree hash: ${JSON.stringify(pinnedTree)}`);
+      }
+      cadHeadSha = pinnedTree ?? execSync('git rev-parse HEAD:hardware/cad', { cwd: REPO_ROOT, encoding: 'utf8' }).trim();
+      if (!SPLNT_CHILD) CAD_TREE_THIS_PASS = cadHeadSha;
+      // 🔴 KEEP THE DESKTOP INDEXER OUT OF target/ (cad→2bee_app 2026-10-14-08-29-19).
+      // The repo root is a localsearch (Tracker 3) recursive index root, so every
+      // re-extraction below — ~400 MB created as `.tmp.<pid>`, renamed, the old
+      // tree deleted — was crawled mid-flight, and the "Could not get mimetype"
+      // errors for files that had already moved filled a 6.4 GB syslog in one day
+      // on a root disk at 91%. `.trackerignore` is in Tracker's default
+      // ignored-directories-with-content. Written HERE, every run, not committed:
+      // target/ is gitignored and `cargo clean` deletes it, so a hand-placed file
+      // would vanish silently and the next reader would believe it still held.
+      const trackerIgnore = join(ROOT, 'target', '.trackerignore');
+      if (!existsSync(trackerIgnore)) {
+        mkdirSync(join(ROOT, 'target'), { recursive: true });
+        writeFileSync(trackerIgnore, '');
+      }
+      // 🔴 ONE DIRECTORY PER TREE HASH, NEVER REPLACED IN PLACE (2026-10-14).
+      // This was ONE `target/cad-head`, refreshed by `rm -rf` + `mv` whenever
+      // the tree hash moved. Safe while SPLNT ran its children one at a time;
+      // with the children PARALLEL it is a race that changes the row: `cad`
+      // commits mid-pool, child A deletes the tree child B's oracle is reading
+      // (B scores files as ERROR), and two children refreshing at once made
+      // `mv tmp cad-head` move the second tmp INTO the first one's directory.
+      // So each tree hash gets its own directory, written once (temp dir, then
+      // an atomic rename that FAILS if another process already put it there)
+      // and never deleted by a SPLNT child. Old hashes are pruned only by a
+      // top-level run, at its start, before any child of it exists.
+      CAD_HEAD = join(ROOT, 'target', `cad-head-${cadHeadSha.slice(0, 16)}`);
+      if (!SPLNT_CHILD) {
+        for (const e of readdirSync(join(ROOT, 'target'))) {
+          const tmpPid = /^cad-head-[0-9a-f]+\.tmp\.(\d+)$/.exec(e)?.[1];
+          let tmpLive = false;
+          if (tmpPid) {
+            try {
+              process.kill(Number(tmpPid), 0);
+              tmpLive = true;
+            } catch {
+              /* no such process: an abandoned extraction */
+            }
+          }
+          const stale = e === 'cad-head' || (e.startsWith('cad-head-') && join(ROOT, 'target', e) !== CAD_HEAD && !tmpLive);
+          if (stale) rmSync(join(ROOT, 'target', e), { recursive: true, force: true });
+        }
+      }
       const stamp = join(CAD_HEAD, '.sha');
       const have = existsSync(stamp) ? readFileSync(stamp, 'utf8').trim() : null;
       if (have !== cadHeadSha) {
@@ -6960,12 +7401,30 @@ function pocketFloorZ(gcode) {
         // `git archive HEAD hardware/cad` (not the bare tree) so the extracted
         // layout keeps its `hardware/cad/` prefix; the TREE HASH above is what
         // decides whether this runs at all.
-        execSync('git archive HEAD hardware/cad | tar -x -C ' + JSON.stringify(tmp), { cwd: REPO_ROOT });
+        // Archived BY THE TREE HASH just read, not by HEAD: `cad` commits many
+        // times an hour, and archiving HEAD a moment later could extract a newer
+        // tree under the older hash's name.
+        execSync(`git archive --prefix=hardware/cad/ ${cadHeadSha} | tar -x -C ${JSON.stringify(tmp)}`, { cwd: REPO_ROOT });
         writeFileSync(join(tmp, '.sha'), cadHeadSha);
-        rmSync(CAD_HEAD, { recursive: true, force: true });
-        execSync('mv ' + JSON.stringify(tmp) + ' ' + JSON.stringify(CAD_HEAD));
+        try {
+          renameSync(tmp, CAD_HEAD);
+        } catch (e) {
+          // Another process won the rename with the SAME tree hash: use its
+          // copy, drop ours. Anything else is a real failure and is rethrown.
+          rmSync(tmp, { recursive: true, force: true });
+          const won = existsSync(stamp) ? readFileSync(stamp, 'utf8').trim() : null;
+          if (won !== cadHeadSha) throw e;
+        }
       }
     } catch (e) {
+      // A SPLNT child that was handed the parent's tree and cannot use it must not measure
+      // anything. Falling back to the working tree is what the parent does when it has no
+      // archive, but in a child it puts back the exact drift the pin exists to remove, and the
+      // only trace was a note inside a --quick PENDING (measured 2026-10-15, malformed pin run).
+      if (SPLNT_CHILD && process.env.SLICER_GATE_CAD_TREE !== undefined) {
+        console.error(`SPLNT child cannot use the parent's cad tree: ${String(e.message).split('\n')[0]}`);
+        process.exit(2);
+      }
       cadHeadSha = null;
       cadHeadWhy = String(e.message).split('\n')[0].slice(0, 120);
     }
@@ -7586,7 +8045,34 @@ function pocketFloorZ(gcode) {
            * rather than left for the next reader to rediscover. */
           fail(
             'CAD1H',
-            stricterMessage() + treeNote + ' (The baseline COUNT is not scored here; the full population runs nightly.)'
+            stricterMessage() + treeNote + ' (The baseline COUNT is not scored here — only a FULL pass scores it. The fleet nightly (fleet_gate_check.py --full) ran it '+
+              'from 2026-09-26 until the founder paused that cron 2026-10-13; whether it runs NOW is a crontab fact — `crontab -l | grep local_ci_nightly`.)'
+          );
+        } else if (
+          QUICK &&
+          (hwBad.some((c) => !CAD1H_DIVERGENT_CUT_FILES.includes(c.name)) ||
+            CAD1H_DIVERGENT_CUT_FILES.some((f) => hw.some((c) => c.name === f) && !hwBad.some((c) => c.name === f)))
+        ) {
+          // See CAD1H_DIVERGENT_CUT_FILES. A pinned file ABSENT from the cut set
+          // (cad renamed or retired it) is neither new nor cleared — it is named
+          // in the pend below, not failed here, because this lane cannot tell a
+          // rename from a retirement.
+          const newDiv = hwBad.filter((c) => !CAD1H_DIVERGENT_CUT_FILES.includes(c.name)).map((c) => c.name);
+          const cleared = CAD1H_DIVERGENT_CUT_FILES.filter(
+            (f) => hw.some((c) => c.name === f) && !hwBad.some((c) => c.name === f)
+          );
+          fail(
+            'CAD1H',
+            (newDiv.length
+              ? `${newDiv.length} CUT FILE(S) DIVERGE FROM OPENSCAD OR ERROR, AND ARE NOT PINNED — a DIVERGES is our CAD tab ` +
+                `evaluating a different part than the one that gets cut; an ERROR is a cut file nobody compared: ${newDiv.map((n) => n.replace('hardware/', '')).join(', ')}. `
+              : '') +
+              (cleared.length
+                ? `${cleared.length} pinned cut file(s) NO LONGER DIVERGE — prune them from CAD1H_DIVERGENT_CUT_FILES: ` +
+                  `${cleared.map((n) => n.replace('hardware/', '')).join(', ')}. `
+                : '') +
+              `Scored against the ${CAD1H_DIVERGENT_CUT_FILES.length} pinned names, over the ${hw.length} cut file(s) ` +
+              `this --quick run measured — the full-population count is still not scored here.${treeNote} (${src})`
           );
         } else if (QUICK) {
           /* 🔴 A SUBSET IS NOT A PASS, AND IT IS NOT SCORED AGAINST THE FULL
@@ -7611,7 +8097,11 @@ function pocketFloorZ(gcode) {
           pend(
             'CAD1H',
             `--quick ran the CUT-FILE SUBSET only: ${hwBad.length} of ${hw.length} file(s) that are ` +
-              `actually cut diverge from OpenSCAD` +
+              `actually cut diverge from OpenSCAD or ERROR, every one PINNED by name in CAD1H_DIVERGENT_CUT_FILES (an ` +
+              `unpinned divergence turns this gate red; a pinned one is a known wrong part, not a clean one)` +
+              (CAD1H_DIVERGENT_CUT_FILES.some((f) => !hw.some((c) => c.name === f))
+                ? ` — ⚠ pinned but NOT in this cut set (renamed or retired upstream?): ${CAD1H_DIVERGENT_CUT_FILES.filter((f) => !hw.some((c) => c.name === f)).join(', ')}`
+                : '') +
               (hwBad.length
                 ? ` — ${hwBad.map((c) => c.name.replace('hardware/', '')).slice(0, 6).join(', ')}`
                 : '') +
@@ -7776,6 +8266,27 @@ function pocketFloorZ(gcode) {
               "STRICTER and fails on this gate's ledger limb"
           );
         }
+        /* 🔴 THE LIMBS ABOVE ARE AN else-if CHAIN, SO ONE RED HID EVERY LIMB AFTER IT.
+         * Measured 2026-10-15, full pass #10: 12 STRICTER refusals NOT on the pinned
+         * set (200k-polygon booleans, search(), list-comprehension `for`, an include
+         * outside the hardware root) had been in the tree all week, and passes #2..#9
+         * never printed them, because each of those passes failed an EARLIER limb
+         * (ratchet, undecidable cut file, PENDING rate). Fixing the first red would
+         * have uncovered the next as a surprise, one full pass (~45 min) at a time.
+         * A later limb's finding now rides on whichever limb reported. Appended to
+         * the SAME row, never a second one: one gate, one result. */
+        const cad1hLast = results[results.length - 1];
+        if (cad1hLast?.id === 'CAD1H' && cad1hLast.state === 'FAIL') {
+          const masked = [];
+          const sm = stricterMessage();
+          if (sm && !cad1hLast.msg.includes(sm)) masked.push(sm);
+          if (unlistedUndecided.length && !cad1hLast.msg.includes('named, dated and ruled undecidable classes')) {
+            masked.push(`${undecidedWhy(unlistedUndecided)} — and its reason is NONE of the named undecidable classes`);
+          }
+          if (masked.length) {
+            cad1hLast.msg += ` — ALSO, from a later limb this red would otherwise hide: ${masked.join(' — ')}`;
+          }
+        }
       }
     }
   }
@@ -7903,7 +8414,7 @@ function pocketFloorZ(gcode) {
   const DESIGN_PLANTS = RUN_BRANCHES.map((b) => b.plant).filter((p) => !p.includes('(') && p !== 'timer-pump');
 
   const webDir = join(ROOT, 'web');
-  const logPath = join(ROOT, 'target', 'run-gate-fakes.log');
+  const logPath = join(SCRATCH, 'run-gate-fakes.log');
   let tap = '';
   let registries = null;
 
@@ -8678,10 +9189,11 @@ function pocketFloorZ(gcode) {
         'THE ONE FROM 158658175e. The browser opens `false` (App.tsx, 2026-08-09, deliberate and reasoned: an ' +
         'undeclared plate must not silently zero the datum, so the thing that REQUIRES a thickness must not be ' +
         'defaulted on either); the CLI fixtures open `true` with a declared 1.6mm plate, because a reference job ' +
-        'needs something to probe against. On `plate` — which is multi-tool, so a tool change inserts a Z ' +
-        're-reference — the browser default makes the core REFUSE with zero bytes. 🔴 UNRESOLVED, AND NOT THIS ' +
-        'GATE\u2019S TO RESOLVE: whether the app default or the fourteen e2e `runnable` expectations are the wrong ' +
-        'half is a decision for whoever owns the app and the suite. This entry says it is KNOWN, not that it is fine',
+        'needs something to probe against. On `plate` — which is multi-tool, so a tool change needs Z set again — ' +
+        'the browser default made the core REFUSE with zero bytes until 2026-10-16; since then (founder: "change ' +
+        'the different drilling tools are priority") a probe-less machine gets a SECOND stop to set Z zero BY HAND ' +
+        'and a Z-only lift after it, so the two hosts still emit different programs: the CLI probes (G38.2), the ' +
+        'browser stops for a hand zero. This entry says the divergence is KNOWN, not that it is fine',
     },
     tool_ids: {
       fixtures: ['plate', 'pocket', 'socket', 'multi-tool', 'clamped', 'two-part'],
@@ -8745,7 +9257,33 @@ function pocketFloorZ(gcode) {
     clamps: [[{ name: 'witness', x: 0, y: 0, w: 80, h: 40, height_mm: 30, rotation_deg: 0 }]],
     tool_ids: [['End Mill - Up-cut 3.175mm 2F']],
     drawing_offset: [[10, 10]],
+    // An EMPTY drawer: `job plate` cuts with a 3.175mm cutter against the fixture's 6mm collet, so with no
+    // spare collet it is refused (exit 1) where the drawer [3.175, 6.35, 8] posts it with a "FIT THE
+    // 3.175mm COLLET" stop. Measured 2026-11-16. A number ladder cannot perturb an array.
+    'machine.spare_collets_mm': [[]],
   };
+
+  // Keys that ACT ONLY IN A CONTEXT. `auto_reclamp` changes nothing unless a cut
+  // crosses a clamp, and none of the six fixtures has one, so swept alone it is
+  // INERT by construction — true of the fixtures, false of the field. The
+  // context is held FIXED on both sides of the liveness probe (value vs. its
+  // alternative), so it cannot itself produce the difference; it only puts the
+  // key where it has something to act on. Measured 2026-10-16 on `plate`: with
+  // this context, auto_reclamp=false exits 1 with 0 bytes (CutsClamp), true
+  // exits 0 with one CLAMP CHANGE stop; probe_after_clamp_change=false drops the
+  // re-probe (12282B -> 12077B). Self-plant `host-context-blind` removes it.
+  const RECLAMP_CTX = {
+    clamps: [
+      { name: 'edge', x: 30, y: 100, w: 50, h: 40, height_mm: 20, rotation_deg: 0 },
+      { name: 'far', x: 400, y: 100, w: 40, h: 40, height_mm: 20, rotation_deg: 0 },
+    ],
+  };
+  const LIVENESS_CONTEXT = selfPlanted('host-context-blind')
+    ? {}
+    : {
+        auto_reclamp: RECLAMP_CTX,
+        probe_after_clamp_change: { ...RECLAMP_CTX, auto_reclamp: true },
+      };
 
   // ── the conditional keys `App.tsx` may or may not send ─────────────────────
   //
@@ -8772,6 +9310,10 @@ function pocketFloorZ(gcode) {
   // ── A. read the browser's opening JobConfig out of App.tsx ─────────────────
   const APP_PATH = join(ROOT, 'web/src/App.tsx');
   const STORE_PATH = join(ROOT, 'web/src/store/cncStore.ts');
+  // 2026-11-15 (44ea588a9e): the config object now sends `spare_collets_mm: [...SPARE_COLLETS_MM]`,
+  // a constant imported from here. Unread, that key was reported unresolvable and HOST went red on a
+  // correct page. Module-level consts only, and only for names App.tsx and the store did not declare.
+  const MACHINES_PATH = join(ROOT, 'web/src/cncjob/machines.ts');
   const unresolved = [];
   let browserCfg = null;
   let spreads = [];
@@ -8855,6 +9397,15 @@ function pocketFloorZ(gcode) {
       if (!openingOf.has(m[1])) openingOf.set(m[1], m[2].trim());
     }
 
+    if (!existsSync(MACHINES_PATH)) {
+      hostProblems.push('web/src/cncjob/machines.ts does not exist — the collet drawer the config object sends (`SPARE_COLLETS_MM`) is declared there, and without it that key reads as unresolvable');
+    } else {
+      const mSrc = stripJs(readFileSync(MACHINES_PATH, 'utf8'));
+      for (const m of mSrc.matchAll(/^export\s+const\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=\s*([^;]*);/gm)) {
+        if (!openingOf.has(m[1])) openingOf.set(m[1], m[2].trim());
+      }
+    }
+
     // 2026-08-20 the Zustand migration (e8f19e24d6 et al) moved the opening
     // values out of App.tsx's `useState(...)` calls into
     // `web/src/store/cncStore.ts`'s `create<CncStore>((set) => ({ … }))`
@@ -8920,8 +9471,21 @@ function pocketFloorZ(gcode) {
       if (e.startsWith('[')) {
         const b = balanced(e, 0);
         if (b !== e) return NOTHING;
-        const items = topSplit(b.slice(1, -1)).map((x) => evalOpening(x, depth + 1));
-        return items.some((x) => x === NOTHING) ? NOTHING : items;
+        // `[...CONST]` — an element spread is flattened only when it resolves to an ARRAY; a spread of
+        // anything else (or of something unread) stays NOTHING, never an empty contribution.
+        const items = [];
+        for (const x of topSplit(b.slice(1, -1))) {
+          if (x.startsWith('...')) {
+            const arr = evalOpening(x.slice(3), depth + 1);
+            if (!Array.isArray(arr)) return NOTHING;
+            items.push(...arr);
+          } else {
+            const v = evalOpening(x, depth + 1);
+            if (v === NOTHING) return NOTHING;
+            items.push(v);
+          }
+        }
+        return items;
       }
       if (e.startsWith('{')) {
         const b = balanced(e, 0);
@@ -9072,16 +9636,26 @@ function pocketFloorZ(gcode) {
   };
 
   const FIXTURES = ['plate', 'pocket', 'socket', 'multi-tool', 'clamped', 'two-part'];
-  const REFUSAL = 'a Z re-reference was requested but the machine has no probe';
+  // 🔴 RE-ANCHORED 2026-10-16. Until then the anchor was the REFUSAL
+  // 158658175e measured ("a Z re-reference was requested but the machine has
+  // no probe", exit 1, zero bytes). The core now plans a cutter change on a
+  // probe-less machine as a stop to set Z zero BY HAND (founder: "change the
+  // different drilling tools are priority"), so that refusal no longer exists
+  // to reproduce. The anchor keeps its job — the extracted config must
+  // reproduce something ONLY the browser's opening state produces — on the
+  // new observable: `plate` posts (exit 0), carries the hand-zero stop, and
+  // carries NO probe. The CLI's own defaults probe (G38.2) and carry no hand
+  // zero, so a drifted extraction that fell back to them fails this.
+  const HAND_ZERO = '( SET Z ZERO ->';
 
   if (browserCfg && Object.keys(browserCfg).length) {
     const whole = runWith(['job', 'plate'], browserCfg);
-    if (whole.code !== 1 || whole.out.length !== 0 || !whole.err.includes(REFUSAL)) {
+    if (whole.code !== 0 || !whole.out.includes(HAND_ZERO) || whole.out.includes('G38')) {
       hostProblems.push(
-        `the config extracted from App.tsx does NOT reproduce the browser\u2019s measured behaviour: \`job plate\` with it gave exit=${whole.code} stdout=${whole.out.length}B and ${whole.err.includes(REFUSAL) ? 'did' : 'did NOT'} carry the refusal. 158658175e measured exit 1, ZERO bytes and "${REFUSAL}" in the running browser, at the CLI and in the wasm. Either the extraction has drifted from what the page opens with, or the browser default moved and this anchor is the first thing that noticed`
+        `the config extracted from App.tsx does NOT reproduce the browser\u2019s opening behaviour: \`job plate\` with it gave exit=${whole.code} stdout=${whole.out.length}B, ${whole.out.includes(HAND_ZERO) ? 'with' : 'WITHOUT'} the hand-zero stop and ${whole.out.includes('G38') ? 'WITH' : 'without'} a probe. The browser opens with no Z probe, so \`plate\` (multi-tool) must post exit 0 with "${HAND_ZERO}" and no G38. Either the extraction has drifted from what the page opens with, or the browser default moved and this anchor is the first thing that noticed`
       );
     } else {
-      hostNotes.push(`ANCHOR: the extracted opening config reproduces the browser\u2019s measured refusal through the CLI (exit 1, 0 bytes, "${REFUSAL.slice(0, 34)}…")`);
+      hostNotes.push(`ANCHOR: the extracted opening config reproduces the browser\u2019s no-probe behaviour through the CLI (exit 0, a "${HAND_ZERO}" stop, no G38)`);
     }
   } else if (!hostProblems.length) {
     hostProblems.push('the browser\u2019s opening config extracted EMPTY — a dead instrument, not two hosts that agree. Every comparison below would pass vacuously');
@@ -9122,9 +9696,11 @@ function pocketFloorZ(gcode) {
         const solo = runWith(['job', f], nestAt(path, value));
         if (solo.code === 2) { rejected.push(f); continue; }
         if (solo.seen !== base.get(f).seen) { divergesOn.push(f); continue; }
+        const ctx = LIVENESS_CONTEXT[key];
+        const here = ctx ? runWith(['job', f], { ...ctx, ...nestAt(path, value) }) : solo;
         for (const alt of ladderFor(key, value)) {
-          const probe = runWith(['job', f], nestAt(path, alt));
-          if (probe.code !== 2 && probe.seen !== solo.seen) { liveOn.push(f); break; }
+          const probe = runWith(['job', f], ctx ? { ...ctx, ...nestAt(path, alt) } : nestAt(path, alt));
+          if (probe.code !== 2 && probe.seen !== here.seen) { liveOn.push(f); break; }
         }
       }
       if (rejected.length === FIXTURES.length) {
@@ -9184,25 +9760,43 @@ function pocketFloorZ(gcode) {
     }
   }
 
-  // ── E. the divergence is not an artefact of the fixtures ──────────────────
+  // ── E. the DXF path an operator uses: no phantom probe datum ──────────────
   //
-  // 🔴 The fixture jobs are geometry this crate wrote, so a sceptic can ask
-  // whether any of this reaches a person with a drawing. `import` builds its job
-  // through `fixtures::machine()` too, so it does — asserted here rather than
-  // asserted of the source, because "they share a constructor" is a claim about
-  // code and "the DXF path probes" is a claim about a program.
+  // 🔴 RE-ANCHORED 2026-11-15. Until 411b33a0f3 this limb asserted that `import`
+  // PROBES at the CLI default, to show the fixture divergence reached a person
+  // with a drawing. It did, and that was the defect: the import job was built on
+  // the reference fixtures' machine, so every imported program probed with their
+  // 1.6 mm plate (a FIXTURE CONSTANT) and with a real 5-15 mm plate every Z was
+  // that much too deep (through-cuts into the spoilboard, "safe" rapids through
+  // the stock). The import path now has no plate unless the host states one, so
+  // the old assertion went red on the fix. What it guards now, on the program:
+  //   1. the CLI default does NOT probe, and equals the browser's default;
+  //   2. probing ON with no plate stated is REFUSED (no program at all);
+  //   3. a stated 15 mm plate reaches the program as `G10 L20 P1 Z15.000`.
   {
     const dxf = 'gates/fixtures/plate.dxf';
     const tool = { tool_ids: browserCfg?.tool_ids ?? ['End Mill - Down-cut 6mm 2F'] };
     const cliSide = runWith(['import', dxf], tool);
     const appSide = runWith(['import', dxf], { ...tool, machine: { probe_enabled: false } });
-    const cliProbes = /^G38\.2 /m.test(cliSide.out);
-    if (!cliProbes) {
-      hostProblems.push(`the DXF path does NOT probe at the CLI\u2019s own default (exit=${cliSide.code}, ${cliSide.out.length}B) — this limb exists to show the divergence is not a fixture artefact and it can no longer show it`);
-    } else if (cliSide.seen === appSide.seen) {
-      hostProblems.push('on the DXF path the browser\u2019s probe default changes NOTHING while the fixtures say it changes everything — two answers to one question, and this gate cannot say which is right');
-    } else {
-      hostNotes.push(`REACH: the same divergence is on the DXF path an operator uses — \`import plate.dxf\` probes at the CLI default (G38.2 present) and differs at the browser default (${cliSide.out.length}B -> ${appSide.out.length}B)`);
+    const noPlate = runWith(['import', dxf], { ...tool, machine: { probe_enabled: true } });
+    const plate15 = runWith(['import', dxf], { ...tool, machine: { probe_enabled: true, touch_plate_mm: 15 } });
+    const probes = (r) => /^G38\.2 /m.test(r.out);
+    const before = hostProblems.length;
+    if (cliSide.code !== 0 || !cliSide.out.length) {
+      hostProblems.push(`\`import plate.dxf\` at the CLI default did not produce a program (exit=${cliSide.code}, ${cliSide.out.length}B) — the import limb cannot be checked`);
+    } else if (probes(cliSide)) {
+      hostProblems.push('the DXF path PROBES at the CLI default with no plate stated — the reference fixtures\u2019 1.6 mm plate is back in imported programs; with a real plate every Z is cut too deep');
+    } else if (cliSide.seen !== appSide.seen) {
+      hostProblems.push('on the DXF path the CLI default and the browser default (probe off) give different programs — the two hosts disagree on a job the operator drew');
+    }
+    if (noPlate.code === 0 || noPlate.out.length) {
+      hostProblems.push(`probing ON with no touch_plate_mm is NOT refused on the DXF path (exit=${noPlate.code}, ${noPlate.out.length}B) — a program is planned against a plate nobody stated`);
+    }
+    if (!(plate15.code === 0 && probes(plate15) && /^G10 L20 P1 Z15\.000\b/m.test(plate15.out))) {
+      hostProblems.push(`a stated 15 mm touch plate does not reach the program as \`G10 L20 P1 Z15.000\` (exit=${plate15.code}, probe=${probes(plate15)}) — the operator\u2019s plate is not the one the datum is set from`);
+    }
+    if (hostProblems.length === before) {
+      hostNotes.push(`DXF path: \`import plate.dxf\` does not probe at the CLI default and equals the browser default (${cliSide.out.length}B); probing without a plate is refused (exit ${noPlate.code}); a stated 15 mm plate emits G10 L20 P1 Z15.000`);
     }
   }
 
@@ -9511,7 +10105,9 @@ if (!QUICK) {
     const out = execSync('npx playwright test --reporter=line 2>&1', {
       cwd: join(ROOT, 'web'),
       encoding: 'utf8',
-      timeout: 900_000,
+      // 2400 s: the preview server alone may take 1200 s to come up (the catalogue renders every design; see the
+      // webServer timeout in web/playwright.config.ts). At 900 s the suite could not finish once that build grew.
+      timeout: 2_400_000,
     });
     const m = /(\d+) passed/.exec(out);
     const failed = /(\d+) failed/.exec(out);
@@ -9526,7 +10122,9 @@ if (!QUICK) {
   } catch (e) {
     const txt = String(e.stdout ?? '') + String(e.stderr ?? e.message);
     const failed = /(\d+) failed/.exec(txt);
-    fail('I1', failed ? `browser suite: ${failed[0]}` : `browser suite errored: ${txt.slice(-300)}`);
+    // The LAST error line names the cause; the last 300 chars were a stack fragment ("17:5) {") on 2026-11-14.
+    const cause = txt.split('\n').filter((l) => /\bError\b|Timed out|ENOENT|not a git repository/.test(l)).pop();
+    fail('I1', failed ? `browser suite: ${failed[0]}` : `browser suite errored: ${cause ? cause.trim().slice(0, 300) + ' … ' : ''}${txt.slice(-200)}`);
   }
 } else {
   pend('I1', 'BROWSER PARITY + UI — skipped by --quick, which is not a pass');
@@ -9715,7 +10313,7 @@ if (!QUICK) {
     // the core cannot pass by claiming success, because nothing it says is
     // read — only the exit code, the emitted program and the verdict.
     const cfgFile = (name, body) => {
-      const f = join(ROOT, 'target', `plant-${name}.json`);
+      const f = join(SCRATCH, `plant-${name}.json`);
       writeFileSync(f, body);
       return f;
     };
@@ -10109,7 +10707,7 @@ if (!QUICK) {
 // on is itself under assertion. `--self-plant verdict-go-on-gaps` restores the
 // rule exactly as it stood until 2026-08-10 — `pending` counted, printed, and
 // discarded — and gate VERD must go red on it.
-const EXIT_OF = { GO: 0, INCOMPLETE: 3, 'NO-GO': 1 };
+const EXIT_OF = { GO: 0, INCOMPLETE: selfPlanted('verdict-exit-3') ? 3 : 2, 'NO-GO': 1 };
 const verdictOf = (failed, gaps) =>
   selfPlanted('verdict-go-on-gaps')
     ? failed === 0
@@ -10181,6 +10779,16 @@ const verdictLine = (v, failed, gaps) =>
   for (const a of names) for (const b of names) if (a !== b && b.startsWith(a)) prefixes.push(`${a} is a prefix of ${b}`);
   const zeroExits = names.filter((n) => EXIT_OF[n] === 0);
   const exitsDistinct = new Set(Object.values(EXIT_OF)).size === names.length;
+  // 🔴 THE FLEET CONTRACT (added 2026-09-26 with the fleet_gate_check.py row):
+  // 0 ran clean · 1 found something · 2 could not run. The distinctness limb
+  // above is satisfied by ANY three integers — it held with INCOMPLETE on 3,
+  // which the fleet scored as a red — so the actual numbers are asserted here.
+  // And every verdict must map to a --json word the fleet knows, or the report
+  // it tallies says something the exit code does not.
+  const fleetContract = EXIT_OF.GO === 0 && EXIT_OF['NO-GO'] === 1 && EXIT_OF.INCOMPLETE === 2;
+  const FLEET_WORDS = new Set(['GO', 'GO_WITH_WARN', 'NO-GO', 'INCONCLUSIVE']);
+  const jsonUnmapped = [...produced].filter((v) => !FLEET_WORDS.has(JSON_VERDICT_OF[v]));
+  const jsonSkipsPending = JSON_STATUS_OF.PENDING === 'SKIP';
 
   // And the composed LINE, not just the word: a non-GO run must not contain the
   // string a control greps for. Asserted on the text that actually gets printed.
@@ -10196,15 +10804,28 @@ const verdictLine = (v, failed, gaps) =>
     zeroExits[0] === 'GO' &&
     exitsDistinct &&
     leaks.length === 0 &&
-    unmapped.length === 0
+    unmapped.length === 0 &&
+    fleetContract &&
+    jsonUnmapped.length === 0 &&
+    jsonSkipsPending
   ) {
     pass(
       'VERD',
       `${table.length}/${table.length} of the verdict truth table hold, including 0 failed + gaps -> ` +
-        `INCOMPLETE (exit 3) which no real run on this box can currently produce; no verdict string is a ` +
+        `INCOMPLETE (exit 2) which no real run on this box can currently produce; no verdict string is a ` +
         `prefix of another; only GO exits 0; neither non-GO line contains "VERDICT: GO"; and every one of the ` +
         `${produced.size} verdict(s) verdictOf can return over a 4x4 grid maps to an INTEGER exit code ` +
-        `(an unmapped word exits 0 — measured: process.exit(undefined) is rc=0)`
+        `(an unmapped word exits 0 — measured: process.exit(undefined) is rc=0); the codes ARE the fleet ` +
+        `contract 0/1/2, and each verdict maps to a --json word the fleet knows with PENDING reported as SKIP`
+    );
+  } else if (!fleetContract || jsonUnmapped.length || !jsonSkipsPending) {
+    fail(
+      'VERD',
+      `the verdict does not speak the fleet's contract: EXIT_OF is ${JSON.stringify(EXIT_OF)} (must be GO 0, ` +
+        `NO-GO 1, INCOMPLETE 2 — fleet_gate_check.py reads 2 as "could not run" and anything else non-zero as ` +
+        `a defect)` +
+        (jsonUnmapped.length ? `; --json has no fleet word for: ${jsonUnmapped.join(', ')}` : '') +
+        (jsonSkipsPending ? '' : '; --json reports a PENDING gate as something other than SKIP')
     );
   } else if (unmapped.length) {
     fail(
@@ -10249,6 +10870,38 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
 // is HARD, so an id with no result means its block threw, was deleted, or was
 // edited out — none of which may be silent. This used to backfill `PENDING` for
 // `kind === 'PENDING'` rows and was dead code, because there are none.
+
+// --- FDM: the FDM engine crate (twobee-fdm, pnp's lane) ---------------------
+// Founder ruling 2026-10-14: FDM in Rust in this lane. The crate is built with
+// `-p twobee-fdm` ONLY here; G0 and the root build exclude it on purpose.
+// ⚠ What this row cannot say: whether the engine's G-code matches OrcaSlicer's.
+// That needs Orca; see PENDING_BUDGET.FDM. A green here never reads as parity.
+{
+  const FDM_TEST_FLOOR = 300; // 315 on 2026-10-14 (eaa527a36e → 6549854dd1)
+  try {
+    const filter = selfPlanted('fdm-empty-run') ? ' -- __no_such_fdm_test__' : '';
+    const out = execSync(`cargo test -p twobee-fdm --release --lib${filter} 2>&1`, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 << 20 });
+    const ran = [...out.matchAll(/test result: ok\. (\d+) passed/g)].reduce((n, m) => n + Number(m[1]), 0);
+    if (ran < FDM_TEST_FLOOR) {
+      fail('FDM', `cargo test -p twobee-fdm --release --lib ran ${ran} test(s), below the floor of ${FDM_TEST_FLOOR}. A filtered or emptied run exits 0 and would read as green.`);
+    } else {
+      execSync('cargo build -p twobee-fdm --release --bin parity 2>&1', { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 << 20 });
+      const self = execSync(`${JSON.stringify(join(ROOT, 'target/release/parity'))} --selftest 2>&1`, { cwd: ROOT, encoding: 'utf8' });
+      if (!/^SELFTEST OK$/m.test(self)) {
+        fail('FDM', `parity --selftest did not print SELFTEST OK: ${self.trim().split('\n').slice(-3).join(' | ')}`);
+      } else {
+        pend(
+          'FDM',
+          `engine tests green (${ran} tests, floor ${FDM_TEST_FLOOR}) and the parity tool's negative controls fire ` +
+            '(parity --selftest: +15% wall -> FAIL, missing feature -> FAIL, empty population -> PENDING). ' +
+            'Parity against OrcaSlicer is NOT measured by this gate — PENDING, never PASS. Nothing has printed.',
+        );
+      }
+    }
+  } catch (e) {
+    fail('FDM', `twobee-fdm did not build or test: ${String(e.stdout ?? e.message).split('\n').slice(-5).join(' ')}`);
+  }
+}
 
 // --- AGPL: the §13 source offer -------------------------------------------
 //
@@ -10628,17 +11281,40 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
   const curlJson = (url) => {
     // Anonymous, for the same reason the offer probe is: the obligation is to a
     // user with none of our credentials. No token, no `gh`, no netrc.
+    // Per-pass cache: see GH_CACHE at the top of this file for why.
+    const cached = GH_CACHE ? join(GH_CACHE, createHash('sha256').update(url).digest('hex').slice(0, 32) + '.json') : null;
+    if (cached && existsSync(cached)) {
+      try {
+        return JSON.parse(readFileSync(cached, 'utf8'));
+      } catch {
+        /* a torn write from a sibling: fall through and ask GitHub */
+      }
+    }
     const r = spawnSync(
       'curl',
       ['-sS', '-m', '25', '--connect-timeout', '8', '--retry', '0', '-H', 'Accept: application/vnd.github+json', url],
       { encoding: 'utf8', timeout: 40000 }
     );
     if (r.status !== 0 || typeof r.stdout !== 'string' || !r.stdout.trim()) return null;
+    let parsed;
     try {
-      return JSON.parse(r.stdout);
+      parsed = JSON.parse(r.stdout);
     } catch {
       return null;
     }
+    // GitHub's error bodies carry `message` (rate limit, Not Found); a success
+    // for these three endpoints does not. Only successes are shared.
+    if (cached && parsed && typeof parsed === 'object' && !('message' in parsed)) {
+      try {
+        mkdirSync(GH_CACHE, { recursive: true });
+        const tmp = `${cached}.${process.pid}.tmp`;
+        writeFileSync(tmp, JSON.stringify(parsed));
+        renameSync(tmp, cached);
+      } catch {
+        /* a cache that cannot be written costs a call, not a verdict */
+      }
+    }
+    return parsed;
   };
 
   const probeCorrespondence = (url) => {
@@ -10657,6 +11333,21 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
         detail:
           `SELF-PLANT ${SELF_PLANT}: correspondence probe forced to DRIFT, modelling the 2026-09-09 state — ` +
           'the mirror answered 200 and was four commits behind the served build',
+      };
+    }
+    if (selfPlanted('agpl-mirror-ahead')) {
+      // The OTHER direction, and the control on the deployed-basis branch: the
+      // mirror carries a newer bundle-affecting file than the commit that built
+      // what is being served. No probe-4 evidence is consulted on this path, so
+      // this is the only plant that drives it.
+      return {
+        state: 'drift',
+        basis: 'deployed',
+        servingDrift: true,
+        servingDetail: 'SELF-PLANT: the mirror publishes a web/src/ file the DEPLOYED commit does not have — the mirror is AHEAD of the served build',
+        detail:
+          `SELF-PLANT ${SELF_PLANT}: correspondence probe forced to DRIFT against the DEPLOYED commit, modelling a mirror re-cut at a ` +
+          'later commit than the one still on the CDN — the direction every instrument on the 2026-09-09 thread failed to ask about',
       };
     }
     if (selfPlanted('agpl-mirror-undisclosed')) {
@@ -10689,7 +11380,68 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
     const [, owner, repo] = m;
 
     const prefix = (gitOut(['rev-parse', '--show-prefix']) ?? '').trim().replace(/\/$/, '');
-    const treeish = prefix ? `HEAD:${prefix}` : 'HEAD';
+
+    // 🔴 COMPARE AGAINST THE DEPLOYED COMMIT, NOT AGAINST `HEAD`. `legal`,
+    // 2026-09-09: *"'Mirror == deployed' is the invariant. 'Mirror ≥ tree' and
+    // 'mirror ≤ tree' are both only proxies for it, and they fail in OPPOSITE
+    // directions."* Every instrument on that thread asked whether the mirror was
+    // BEHIND. §13 is violated just as squarely if the mirror is AHEAD of what is
+    // being served — the recipient still receives source that does not build the
+    // served program — and re-mirroring at `HEAD` after a commit is exactly how
+    // that arises. Measured by `legal` the same hour: `main` was two commits
+    // ahead of the served build and NO GATE ASKED.
+    //
+    // The deployed commit is published by `backend`'s deploy in the served
+    // artefact itself, so it is read rather than assumed.
+    // ⚠ TWO ASSUMPTIONS, BOTH NAMED IN THE VERDICT RATHER THAN IMPLIED.
+    // (a) `build-info.json` and the bundle come from the same deploy — a CDN
+    //     could in principle serve them from different ones and nothing here can
+    //     see that.
+    // (b) 🔴 THE VALUE IS ASSERTED BY THE DEPLOYER, NOT DERIVED FROM THE
+    //     ARTEFACT (`legal`, 2026-09-09). The deploy script writes its own
+    //     `BUILD_COMMIT` into `dist/`; nothing in the served bundle confirms it,
+    //     and a bundle cannot be asked which commit produced it. ⚠ Measurably
+    //     not theoretical: `5c7c4550ab6:…/web` and `691558f97f:…/web` are the
+    //     SAME tree object, so today's bundle is consistent with either commit
+    //     and no examination distinguishes them — harmless here, since both give
+    //     the same Corresponding Source for every bundle-affecting path. ⇒ This
+    //     basis inherits the deploy script's correctness exactly, and that script
+    //     wrote the wrong `BUILD_COMMIT` earlier the same day. A gate that cannot
+    //     derive a fact says it took it on trust.
+    // ⚠ AND IF IT CANNOT BE READ OR DOES NOT RESOLVE HERE, THIS FALLS BACK TO
+    // `HEAD` AND SAYS SO — that basis can only ever PEND on drift, never FAIL,
+    // because a commit that exists here and was never deployed creates no §13
+    // obligation at all.
+    let basis = 'HEAD';
+    let basisDetail = 'the deployed commit could not be established, so the comparison basis is this tree at HEAD';
+    let deployedSha = null;
+    {
+      const raw = curlText('https://2bee.app/build-info.json');
+      let claimed = null;
+      if (raw !== null) {
+        try {
+          const j = JSON.parse(raw);
+          if (typeof j.commit === 'string' && /^[0-9a-f]{40}$/.test(j.commit)) claimed = j.commit;
+        } catch {
+          /* a body this probe cannot parse is not a commit it may rely on */
+        }
+      }
+      if (claimed === null) {
+        basisDetail = raw === null
+          ? 'https://2bee.app/build-info.json did not answer this box, so the DEPLOYED commit is unknown and the basis falls back to HEAD'
+          : 'https://2bee.app/build-info.json answered with no usable 40-hex `commit`, so the DEPLOYED commit is unknown and the basis falls back to HEAD';
+      } else if (gitOut(['cat-file', '-e', `${claimed}^{commit}`]) === null) {
+        // ceo's third-state rule, second application: "cannot resolve" is not
+        // "does not match", and folding it into a red teaches people that red
+        // means nothing.
+        basisDetail = `the deploy reports commit ${claimed.slice(0, 12)} and THIS CLONE CANNOT RESOLVE IT — that is UNKNOWN, not a mismatch; basis falls back to HEAD`;
+      } else {
+        basis = 'deployed';
+        deployedSha = claimed;
+        basisDetail = `basis is the DEPLOYED commit ${claimed.slice(0, 12)}, ASSERTED by the deploy script in https://2bee.app/build-info.json and NOT DERIVED from the bundle — a bundle cannot be asked which commit produced it, so this basis inherits that script's correctness, and it also assumes build-info.json and the bundle came from the same deploy`;
+      }
+    }
+    const treeish = prefix ? `${basis === 'deployed' ? deployedSha : 'HEAD'}:${prefix}` : (basis === 'deployed' ? deployedSha : 'HEAD');
     // 🔴 `--full-tree`, AND IT IS NOT COSMETIC. Without it `ls-tree` restricts
     // the listing to the CWD PREFIX — run from `software/2bee.app/` against the
     // tree `HEAD:software/2bee.app`, it looks for `software/2bee.app/` INSIDE
@@ -10823,8 +11575,9 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
     if (undisclosed.length) {
       return {
         state: 'undisclosed',
+        basis,
         detail:
-          `${owner}/${repo}@${branch} = COMMIT ${mirrorSha} is MISSING ${undisclosed.join(' + ')} — the file that states this repository IS the §13 ` +
+          `[${basisDetail}] ${owner}/${repo}@${branch} = COMMIT ${mirrorSha} is MISSING ${undisclosed.join(' + ')} — the file that states this repository IS the §13 ` +
           `Corresponding Source offer, which subtree it mirrors, at which revision, and what is deliberately not here. ` +
           `Without it the mirror presents itself as the Corresponding Source while disclosing nothing about what was withheld` +
           (missing.length || differ.length || extra.length
@@ -10836,8 +11589,9 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
     if (missing.length === 0 && differ.length === 0 && extra.length === 0) {
       return {
         state: 'match',
+        basis,
         detail:
-          `${owner}/${repo}@${branch} = COMMIT ${mirrorSha} matches HEAD:${prefix} (local ${localSha}) blob-for-blob across ${compared} file(s), with ` +
+          `[${basisDetail}] ${owner}/${repo}@${branch} = COMMIT ${mirrorSha} matches ${treeish} (local ${localSha}) blob-for-blob across ${compared} file(s), with ` +
           `${MIRROR_EXCLUDED.join(' + ')} excluded per legal's ruling Q1 and ${MIRROR_REQUIRED.join(' + ')} present as REQUIRED mirror-only disclosure${dirtyNote}`,
       };
     }
@@ -10846,13 +11600,14 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
     const serving = drifted.filter(servesTheProgram);
     return {
       state: 'drift',
+      basis,
       servingDrift: serving.length > 0,
       servingDetail:
         serving.length > 0
           ? `${serving.length} of the ${drifted.length} drifting path(s) CAN change the served program: ${serving.slice(0, 6).join(', ')}${serving.length > 6 ? `, +${serving.length - 6} more` : ''}`
           : `NONE of the ${drifted.length} drifting path(s) can change the served program (${drifted.slice(0, 6).join(', ')}${drifted.length > 6 ? `, +${drifted.length - 6} more` : ''}) — they are gates, docs, tests or tooling, which no bundle contains`,
       detail:
-        `${owner}/${repo}@${branch} = COMMIT ${mirrorSha} does NOT correspond to HEAD:${prefix} (local ${localSha}) — ` +
+        `[${basisDetail}] ${owner}/${repo}@${branch} = COMMIT ${mirrorSha} does NOT correspond to ${treeish} (this tree's HEAD is ${localSha}) — ` +
         [say('file(s) MISSING from the mirror', missing), say('file(s) DIFFERING in content', differ), say('UNEXPECTED file(s) in the mirror', extra)]
           .filter(Boolean)
           .join('; ') +
@@ -11006,7 +11761,22 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
         'Corresponding Source: two offers means at least one user is handed a link to something that is not it'
     );
   }
-  const url = distinct.length === 1 ? distinct[0] : null;
+  /* 🔴 THREE PLANTS NEED THE DEAD LINK BACK (2026-10-14). They were written while
+   * the footer carried AGPL_KNOWN_DEAD; since the mirror went live (bee47fbfa1)
+   * the offer is real and AGPL is a CORRECT green, so `agpl-published`,
+   * `agpl-offer-ruled` and `agpl-hijack-blind` had nothing to redden: SPLNT
+   * reported each as "PLANTED NOTHING" / "MOVED THE MESSAGE, NOT THE VERDICT"
+   * (full pass 2026-10-14, and in the 10-12 nightly's 50 problems). Under those
+   * plants the offer is read as the measured-404 URL, the world they assert on.
+   * ⚠ `agpl-hijack-blind` IS WEAKER THAN ITS NAME NOW. It exists to prove the
+   * routable-address filter is load-bearing (a hijacked DNS answer must not make
+   * the domain read as published). 2bee.app IS published since the mirror went
+   * live, so a dead offer reddens AGPL with or without the filter: its red now
+   * proves dead-offer detection, NOT the filter. Re-arming it needs a domain that
+   * is genuinely unpublished — owed, not claimed. */
+  const DEAD_OFFER_PLANT =
+    selfPlanted('agpl-published') || selfPlanted('agpl-offer-ruled') || selfPlanted('agpl-hijack-blind');
+  const url = DEAD_OFFER_PLANT ? AGPL_KNOWN_DEAD : distinct.length === 1 ? distinct[0] : null;
 
   // The sweep: a third copy anywhere else under web/src. Keyed on the URL the
   // surfaces report AND on the known-dead one, so a half-done correction — the
@@ -11194,7 +11964,14 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
         // files that BUILD the served program, and the served bundle has to be a
         // build of THIS tree. Either one absent and the mirror may correspond to
         // the deployed commit exactly.
-        if (served && corr.servingDrift && build.state === 'this-tree') {
+        // 🔴 THE BASIS DECIDES WHETHER PROBE 4 IS EVEN NEEDED. When the mirror
+        // was compared against the DEPLOYED commit (read from the served
+        // build-info.json), a bundle-affecting difference IS the breach — in
+        // either direction, mirror behind or mirror ahead — and no further
+        // evidence about which build is served is required. Probe 4 exists for
+        // the HEAD fallback, where "differs from this tree" does not imply
+        // "differs from what is served".
+        if (served && corr.servingDrift && (corr.basis === 'deployed' || build.state === 'this-tree')) {
           fail(
             'AGPL',
             `🔴 §13 HAS ATTACHED AND THE OFFER DOES NOT CORRESPOND — ${url} is ${ruling} and ANSWERS (${off.detail}), but ${corr.detail}. ` +
@@ -11436,6 +12213,7 @@ const DISCLOSURES_PINNED = 11;
   const problems = [];
   const notes = [];
   const names = Object.keys(SELF_PLANTS);
+  // `driven` (the subset SPLNT can actually exercise) is defined at the drive step.
   // 🔴 THE FLOOR. Everything below is `.every()`-shaped and therefore vacuously
   // true over an empty list; without this, an emptied registry PASSES while
   // printing "All 0 self-plant(s) have a contract". See REGISTRY_FLOOR.
@@ -11481,7 +12259,31 @@ const DISCLOSURES_PINNED = 11;
   // Only LITERAL call sites count. This gate builds its children's arguments
   // FROM the registry, so its own spawn cannot satisfy this limb on a branch's
   // behalf: the question is whether a REAL branch still reads the flag.
-  const splntSrc = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+  //
+  // 🔴 AND ONLY CODE COUNTS — A COMMENT IS NOT A CALL SITE (ceo gate audit,
+  // check 3, 2026-09-26). This matched the RAW file, so a comment that merely
+  // QUOTED `selfPlanted('<name>')` — and this file quotes its own branches in
+  // prose constantly — satisfied the limb for a branch that no longer existed.
+  // Measured before the fix: 47 names cited, 0 of them comment-only, so nothing
+  // was hiding TODAY; the defect was that nothing stopped it. Comments are
+  // stripped per line (whole-line `//`, `*`, `/*`, and anything after `//`).
+  // ⚠ The tail strip would also cut a call that FOLLOWS a `//` inside a string
+  // on the same line; that shape has zero instances here, and it fails SAFE —
+  // the call is dropped and reported as an ORPHAN, never counted.
+  // The witness, which must stay a comment: selfPlanted('splant-ghost')
+  // Under the old raw match that line made `splant-ghost` CITED, so the clean
+  // run went red on "branches on an unregistered name" and `--self-plant
+  // splant-orphan` found no orphan. With the strip, the clean run is clean and
+  // the plant reddens — so the existing plant now discriminates old from new.
+  const splntSrc = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+    .split('\n')
+    .map((line) => {
+      const t = line.trimStart();
+      if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return '';
+      const at = line.indexOf('//');
+      return at >= 0 ? line.slice(0, at) : line;
+    })
+    .join('\n');
   const cited = new Set([
     ...[...splntSrc.matchAll(/selfPlanted\('([a-z0-9-]+)'\)/g)].map((m) => m[1]),
     ...[...splntSrc.matchAll(/SELF_PLANT === '([a-z0-9-]+)'/g)].map((m) => m[1]),
@@ -11514,14 +12316,123 @@ const DISCLOSURES_PINNED = 11;
     const t0 = Date.now();
     const RANK = { PASS: 0, PENDING: 1, FAIL: 2 };
     const self = fileURLToPath(import.meta.url);
-    const child = (args) => {
-      const r = spawnSync(process.execPath, [self, '--quick', ...args], {
-        cwd: ROOT,
-        encoding: 'utf8',
-        maxBuffer: 128 * 1024 * 1024,
-        env: { ...process.env, SLICER_GATE_SPLNT_CHILD: '1' },
+    // ── PARALLEL, WITH A PRINTED CAP (ceo 2026-10-11, founder ruling 09-23) ──
+    // Run serially, this limb was 4988 s of a 5980 s full pass (83%). The
+    // children were serial because they shared scratch paths; each now gets
+    // its own SLICER_GATE_SCRATCH (see SCRATCH at the top of this file), so
+    // they can run side by side. The cap is printed because engine quota and
+    // CPU are finite, and an unread cap is the one that gets raised quietly.
+    // A cap that is not a positive integer is a DEAD INSTRUMENT, not a default.
+    const JOBS_RAW = process.env.SLICER_GATE_SPLNT_JOBS ?? '4';
+    const JOBS = /^[1-9][0-9]*$/.test(JOBS_RAW) ? Number(JOBS_RAW) : 0;
+    // Plants that write into the MEASURED tree, not into their scratch dir.
+    // Every sibling would read that write (TSC would compile the planted file),
+    // so these run alone, after the pool drains. A plant that writes the tree
+    // and is NOT listed here does not pass quietly: every sibling that overlaps
+    // it sees the write in its own fingerprint bracket and is reported
+    // UNMEASURABLE below.
+    const EXCLUSIVE = new Set(['tsc-error-blind']);
+    const splntBase = join(SCRATCH, `splnt-${process.pid}`);
+    rmSync(splntBase, { recursive: true, force: true });
+    mkdirSync(splntBase, { recursive: true });
+    const MAX_OUT = 128 * 1024 * 1024;
+    // ── VOLATILE FRAGMENTS: text in a row that changes between ANY two runs ──
+    // 🔴 ADDED 2026-10-14 BECAUSE `AGPL` MADE THE PARALLEL WITNESS LIE. The
+    // 10-12 nightly fired "PARALLEL CHANGED A ROW" on AGPL, and the 10-11
+    // SERIAL nightly — no pool at all — reported AGPL DRIFTED between b1 and
+    // b3 with "nothing under the measured tree changed". Both runs cost ten
+    // AGPL plants an UNMEASURABLE each. Nothing parallel caused it. AGPL's
+    // message carries four things that move with the WORLD, not with this
+    // tree or with how the children were scheduled:
+    //   1. `(local <sha>)` is `git rev-parse HEAD` of the MONOREPO. Thirty
+    //      lanes commit to it, so it moves whenever ANY lane commits anywhere.
+    //   2. `THE WORKING TREE IS DIRTY (N path(s))` is `git status` of this
+    //      lane's whole directory, including paths no gate measures (docs,
+    //      fdm/). Any session touching any of them moves the count.
+    //   3. The DNS votes: per-resolver answer counts, and the UNROUTABLE list.
+    //   4. The HTTP status codes of the live probes (206 vs 200 on a ranged GET).
+    // Two clean runs minutes apart differ on these and nothing else, so a
+    // text compare reads world-noise as "parallel changed a row" (b1 vs b2)
+    // and as drift (b1 vs b3), which is the opposite of what the witness is for.
+    // ⚠ WHAT IS NOT MASKED, ON PURPOSE: the row's STATE (a probe that times
+    // out under load flips the state, and THAT is exactly what the witness
+    // must still catch), the mirror commit, the deployed commit, the file
+    // count and every correspondence verdict. Those are the measurement; the
+    // masked fragments are the weather it was taken in.
+    // ⚠ A mask that stops matching (the message is reworded) fails LOUD: the
+    // fragment is compared raw again and the witness goes red, never quiet.
+    // ⚠ A plant whose ONLY effect falls inside a masked fragment now reads as
+    // PLANTED NOTHING. That is a correct red, not a regression: such a plant
+    // never moved a verdict either.
+    const VOLATILE_FRAGMENTS = {
+      AGPL: [
+        [/\(local (?:[0-9a-f]{7,40}|HEAD-UNKNOWN)\)/g, '(local <monorepo HEAD>)'],
+        [/ ⚠ THE WORKING TREE IS DIRTY \(\d+ path\(s\)\)[^.]*/g, ''],
+        [/\(\d+ answers\)/g, '(N answers)'],
+        [/\b\d+ routable answer\(s\)/g, 'N routable answer(s)'],
+        [/ \[\d+ UNROUTABLE answer\(s\) discarded: [^\]]*\]/gi, ''],
+        // Each resolver's whole vote line, AFTER the UNROUTABLE lists are gone
+        // so no bracket is left inside it. Added after the first full parallel
+        // pass (2026-10-14, load average ~40) still disagreed on AGPL with the
+        // counts masked: a `dig` that times out under load turns `control ok`
+        // into `no response — NO VOTE` while two other resolvers still vote.
+        // What the votes DECIDE (published / not-served / unchecked) stays in
+        // the row's state and headline, which are not masked.
+        [/\b\d{1,3}(?:\.\d{1,3}){3}: control [^;\]]*/g, '<resolver vote>'],
+        [/\bHTTP \d{3}\b/g, 'HTTP NNN'],
+        [/\b(ANSWERED|answered) \d{3}\b/g, '$1 NNN'],
+      ],
+    };
+    const maskVolatile = (id, msg) =>
+      (VOLATILE_FRAGMENTS[id] ?? []).reduce((m, [re, to]) => m.replace(re, to), msg);
+    const runChild = (args) =>
+      new Promise((resolve) => {
+        const scratch = mkdtempSync(join(splntBase, 'c-'));
+        const out = [];
+        const err = [];
+        let size = 0;
+        let settled = false;
+        const done = (status, extraErr = '') => {
+          if (settled) return;
+          settled = true;
+          resolve({ status, stdout: out.join(''), stderr: err.join('') + extraErr });
+        };
+        const p = spawn(process.execPath, [self, '--quick', ...args], {
+          cwd: ROOT,
+          env: {
+            ...process.env,
+            SLICER_GATE_SPLNT_CHILD: '1',
+            SLICER_GATE_SCRATCH: scratch,
+            ...(CAD_TREE_THIS_PASS ? { SLICER_GATE_CAD_TREE: CAD_TREE_THIS_PASS } : {}),
+            ...(GH_CACHE ? { SLICER_GATE_GH_CACHE: GH_CACHE } : {}),
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        const take = (buf, d) => {
+          size += d.length;
+          if (size > MAX_OUT) {
+            p.kill('SIGKILL');
+            done(null, `\nchild output exceeded ${MAX_OUT} bytes and was killed`);
+            return;
+          }
+          buf.push(d);
+        };
+        p.stdout.setEncoding('utf8');
+        p.stderr.setEncoding('utf8');
+        p.stdout.on('data', (d) => take(out, d));
+        p.stderr.on('data', (d) => take(err, d));
+        p.on('error', (e) => done(null, `\nspawn failed: ${e.message}`));
+        p.on('close', (code) => done(code));
       });
-      if (r.status === 2) return { dead: `the runner REFUSED the invocation (exit 2): ${(r.stderr ?? '').trim().split('\n')[0]}` };
+    const child = async (args) => {
+      const r = await runChild(args);
+      // Exit 2 is ALSO INCOMPLETE since 2026-09-26 — and a `--quick` child is
+      // INCOMPLETE on every clean run — so the code alone no longer means
+      // "refused". A refusal is exit 2 with an EMPTY stdout (the banner never
+      // printed); an INCOMPLETE printed a scorecard and its row line.
+      if (r.status === 2 && !(r.stdout ?? '').trim()) {
+        return { dead: `the runner REFUSED the invocation (exit 2, empty stdout): ${(r.stderr ?? '').trim().split('\n')[0]}` };
+      }
       const line = (r.stdout ?? '').split('\n').find((l) => l.startsWith(SPLNT_ROWS_TAG));
       if (!line) {
         return {
@@ -11541,6 +12452,9 @@ const DISCLOSURES_PINNED = 11;
       }
       return {
         row: new Map(parsed.rows.map(([id, state, msg]) => [id, `${state} ${msg}`])),
+        // `cmp` is what every comparison in this limb reads (b1 vs b2, b1 vs
+        // each plant, b1 vs b3). It is `row` with VOLATILE_FRAGMENTS masked.
+        cmp: new Map(parsed.rows.map(([id, state, msg]) => [id, `${state} ${maskVolatile(id, msg)}`])),
         state: new Map(parsed.rows.map(([id, state]) => [id, state])),
         verdict: parsed.verdict,
       };
@@ -11622,20 +12536,130 @@ const DISCLOSURES_PINNED = 11;
       return out;
     };
 
-    const b1 = child([]);
-    const b2 = child([]);
+    // ── THE RUN ORDER, AND WHY b2 IS INSIDE THE POOL ──────────────────────
+    // b1 runs ALONE, so it is the serial reference. b2 is the same clean run
+    // but it runs INSIDE the pool, next to the plants. So b1 vs b2 is the
+    // standing proof that running in parallel does not change a row: if
+    // contention, a shared file or a timeout changed anything, the two clean
+    // runs disagree and that is a PROBLEM below, not a note. Before 2026-10-11
+    // b1 and b2 ran back to back and a disagreement meant only "noisy row";
+    // the 10-11 serial nightly had none, so a disagreement now is new
+    // evidence. Then the EXCLUSIVE plants run alone, then b3 closes.
+    const runs = new Map();
+    const bracketed = async (n) => {
+      const fpPre = fingerprint();
+      const r = await child(['--self-plant', n]);
+      return { r, childMutations: fpDiff(fpPre, fingerprint()) };
+    };
+    let b1;
+    let b2;
+    let b3;
+    // Paths under the measured tree that moved between b1's start and b2's
+    // end. Non-empty ⇒ b1 and b2 measured different trees, so their
+    // disagreement says nothing about the pool and is reported as that.
+    let witnessMutations = [];
+    // 🔴 FULL-PASS-ONLY CONTROLS ARE NOT DRIVEN HERE (2026-10-15). Their only target
+    // limb is `!QUICK`, and every SPLNT child is `--quick`, so driving them could only
+    // ever report "PLANTED NOTHING" — a permanent red that reads like a dead control
+    // and buries the real ones (full passes #3, #6, #8). They are NAMED in the result
+    // instead, and proved by a full pass run with the plant (see FULL_ONLY_PLANTS).
+    const driven = names.filter((n) => !FULL_ONLY_PLANTS.has(n));
+    const pooled = driven.filter((n) => !EXCLUSIVE.has(n));
+    const alone = driven.filter((n) => EXCLUSIVE.has(n));
+    if (!JOBS) {
+      problems.push(
+        `DEAD INSTRUMENT — SLICER_GATE_SPLNT_JOBS=${JSON.stringify(JOBS_RAW)} is not a positive integer, so no child ` +
+          'was driven. A cap that cannot be read is not replaced with a guess'
+      );
+      b1 = b2 = b3 = { dead: 'not driven: the parallel cap was unreadable' };
+    } else {
+      console.log(
+        `  SPLNT driving ${driven.length} plant(s) + 3 clean baselines, parallel cap ${JOBS} ` +
+          `(${pooled.length} pooled, ${alone.length} alone: ${alone.join(', ') || 'none'})`
+      );
+      try {
+        // `hardware/cad` is OUTSIDE the fingerprint (it is another lane's tree,
+        // read through the cad-head snapshot), and `cad` commits many times an
+        // hour, so its tree hash is checked across the witness window too.
+        const cadTree = () => {
+          try {
+            return execSync('git rev-parse HEAD:hardware/cad', { cwd: join(ROOT, '../..'), encoding: 'utf8' }).trim();
+          } catch {
+            return 'UNREADABLE';
+          }
+        };
+        const fpWitness = fingerprint();
+        const cadWitness = cadTree();
+        b1 = await child([]);
+        const tasks = [async () => {
+          b2 = await child([]);
+          witnessMutations = fpDiff(fpWitness, fingerprint());
+          const cadNow = cadTree();
+          if (cadNow !== cadWitness) witnessMutations.push(`hardware/cad tree ${cadWitness.slice(0, 12)} -> ${cadNow.slice(0, 12)} (cad committed)`);
+        }, ...pooled.map((n) => async () => { runs.set(n, await bracketed(n)); })];
+        let next = 0;
+        const worker = async () => {
+          while (next < tasks.length) await tasks[next++]();
+        };
+        await Promise.all(Array.from({ length: Math.min(JOBS, tasks.length) }, worker));
+        for (const n of alone) runs.set(n, await bracketed(n));
+        b3 = await child([]);
+      } finally {
+        rmSync(splntBase, { recursive: true, force: true });
+        if (GH_CACHE) rmSync(GH_CACHE, { recursive: true, force: true });
+      }
+    }
     if (b1.dead || b2.dead) {
       problems.push(`DEAD INSTRUMENT — the clean baseline could not be measured: ${b1.dead ?? b2.dead}`);
     } else {
       const noisy = new Set();
-      for (const [id, v] of b1.row) if (b2.row.get(id) !== v) noisy.add(id);
-      if (noisy.size) notes.push(`NOISY ROW(S): two clean runs of one tree disagreed on ${[...noisy].join(', ')}`);
+      // Compared on `cmp` (VOLATILE_FRAGMENTS masked), never on raw `row`: the
+      // masked text moves between ANY two runs and would make this witness
+      // report the weather. A key there that names no gate is a mask that
+      // outlived its row, and it is said rather than silently applied to nothing.
+      for (const id of Object.keys(VOLATILE_FRAGMENTS)) {
+        if (!GATES.some(([g]) => g === id)) problems.push(`VOLATILE_FRAGMENTS masks \`${id}\`, which is not a gate — a stale mask`);
+      }
+      for (const [id, v] of b1.cmp) if (b2.cmp.get(id) !== v) noisy.add(id);
+      // WHERE they disagree, for each row, so the red names its cause instead
+      // of sending the next reader to diff two runs nobody kept.
+      const firstDiff = (id) => {
+        const a = b1.cmp.get(id) ?? '';
+        const b = b2.cmp.get(id) ?? '';
+        let i = 0;
+        while (i < a.length && a[i] === b[i]) i++;
+        const at = Math.max(0, i - 40);
+        return `${id}: b1 «…${a.slice(at, i + 80)}…» vs b2 «…${b.slice(at, i + 80)}…»`;
+      };
+      const maskedOnly = [...b1.row.keys()].filter((id) => !noisy.has(id) && b1.row.get(id) !== b2.row.get(id));
+      if (maskedOnly.length) {
+        notes.push(
+          `b1 and b2 differed ONLY inside masked volatile fragments on ${maskedOnly.join(', ')} (monorepo HEAD, dirty-path ` +
+            'count, DNS resolver votes, HTTP codes) — world noise, not the pool; the witness compares the rest'
+        );
+      }
+      if (noisy.size && witnessMutations.length) {
+        problems.push(
+          `PARALLEL==SERIAL UNWITNESSED this pass: b1 and b2 disagreed on ${[...noisy].join(', ')}, but ` +
+            `${witnessMutations.length} path(s) under the measured tree changed between b1's start and b2's end ` +
+            `(${witnessMutations.slice(0, 4).join(', ')}${witnessMutations.length > 4 ? ' …' : ''}), so the two clean runs ` +
+            'measured different trees and their disagreement cannot be laid on the pool. UNMEASURABLE, which is not ' +
+            `passing. First difference per row — ${[...noisy].map(firstDiff).join(' ; ')}`
+        );
+      } else if (noisy.size) {
+        problems.push(
+          `PARALLEL CHANGED A ROW, OR THE ROW IS NOISY: the clean run alone (b1) and the clean run inside the pool ` +
+            `(b2, cap ${JOBS}) disagreed on ${[...noisy].join(', ')} (compared with volatile fragments masked). Parallel driving is only allowed where it gives ` +
+            'the same answer, and here that is not shown. Re-run with SLICER_GATE_SPLNT_JOBS=1: if the rows then ' +
+            `agree, the pool changed them. First difference per row — ${[...noisy].map(firstDiff).join(' ; ')}`
+        );
+      }
       // Every undeclared move is HELD, never reported inside the loop, until the
       // closing baseline has said which rows were measurable at all. Reporting
       // as we went is what attributed one concurrent write to 25 innocent plants.
       const heldUndeclared = [];
 
-      for (const n of names) {
+      for (const n of driven) {
         const contract = SELF_PLANT_TARGETS[n] ?? { moves: [] };
         // 🔴 THE TREE IS CHECKED BEFORE EVERY CHILD, NOT ONLY AT THE ENDS.
         //
@@ -11667,15 +12691,13 @@ const DISCLOSURES_PINNED = 11;
         //   stop reading a gate.
         //
         // Bracketing the child straddles the write instead of accumulating it.
-        const fpPre = fingerprint();
-        const r = child(['--self-plant', n]);
-        const childMutations = fpDiff(fpPre, fingerprint());
+        const { r, childMutations } = runs.get(n);
         if (r.dead) {
           problems.push(`\`${n}\`: DEAD INSTRUMENT — ${r.dead}`);
           continue;
         }
         if (r.verdict === 'GO') problems.push(`\`${n}\`: the self-planted run printed VERDICT: GO, which the foot of this file forbids`);
-        const moved = new Set([...r.row.keys()].filter((id) => b1.row.get(id) !== r.row.get(id) && !noisy.has(id)));
+        const moved = new Set([...r.row.keys()].filter((id) => b1.cmp.get(id) !== r.cmp.get(id) && !noisy.has(id)));
 
         for (const id of contract.moves ?? []) {
           // A child that straddled a write cannot tell its own effect from the
@@ -11690,7 +12712,7 @@ const DISCLOSURES_PINNED = 11;
             );
           } else if (!moved.has(id)) {
             problems.push(
-              `\`${n}\`: PLANTED NOTHING on its declared target \`${id}\` — that row is byte-identical to the clean ` +
+              `\`${n}\`: PLANTED NOTHING on its declared target \`${id}\` — that row is ${VOLATILE_FRAGMENTS[id] ? 'identical, once its volatile fragments are masked,' : 'byte-identical'} to the clean ` +
                 `baseline, where it was ${b1.state.get(id) ?? '—'}. The control applies, reports success and reddens ` +
                 'nothing, which is indistinguishable from a gate that is fine'
             );
@@ -11701,6 +12723,23 @@ const DISCLOSURES_PINNED = 11;
               problems.push(
                 `\`${n}\`: its target \`${id}\` got BETTER under the plant (${b1.state.get(id)} -> ${r.state.get(id)}) — ` +
                   'a self-plant may only remove greens'
+              );
+            } else if (after === before && b1.state.get(id) !== 'FAIL') {
+              /* 🔴 MOVED THE MESSAGE, NOT THE VERDICT (ceo gate audit, check 4,
+                 2026-09-26). `moved` is a TEXT diff, so a plant that changed a
+                 count inside a PENDING row satisfied this limb while the row
+                 stayed PENDING. Measured: `cad1-oracle-plant` took CAD1H's cut
+                 subset from 4 to 14 diverging files and CAD1H read PENDING in
+                 both — SPLNT called that a control that moved its target.
+                 A negative control asserts the VERDICT; a text change on a row
+                 whose state did not worsen proves the plant reached the gate
+                 and nothing about whether the gate can say no.
+                 ⚠ Exempt ONLY where the clean baseline is already FAIL: there a
+                 row can get no worse, and a text change is all a plant can do. */
+              problems.push(
+                `\`${n}\`: MOVED THE MESSAGE, NOT THE VERDICT on \`${id}\` — the row's text changed and its state ` +
+                  `stayed ${b1.state.get(id)}. A control that reaches a gate without reddening it proves sensitivity, ` +
+                  'not that the gate can refuse'
               );
             }
           }
@@ -11744,10 +12783,28 @@ const DISCLOSURES_PINNED = 11;
           }
         }
 
-        const undeclared = [...moved].filter(
+        const outsideContract = [...moved].filter(
           (id) => !(contract.moves ?? []).includes(id) && !Object.prototype.hasOwnProperty.call(contract.masked ?? {}, id)
         );
-        heldUndeclared.push([n, undeclared, childMutations]);
+        /* 🔴 AN UNDECLARED MOVE IS A STATE CHANGE, NOT A TEXT CHANGE (2026-10-12).
+           `moved` is a TEXT diff. Rows whose message lists other gates — DISC's
+           pend branch prints every caveated gate that did not pass — change
+           text whenever ANY plant reddens ANY of those gates, with their own
+           state unchanged. The nightly of 2026-10-11 reported 26 of its 39
+           SPLNT problems as "also moved DISC" for exactly that, and 10-12
+           printed the proof: `DISC PENDING->PENDING`. The problem sentence
+           says such a plant "proves that gate can go red for a reason nobody
+           planted"; a row that did not change state went red for no reason at
+           all. Same rule as the declared-target branch above ("MOVED THE
+           MESSAGE, NOT THE VERDICT"), applied to the undeclared side. Text-only
+           moves are still REPORTED, as a note, so the sensitivity stays visible.
+           Each state-changing move carries its states (`PASS->FAIL`), so a
+           reader can see the verdict change without re-running the limb. */
+        const undeclared = outsideContract
+          .filter((id) => b1.state.get(id) !== r.state.get(id))
+          .map((id) => ({ id, how: `${b1.state.get(id) ?? '—'}->${r.state.get(id) ?? '—'}` }));
+        const textOnly = outsideContract.filter((id) => b1.state.get(id) === r.state.get(id));
+        heldUndeclared.push([n, undeclared, childMutations, textOnly]);
       }
 
       // ── THE CLOSING BASELINE ────────────────────────────────────────────
@@ -11755,7 +12812,6 @@ const DISCLOSURES_PINNED = 11;
       // OPENING baseline drifted for a reason no plant supplied, and every
       // "undeclared move" on it is unattributable — including the ones that are
       // real, which is why this is UNMEASURABLE and not an all-clear.
-      const b3 = child([]);
       const drifted = new Set();
       if (b3.dead) {
         problems.push(
@@ -11763,7 +12819,7 @@ const DISCLOSURES_PINNED = 11;
             'way to tell a plant\'s blast radius from a concurrent write, and that difference is the whole limb'
         );
       } else {
-        for (const [id, v] of b1.row) if (b3.row.get(id) !== v) drifted.add(id);
+        for (const [id, v] of b1.cmp) if (b3.cmp.get(id) !== v) drifted.add(id);
       }
 
       const changedPaths = fpDiff(fpBefore, fingerprint());
@@ -11787,11 +12843,20 @@ const DISCLOSURES_PINNED = 11;
       if (mutatedChildren.length) {
         const worst = mutatedChildren.reduce((a, b) => (b[2].length > a[2].length ? b : a));
         notes.push(
-          `${mutatedChildren.length} of ${names.length} plant(s) STRADDLED a write to the measured tree, ` +
+          `${mutatedChildren.length} of ${driven.length} plant(s) STRADDLED a write to the measured tree, ` +
             `so their undeclared moves — and the "this masked exemption is stale" half of their ` +
             `\`masked\` check — are UNATTRIBUTABLE and were DISCARDED (which is ` +
             `not an all-clear on them). Worst: \`${worst[0]}\` saw ${worst[2].length} changed path(s) — ` +
             `${worst[2].slice(0, 4).join(', ')}${worst[2].length > 4 ? ' …' : ''}`
+        );
+      }
+      const textOnlyMoves = heldUndeclared.filter(([, , muts, t]) => !muts.length && t.length);
+      if (textOnlyMoves.length) {
+        notes.push(
+          `${textOnlyMoves.length} plant(s) changed only the TEXT of a row outside their contract, with its state ` +
+            `unchanged — sensitivity, not a red: ` +
+            textOnlyMoves.slice(0, 6).map(([n, , , t]) => `${n} -> ${t.join('/')}`).join(', ') +
+            (textOnlyMoves.length > 6 ? ` …+${textOnlyMoves.length - 6}` : '')
         );
       }
       for (const [n, undeclared, muts] of heldUndeclared) {
@@ -11799,9 +12864,9 @@ const DISCLOSURES_PINNED = 11;
         // radius from the writer's. Discard rather than accuse: the accusation
         // is what sends someone to declare a blast radius that does not exist.
         if (muts.length) continue;
-        const attributable = undeclared.filter((id) => !drifted.has(id));
-        const derived = attributable.filter((id) => SELF_PLANT_DERIVATIVE.has(id));
-        const real = attributable.filter((id) => !SELF_PLANT_DERIVATIVE.has(id));
+        const attributable = undeclared.filter((u) => !drifted.has(u.id));
+        const derived = attributable.filter((u) => SELF_PLANT_DERIVATIVE.has(u.id)).map((u) => u.id);
+        const real = attributable.filter((u) => !SELF_PLANT_DERIVATIVE.has(u.id)).map((u) => `${u.id} ${u.how}`);
         if (derived.length) notes.push(`${n} also moved derivative gate(s) ${derived.join(', ')}`);
         if (real.length) {
           problems.push(
@@ -11816,7 +12881,7 @@ const DISCLOSURES_PINNED = 11;
       // the move the loop above counted as a hit may be the drift. Said out
       // loud: a hit that cannot be attributed is not a hit.
       const mutatedNames = new Set(mutatedChildren.map(([n]) => n));
-      for (const n of names) {
+      for (const n of driven) {
         const targets = SELF_PLANT_TARGETS[n]?.moves ?? [];
         if (targets.length && mutatedNames.has(n)) {
           problems.push(
@@ -11833,7 +12898,12 @@ const DISCLOSURES_PINNED = 11;
         }
       }
     }
-    driveMsg = `${names.length} plant(s) + 3 clean baselines (two opening, one closing) driven as \`--quick\` children in ${((Date.now() - t0) / 60000).toFixed(1)} min`;
+    driveMsg =
+      `${driven.length} plant(s) + 3 clean baselines driven as \`--quick\` children in ` +
+      `${((Date.now() - t0) / 60000).toFixed(1)} min, PARALLEL CAP ${JOBS}: each child has its own scratch dir; ` +
+      `b1 ran alone and b2 ran inside the pool and they agreed, which is this pass's evidence that parallel ` +
+      `driving did not change a row; ${alone.length} plant(s) that write the measured tree ran alone ` +
+      `(${alone.join(', ') || 'none'}); b3 closed the window; NOT DRIVEN (full-pass-only, proved by a full pass with the plant): ${[...FULL_ONLY_PLANTS].map(([n, w]) => `${n} — ${w}`).join('; ')}`;
   }
 
   if (problems.length) {
@@ -11924,7 +12994,9 @@ for (const g of gaps) console.log(`  COULD NOT RUN HERE  ${g.id} — ${g.gap}`);
 // its own exit code so a shell can tell the two non-passes apart:
 //
 //   GO          exit 0   every gate ran and answered
-//   INCOMPLETE  exit 3   nothing failed; a budgeted gate could not run HERE
+//   INCOMPLETE  exit 2   nothing failed; a budgeted gate could not run HERE
+//                        (was 3 until 2026-09-26 — see the header; 2 is the fleet's
+//                        "could not run", and an empty stdout marks a refusal)
 //   NO-GO       exit 1   a gate ran and did not pass, OR a gate was disarmed
 //
 // ⚠ FOR ANYONE WRITING A NEGATIVE CONTROL: assert `VERDICT: NO-GO`, exactly and
@@ -11947,6 +13019,7 @@ if (SPLNT_CHILD) {
 }
 
 if (SELF_PLANT && verdict === 'GO') {
+  writeJsonReport('NO-GO', results, `SELF-PLANT '${SELF_PLANT}' CHANGED NOTHING`);
   // A self-plant that leaves the run clean planted NOTHING, and a control that
   // cannot fail is the thing this flag exists to detect in other people's work.
   console.log(
@@ -11957,6 +13030,26 @@ if (SELF_PLANT && verdict === 'GO') {
 }
 
 console.log(verdictLine(verdict, failed, gaps));
+// An unmapped verdict word is written as NO-GO (JSON_VERDICT_OF's fallback),
+// matching the exit 1 the branch below forces.
+writeJsonReport(verdict, results);
+{
+  // The ten longest stretches between results — where a timeout's time went.
+  let prev = RUN_T0;
+  const gaps = results
+    .filter((r) => typeof r.at === 'number')
+    .map((r) => {
+      const g = { id: r.id, s: (r.at - prev) / 1000 };
+      prev = r.at;
+      return g;
+    })
+    .sort((a, b) => b.s - a.s)
+    .slice(0, 10);
+  console.log(
+    `\n⏱ total ${((Date.now() - RUN_T0) / 1000).toFixed(0)} s · longest gaps between results (not exact per-gate timings): ` +
+      gaps.map((g) => `${g.id} ${g.s.toFixed(0)}s`).join(' · ')
+  );
+}
 // 🔴 FAIL CLOSED. `EXIT_OF[verdict]` is `undefined` for any word not in the map,
 // and `process.exit(undefined)` exits **0** — measured 2026-09-04. That turns an
 // unrecognised verdict into a PASS for everything downstream, and the exit code

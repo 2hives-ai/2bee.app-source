@@ -68,6 +68,12 @@ const DEV_PORT = Number(process.env.E2E_DEV_PORT ?? 5179);
 
 export default defineConfig({
   testDir: './e2e',
+  /* 🔴 EVERY RUN RECORDS WHAT THE BOX LOOKED LIKE — TODO #168. Four days of
+   * relaunches produced no memory reading from the failing side, because the
+   * standing action to capture one by hand depended on somebody being present at
+   * the moment of failure. See `e2e/memory-witness.ts`. It cannot fail a run. */
+  globalSetup: './e2e/memory-witness.ts',
+  globalTeardown: './e2e/memory-witness-teardown.ts',
   timeout: 60_000,
   fullyParallel: false,
   // ─────────────────────────────────────────────────────────────────────────
@@ -108,6 +114,17 @@ export default defineConfig({
   outputDir: process.env.E2E_OUTPUT_DIR ?? 'test-results',
   use: {
     baseURL: `http://127.0.0.1:${PREVIEW_PORT}`,
+    /* 2bee.cnc opens on its chat view since 2026-10-15. Most specs drive the
+     * panels of the CODE view, so every page starts there; a chat-view spec sets
+     * `2bee.app.cnc.view` = 'chat' itself. Origin-scoped: both the preview and
+     * the dev server origins are listed. */
+    storageState: {
+      cookies: [],
+      origins: [
+        { origin: `http://127.0.0.1:${PREVIEW_PORT}`, localStorage: [{ name: '2bee.app.cnc.view', value: 'code' }, { name: '2bee.app.run.view', value: 'code' }, { name: '2bee.app.loaded', value: '{"cad":true,"cnc":true,"run":true,"pnp":true,"print3d":true,"pcb":true}' }] },
+        { origin: `http://127.0.0.1:${DEV_PORT}`, localStorage: [{ name: '2bee.app.cnc.view', value: 'code' }, { name: '2bee.app.run.view', value: 'code' }, { name: '2bee.app.loaded', value: '{"cad":true,"cnc":true,"run":true,"pnp":true,"print3d":true,"pcb":true}' }] },
+      ],
+    },
     trace: 'retain-on-failure',
     // 🔴 HEADLESS, STATED EXPLICITLY. It was never set, and the founder watched
     // Chromium windows open on his desktop while agents ran this suite — a test
@@ -192,7 +209,12 @@ export default defineConfig({
         ` && npx vite build && npx vite preview --port ${PREVIEW_PORT} --strictPort`,
       url: `http://127.0.0.1:${PREVIEW_PORT}`,
       reuseExistingServer: false,
-      timeout: 180_000,
+      /* 🔴 1200 s, NOT 180 (2026-11-15). Since 74f2160259 / 105da52349 (2026-11-12/13) the catalogue builds every
+       * design as a machine RENDER down a resolution ladder: measured 9 m 53 s on jamesave (`npm run shop`, niced),
+       * about as long on the Mac Pro. At 180 s this server could never come up, so the whole browser suite (gate
+       * I1) "errored" on every run with "Timed out waiting 180000ms from config.webServer" and no test ran. A
+       * faster catalogue (a cache keyed on the design and its includes) is the real fix; this makes the suite run. */
+      timeout: 1_200_000,
       // 🔴 Auth is BLANKED for e2e (both servers). `web/.env` carries the real
       // Cognito triple since 08-21, and Vite bakes it into the bundle — so the
       // suite found itself behind a closed AuthGate with no Cognito to log in

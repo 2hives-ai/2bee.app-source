@@ -69,6 +69,18 @@ const CONVENTIONS: { name: string; needle: RegExp }[] = [
     name: 'wheel zoom — scrolling toward you zooms out',
     needle: /radius\s*\*\s*\(\s*e\.deltaY\s*>\s*0\s*\?\s*([\d.]+)\s*:\s*([\d.]+)\s*\)/,
   },
+  {
+    /* 🔴 ADDED 2026-09-13 WITH ZOOM-TO-CURSOR, AND THE REASON IT IS HERE RATHER
+     * THAN TRUSTED TO THE SHARED MODULE. The arithmetic itself cannot drift —
+     * `zoomTowardCursor` has ONE definition in `projection.ts` and both files
+     * import it. What CAN drift is the call: a different offset convention, a
+     * forgotten `viewH`, or the shift applied to one axis in one file. That
+     * would be two viewports zooming differently with the maths provably
+     * identical, which is the failure this whole suite exists for, arriving
+     * through the arguments instead of through a sign. */
+    name: 'zoom-to-cursor — both viewports shift the orbit centre the same way',
+    needle: /const z = zoomTowardCursor\(\{[\s\S]*?\}\);\s*target\.x \+= z\.x;\s*target\.y \+= z\.y;/,
+  },
 ];
 
 for (const c of CONVENTIONS) {
@@ -93,7 +105,9 @@ for (const c of CONVENTIONS) {
  * arriving through a different door.
  */
 test('both viewports enter pan on the same buttons', () => {
-  const needle = /panning\s*=\s*e\.button\s*===\s*2\s*\|\|\s*e\.shiftKey\s*;/;
+  /* Founder 2026-10-16: left-drag moves, right-drag rotates — ONE rule for every view, in
+   * view3d/mouse.ts dragMode(); both viewports must call it (was: right/shift = pan, after OpenSCAD). */
+  const needle = /panning\s*=\s*dragMode\(e\)\s*===\s*'pan'\s*;/;
   assert.ok(needle.test(cnc), 'Viewport.tsx pan trigger not found — blind, not green');
   assert.ok(needle.test(cad), 'cad/preview.tsx pan trigger not found — blind, not green');
 });
@@ -313,13 +327,60 @@ test('nothing that shares the canvas is bottom-anchored, so the gizmo corner can
 
   /* Every overlay lives in this column, and the column is pinned to the top. */
   assert.match(column, /position: 'absolute',\s*\n\s*top: 8,/, 'the overlay column is no longer top-anchored');
-  assert.ok(
-    !/\bbottom:/.test(column),
-    'an overlay is anchored to the bottom of the canvas again, which is where the corner gizmo draws',
-  );
-  for (const id of ['cad-preview-stale', 'cad-preview-alarm', 'cad-preview-fit']) {
+  for (const id of ['cad-preview-stale', 'cad-preview-alarm']) {
     assert.ok(column.includes(id), `${id} is no longer inside the top-anchored column`);
   }
+});
+
+/**
+ * 🔴 THIS TEST USED TO FORBID `bottom:` ANYWHERE BELOW THE COLUMN, AND THE BAN
+ * IS LIFTED — by a founder ruling, not by a convenience.
+ *
+ * The ban's reason was that the corner gizmo drew into the BOTTOM-LEFT of the
+ * canvas, so any bottom-anchored overlay could cover it. That gizmo is gone: it
+ * was removed when the arrows were wanted near the object, and the founder asked
+ * for a corner widget again on 2026-09-09 — *"I like the top right corner xyz,
+ * and menu structure on the bottom"*. Both halves of that sentence contradict
+ * the old ban: the widget is now TOP-RIGHT and DOM, and there is meant to be
+ * something along the bottom.
+ *
+ * ⚠ SO THE ASSERTION IS RETARGETED, NOT DELETED. The property that matters is
+ * unchanged in shape — **the two must not be able to cover each other** — and it
+ * is now expressed as opposite anchors rather than as a forbidden word. `Fit`
+ * moved with the bar and is asserted here instead of in the column above.
+ *
+ * ⚠ AND IT COST A TEST RUN TO LEARN. The bar was first placed INSIDE the
+ * top-anchored column, so it rendered under the gizmo and the gizmo intercepted
+ * every click on `Fit` — Playwright's log named the interceptor by testid. A
+ * "bottom bar" that is not bottom-anchored is not a layout preference; it is a
+ * dead control.
+ */
+test('the bottom bar and the corner gizmo are at opposite ends, so neither can cover the other', () => {
+  const at = cad.indexOf('THE OVERLAY COLUMN');
+  const jsx = cad.indexOf('*/}', at);
+  const below = cad.slice(jsx + 3).replace(/\{?\/\*[\s\S]*?\*\/\}?/g, '');
+
+  // The strip is bottom-anchored, and `Fit` and the named views are in it.
+  assert.match(below, /position: 'absolute',\s*\n\s*left: 8,\s*\n\s*right: 8,\s*\n\s*bottom: 8,/, 'the bottom strip is no longer bottom-anchored — a bar that is not at the bottom sits under the gizmo');
+  const strip = below.indexOf('bottom: 8,');
+  for (const id of ['cad-preview-bar', 'cad-preview-fit']) {
+    assert.ok(below.indexOf(id) > strip, `${id} is not inside the bottom strip`);
+  }
+
+  // The gizmo is top-anchored, in the file's own source rather than in a comment.
+  const live = cad.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const g = live.indexOf("data-testid=\"cad-gizmo\"");
+  assert.ok(g > 0, 'the corner gizmo is gone — this test has gone blind, not green');
+  const gStyle = live.slice(g, g + 900);
+  assert.match(gStyle, /top: 8,/, 'the corner gizmo is no longer top-anchored');
+  assert.match(gStyle, /right: 8,/, 'the corner gizmo is no longer right-anchored');
+  assert.ok(!/\bbottom:/.test(gStyle), 'the corner gizmo has acquired a bottom anchor — it can now reach the bar');
+
+  /* 🔴 AND IT MUST OUT-STACK THE CANVAS. The gizmo is mounted BEFORE the canvas
+   * host, so without this it renders on top and is clicked through — six
+   * coloured, perfectly-painted dead controls. Found by a real click, not by
+   * any unit test, because nothing about the markup was wrong. */
+  assert.match(gStyle, /zIndex: 2,/, 'the corner gizmo no longer out-stacks the canvas — its ends are unclickable');
 });
 
 /* ════════════════════════════════════════════════════════════════════════════

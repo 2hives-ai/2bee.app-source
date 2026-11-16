@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["core", "cli", "wasm"]
+members = ["core", "cli", "wasm", "fdm"]
+# fdm is built on purpose with `-p twobee-fdm`; a half-written fdm lane must not turn the CNC gate (cargo build at root) red.
+default-members = ["core", "cli", "wasm"]
 
 [workspace.package]
 version = "0.1.0"
@@ -48,4 +50,11 @@ license = "AGPL-3.0-or-later"
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# 🔴 UNWIND, NOT ABORT (bughunt 2026-11-15). With "abort" every `catch_unwind`
+# guard in twobee-fdm — pipeline::guard, the wall generator, infill, fdmslice's
+# own main — was DEAD in the shipped binary: a panic killed the process (exit
+# 134, SIGABRT, no REFUSED line) instead of becoming a refusal, while
+# `cargo test --release` (tests always unwind) showed the guards working. A
+# guard proven only in a build that does not ship is not a guard. wasm32 has no
+# unwinding and aborts either way; this changes the native binaries only.
+panic = "unwind"

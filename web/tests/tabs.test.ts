@@ -78,14 +78,17 @@ const { RunTab } = await import('../src/RunTab.tsx');
 // The two decisions, asserted separately
 // ---------------------------------------------------------------------------
 
-test('the ORDER is the founder’s: shop, cad, cnc, run', () => {
+// `pnp` appended 2026-10-11 (founder "11 yes", via `ceo`) — LAST, so the founder's
+// shop/cad/cnc/run order is unchanged in front of it.
+// `tools` appended 2026-10-14 (founder, direct), LAST for the same reason.
+test('the ORDER is the founder’s: shop, cad, cnc, run — then pnp, then tools', () => {
   assert.deepEqual(
     TABS.map((t) => t.id),
-    ['shop', 'cad', 'cnc', 'run']
+    ['shop', 'cad', 'cnc', 'run', 'pcb', 'pnp', 'tools', 'print3d', 'machines']
   );
   assert.deepEqual(
     TABS.map((t) => t.label),
-    ['Designs', '2bee.cad', '2bee.cnc', 'Run']
+    ['design', 'cad', 'cnc', 'cnc.run', 'pcb', 'pnp', 'cnc.tools', '3d', 'machines']
   );
 });
 
@@ -99,8 +102,14 @@ test('the ORDER is the founder’s: shop, cad, cnc, run', () => {
  * have called that a pass. So this names the tab as a LITERAL. Reordering the
  * bar must fail the test above; changing what opens must fail this one; and
  * neither can satisfy the other by accident. */
-test('the DEFAULT is the Designs tab — founder 2026-08-31, "the 1st page"', () => {
-  assert.equal(DEFAULT_TAB, 'shop');
+// 🔴 SUPERSEDED 2026-10-14: the founder's product scope (AGENTS.md § Scope)
+// opens on the three steps, "3 steps, keep expert tabs". The 2026-08-31 Designs
+// ruling now lives on as STEP 1 inside `make`.
+test('the DEFAULT is the three-step view — founder 2026-10-14, "3 steps, keep expert tabs"', () => {
+  assert.equal(DEFAULT_TAB, 'make');
+  // A view, not a tab: it must never join the bar the founder ordered.
+  assert.ok(!TABS.some((t) => (t.id as string) === 'make'));
+  assert.equal(parseTab('make'), 'make');
 });
 
 // ---------------------------------------------------------------------------

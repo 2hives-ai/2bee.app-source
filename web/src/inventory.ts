@@ -508,9 +508,8 @@ export function sourceLine(doc: InventoryDoc, kind: InventoryKind, now: number):
   const label = KIND_LABEL[kind];
   if (doc.imported_at === null && doc.entries.length === 0) {
     return (
-      `NO INVENTORY REGISTERED. Nothing has told this app which ${label}s your shop has, so ` +
-      `every row below is UNCHECKED — listed because it exists, not because you have it. ` +
-      `Import an inventory file, or mark what you own.`
+      `NO INVENTORY REGISTERED — every ${label} below is UNCHECKED: listed because it exists, ` +
+      `not because you have it. Import an inventory file or mark what you own.`
     );
   }
   if (held === 0) {

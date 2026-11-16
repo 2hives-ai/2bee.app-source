@@ -5,12 +5,15 @@
 // redirects there, receives an authorization code at the callback URL,
 // and exchanges it for tokens using PKCE (no client secret needed).
 //
-// Tokens are held in MEMORY ONLY — never localStorage, never sessionStorage.
-// A page refresh loses the session and sends the user back to Cognito. This
-// is deliberate: .app TLD is HSTS-preloaded (HTTPS mandatory), and a token
-// in storage is a token that survives a tab close the operator did not intend
-// to survive. The Cognito session cookie on the Hosted UI domain handles
-// "remember me" — that is Cognito's job, not ours.
+// Tokens live in sessionStorage — NEVER localStorage. CHANGED 2026-10-20 on the
+// founder's direct ask ("When I refresh ... I always have to log in, why? can you
+// fix it?"). Until then they were memory-only, so every refresh signed the user
+// out. sessionStorage survives a refresh and dies with the TAB, so the old
+// reason still holds: a token never outlives a tab close the operator did not
+// intend to survive. What changes is that a script running on this page can
+// read the token from storage. It could already act as the signed-in user in
+// memory, so the added exposure is the raw token string, until it expires.
+// A stored token is re-checked on load: expired or not-admin -> discarded.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // CROSS-DOMAIN NOTE
@@ -212,6 +215,39 @@ function decodeJwtPayload(jwt: string): Record<string, unknown> {
   }
 }
 
+const TOKEN_KEY = '2bee.app.auth.tokens';
+
+/** Keep the token set for this tab (survives a refresh, not a tab close). */
+export function saveTokens(t: TokenSet): void {
+  try {
+    sessionStorage.setItem(TOKEN_KEY, JSON.stringify(t));
+  } catch {
+    /* storage blocked: memory-only, as before */
+  }
+}
+
+/** The stored token set, or null. Anything malformed is removed, never trusted. */
+export function loadTokens(): TokenSet | null {
+  try {
+    const raw = sessionStorage.getItem(TOKEN_KEY);
+    if (!raw) return null;
+    const t = JSON.parse(raw) as TokenSet;
+    if (typeof t?.id_token === 'string' && typeof t.access_token === 'string' && Number.isFinite(t.expires_in) && Number.isFinite(t.received_at)) return t;
+    sessionStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* unreadable: treat as signed out */
+  }
+  return null;
+}
+
+export function clearTokens(): void {
+  try {
+    sessionStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* nothing to clear */
+  }
+}
+
 export function isTokenExpired(token: TokenSet): boolean {
   const expiresAt = token.received_at + token.expires_in * 1000;
   // 30-second buffer: do not use a token that is about to expire.
@@ -289,7 +325,7 @@ export function logout(): void {
     response_type: 'code',
   });
 
-  // Clear our in-memory tokens (handled by the caller via clearToken).
+  clearTokens();
   window.location.href = `https://${cfg.cognitoDomain}/oauth2/logout?${params}`;
 }
 
@@ -302,7 +338,25 @@ export function logout(): void {
 // /oauth2/token endpoint and returns them. Clears the URL hash/query
 // so the tokens are not visible in the address bar.
 
-export async function handleCallback(): Promise<TokenSet | null> {
+//
+// 🔴 ONE EXCHANGE PER CODE (2026-10-15). In dev, <StrictMode> runs AuthGate's mount
+// effect TWICE. The first run consumed the PKCE verifier (it is single-use and removed on
+// read) and started the exchange, and its cleanup then discarded that result. The second run
+// found no verifier, logged "No stored PKCE verifier" and showed the user as signed out, so
+// a dev login could never succeed (founder hit it on localhost:5178). Both runs now share the
+// one exchange for that code. Production has no double effect, but a second caller for the
+// same code is just as wrong there, so the guard is not dev-only.
+let callbackInFlight: { code: string; result: Promise<TokenSet | null> } | null = null;
+
+export function handleCallback(): Promise<TokenSet | null> {
+  const code = new URL(window.location.href).searchParams.get('code');
+  if (code && callbackInFlight?.code === code) return callbackInFlight.result;
+  const result = exchangeCallback();
+  if (code) callbackInFlight = { code, result };
+  return result;
+}
+
+async function exchangeCallback(): Promise<TokenSet | null> {
   const cfg = readConfig();
   if (!cfg) return null;
 

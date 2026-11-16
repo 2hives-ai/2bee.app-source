@@ -395,6 +395,25 @@ fn attribute(ops: &[Operation]) -> Vec<Rec> {
                 // An outer profile with no bounds never made it into `boxes`,
                 // so it cannot host anything — but it is still its own part.
                 Some(i)
+            } else if let Some(owner) = {
+                // 🔴 THE PART THE PLANNER RECORDED COMES FIRST. Bounding-box
+                // containment is a guess, and it guesses wrong for an L-shaped
+                // part whose box covers a neighbour's hole: the re-clamp planner
+                // then put part1's hole in phase 2 after part1 was cut free
+                // (`route-parts: drawing/part2<-drawing/part1-hole2`). The
+                // importer already KNOWS the owner (`Operation::part`); the box
+                // is used only when no single outer op carries that part.
+                let owners: Vec<usize> = ops
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, o)| {
+                        !op.part.is_empty() && o.part == op.part && o.params.side == CutSide::Outside
+                    })
+                    .map(|(j, _)| j)
+                    .collect();
+                (owners.len() == 1).then(|| owners[0])
+            } {
+                Some(owner)
             } else {
                 anchor.and_then(|a| {
                     let p = a.entry;
@@ -433,6 +452,19 @@ fn attribute(ops: &[Operation]) -> Vec<Rec> {
             Rec { idx: i, part, is_outer, depth_mm: op.params.depth_total_mm, anchor }
         })
         .collect()
+}
+
+/// `(part, is_outer)` per operation — the SAME attribution the ordering uses,
+/// exposed so a caller that splits the job (the re-clamp planner,
+/// `crate::reclamp`) keeps a part's interior work and its release on the right
+/// side of the split instead of re-deriving "which outline frees which hole" a
+/// second way. `part` is the index of the outer-profile operation; `None` =
+/// unattributable, which this module pins and the caller must not guess about.
+///
+/// ⚠ Inherits the `CutSide::Outside` release heuristic and its blind spot —
+/// see [`attribute`].
+pub(crate) fn release_attribution(ops: &[Operation]) -> Vec<(Option<usize>, bool)> {
+    attribute(ops).into_iter().map(|r| (r.part, r.is_outer)).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -766,6 +798,25 @@ pub fn optimise_route_with(
     // Anything still standing here is FATAL, not a note. See
     // [`RouteReport::refusals`].
     report.refusals.extend(verify_interior_before_outer(&out, &recs, &ops));
+
+    // ⚠ "Shallow before deep within a part" is enforced INSIDE a group only.
+    // Moving whole groups can put a deep feature of one tool before a shallow
+    // one of another on the same part, and that was silent while the method
+    // string claimed the constraint (bughunt 2026-11-15). Not refused — the
+    // tool-change count is the constraint that won — but SAID, with names.
+    for (k, &i) in out.iter().enumerate() {
+        let (Some(part), false) = (recs[i].part, recs[i].is_outer) else { continue };
+        if let Some(&j) = out[k + 1..].iter().find(|&&j| {
+            recs[j].part == Some(part) && !recs[j].is_outer && recs[j].depth_mm + 1e-9 < recs[i].depth_mm
+        }) {
+            report.notes.push(format!(
+                "shallow-before-deep NOT kept on part `{}`: {} ({:.2}mm) runs before {} ({:.2}mm) \
+                 because they use different tools and the tool groups are kept whole — the deeper \
+                 cut weakens the part before the shallow work on it",
+                ops[part].name, ops[i].name, recs[i].depth_mm, ops[j].name, recs[j].depth_mm
+            ));
+        }
+    }
 
     // The part map, emitted so a gate can cross-check the EMITTED program's
     // section order against it without re-deriving part attribution from a
@@ -1114,6 +1165,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_hole_belongs_to_the_part_the_planner_recorded_not_to_the_box_it_lands_in() {
+        // 🔴 Bounding boxes decided ownership, smallest box wins. An L-shaped
+        // neighbour's box covering part1's hole took it: the re-clamp planner
+        // then cut part1 free in phase 1 and its hole in phase 2, on a loose
+        // part. The importer records the owner; that comes first.
+        // Here the hole's anchor sits in part2's box and NOT in part1's — the
+        // case where the box guess and the record disagree.
+        let ops = vec![
+            outline("part1", 100.0, 100.0, 50.0, 50.0),
+            outline("part2", 0.0, 0.0, 60.0, 60.0),
+            hole("part1-hole2", 20.0, 20.0, 4.0),
+        ];
+        assert_eq!(ops[2].part, ops[0].part, "the helper did not record part1 as the owner");
+        let att = release_attribution(&ops);
+        assert_eq!(att[2].0, Some(0), "the hole was attributed to {:?}, not part1", att[2].0);
+    }
+
     fn names(ops: &[Operation]) -> Vec<String> {
         ops.iter().map(|o| o.name.clone()).collect()
     }
@@ -1311,6 +1380,26 @@ mod tests {
     /// Ordering the GROUPS puts the 3mm holes first and leaves everything else
     /// identical — which is what the tool-change assertion below is for: it was
     /// 1 before the change and it is 1 after, so the safety cost nothing.
+    #[test]
+    fn a_group_reorder_that_puts_deep_before_shallow_on_a_part_says_so() {
+        // bughunt 2026-11-15: shallow pocket (6mm), deep hole (3mm), outline (6mm).
+        // The 3mm group must precede the release, so the deep hole runs before the
+        // shallow pocket — and the method string claimed shallow-before-deep.
+        let plate = outline("plate", 0.0, 0.0, 200.0, 100.0);
+        let mut shallow = hole("plate-hole1", 50.0, 50.0, 10.0);
+        shallow.params.depth_total_mm = 3.0;
+        let mut deep = hole("plate-hole2", 150.0, 50.0, 5.0);
+        deep.tool = tool3();
+        deep.params.depth_total_mm = 18.0;
+        let (out, report) = optimise_route(vec![shallow, deep, plate]);
+        assert!(index_of(&out, "plate-hole2") < index_of(&out, "plate-hole1"), "precondition: {:?}", names(&out));
+        assert!(
+            report.notes.iter().any(|n| n.contains("shallow-before-deep NOT kept") && n.contains("plate-hole2")),
+            "deep before shallow, silently: {:?}",
+            report.notes
+        );
+    }
+
     #[test]
     fn an_outline_cut_before_its_holes_by_tool_grouping_is_repaired_at_no_extra_tool_change() {
         let mut plate = outline("plate", 0.0, 0.0, 200.0, 100.0);

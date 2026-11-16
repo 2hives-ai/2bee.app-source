@@ -48,6 +48,7 @@ const {
   HISTORY_LIMIT,
   canRedo,
   canUndo,
+  canUndoAction,
   initialEditor,
   redo,
   redoLabel,
@@ -392,4 +393,14 @@ test('a blocked reply never reaches this mechanism at all', () => {
   const { app, state } = autoApplied('cube([20, 10, 5]);\n', 'this is prose, not scad');
   assert.equal(app, null);
   assert.equal(state.phase, 'proposed');
+});
+
+test('the chat Undo is offered only while the AI change is the newest step (bughunt 2026-11-15)', () => {
+  /* It was `canUndo`: after a parameter switch or a design opened, the chat's Undo on the AI
+   * message put back THAT step and still said the AI change was undone. */
+  const ai = replaceWith(initialEditor('cube(1);'), { what: 'the AI change', next: 'cube(2);' });
+  assert.equal(canUndoAction(ai, 'the AI change'), true);
+  const after = replaceWith(ai, { what: 'switching "width"', next: 'cube(3);' });
+  assert.equal(canUndo(after), true);
+  assert.equal(canUndoAction(after, 'the AI change'), false);
 });

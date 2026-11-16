@@ -356,6 +356,36 @@ pub fn plan(
     }
 }
 
+/// The physical setup for a job — tools in order of use, every program stop,
+/// work offset, Z datum, depth against the workpiece, rpm and feeds — READ OFF
+/// THE EMITTED PROGRAM by the core and cross-checked against the job.
+///
+/// Same inputs as [`plan`] (minus the surface request), same core call as
+/// `2bee-slice setup <job>`, so the Make step's checklist and the CLI cannot
+/// disagree. Returns `{ job, ok, refused, facts, gcode_sha256 }`; `facts` (and the
+/// hash of the program it was read from) is `null` when the
+/// job emitted no program that may be sent. Errors are RETURNED as JSON with
+/// `ok: false`, never thrown — same rule as [`plan`].
+#[wasm_bindgen]
+pub fn setup_facts_json(job: &str, plant: &str, config_json: &str, sim_cell_mm: f64) -> String {
+    let Some(p) = job_plant_from(if plant.is_empty() { "none" } else { plant }) else {
+        return err(&format!("unknown plant '{plant}'"));
+    };
+    let cfg: JobConfig = if config_json.trim().is_empty() {
+        JobConfig::default()
+    } else {
+        match serde_json::from_str(config_json) {
+            Ok(c) => c,
+            Err(e) => return err(&format!("configuration rejected: {e}")),
+        }
+    };
+    let cell = if sim_cell_mm > 0.0 { sim_cell_mm } else { 0.6 };
+    match twobee_cam::setup::setup_for_reference_job(job, p, &cfg, cell) {
+        Some(a) => serde_json::to_string(&a).unwrap_or_else(|e| err(&e.to_string())),
+        None => err(&format!("unknown job '{job}'")),
+    }
+}
+
 /// Normalise a surface request from JS.
 ///
 /// A non-finite or non-positive cell is treated as **no request at all** rather
@@ -1086,27 +1116,52 @@ pub fn plan_import_many(
     surface_cell_mm: Option<f64>,
     mesh_budget_tris: Option<u32>,
 ) -> String {
+    let (sources, cfg) = match import_many_inputs(drawings_json, blobs, config_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let cell = if sim_cell_mm > 0.0 { sim_cell_mm } else { 0.6 };
+    let r = plan_report_import_many(
+        &sources,
+        &cfg,
+        cell,
+        surface_cell(surface_cell_mm),
+        mesh_budget(mesh_budget_tris),
+    );
+    serde_json::to_string(&r).unwrap_or_else(|e| err(&e.to_string()))
+}
+
+/// The parsing [`plan_import_many`] and [`setup_facts_for_import_many_json`]
+/// share — ONE copy, so the checklist export cannot read the drawing list or
+/// split the byte buffer differently from the plan export. `Err` carries the
+/// already-serialised error JSON. No machining decision is made here.
+fn import_many_inputs<'a>(
+    drawings_json: &str,
+    blobs: &'a [u8],
+    config_json: &str,
+) -> Result<(Vec<ImportSource<'a>>, JobConfig), String> {
     let described: Vec<ImportDrawingIn> = match serde_json::from_str(drawings_json) {
         Ok(v) => v,
-        Err(e) => return err(&format!("the drawing list was rejected: {e}")),
+        Err(e) => return Err(err(&format!("the drawing list was rejected: {e}"))),
     };
     if described.is_empty() {
-        return err(
+        return Err(err(
             "no drawings were given, so there is nothing to cut. An empty workpiece is refused rather \
              than posted as a program with no motion in it",
-        );
+        ));
     }
     let total: usize = described.iter().map(|d| d.byte_len).sum();
     if total != blobs.len() {
-        // 🔴 Refused, never salvaged. See the header: a wrong length does not
-        // produce a parse error, it produces a different drawing.
-        return err(&format!(
+        // 🔴 Refused, never salvaged. See `plan_import_many`'s header: a wrong
+        // length does not produce a parse error, it produces a different drawing.
+        return Err(err(&format!(
             "the drawing lengths sum to {total} bytes and {} were sent — the two must agree \
              EXACTLY. Slicing on regardless would hand the parser one file's tail joined to the \
              next file's head, and that composite parses into a drawing that is not any of the \
              files you loaded",
             blobs.len()
-        ));
+        )));
     }
 
     let cfg: JobConfig = if config_json.trim().is_empty() {
@@ -1117,12 +1172,12 @@ pub fn plan_import_many(
             // Reported, never silently replaced with defaults: a fallback would
             // plan a DIFFERENT job than the one that was configured, and it
             // would look like it worked.
-            Err(e) => return err(&format!("configuration rejected: {e}")),
+            Err(e) => return Err(err(&format!("configuration rejected: {e}"))),
         }
     };
 
     let mut at = 0usize;
-    let mut sources: Vec<ImportSource<'_>> = Vec::with_capacity(described.len());
+    let mut sources: Vec<ImportSource<'a>> = Vec::with_capacity(described.len());
     for d in &described {
         let data = &blobs[at..at + d.byte_len];
         at += d.byte_len;
@@ -1139,14 +1194,71 @@ pub fn plan_import_many(
             rotation_deg: d.rotation_deg,
         });
     }
+    Ok((sources, cfg))
+}
 
+/// The physical setup for ONE IMPORTED drawing — the Make step's checklist for
+/// a design the browser meshed, sectioned and planned.
+///
+/// Same leading arguments, in the same order, as [`plan_import_bytes`]
+/// (`data, format, z_section_mm, config_json, sim_cell_mm`), and the SAME core
+/// planning call (`plan_report_import_bytes` → the one-element import engine).
+/// The surface and mesh requests are absent because they change the size of a
+/// plan's answer, never its program.
+///
+/// Returns `{ job, ok, refused, facts, gcode_sha256 }` — `facts` read off the
+/// program that call emitted, cross-checked against that job's tools, workpiece
+/// and work offset. A refused plan → `facts: null`, `gcode_sha256: null`,
+/// reasons in `refused`. 🔴 Compare `gcode_sha256` with the SHA-256 of the
+/// `gcode` your plan call returned: unequal means the checklist describes a
+/// different program from the one being downloaded.
+///
+/// A workpiece or material the config does not declare is planned on a default,
+/// so it lands in `facts.pending` and `ok` is false — never a clean checklist.
+/// Errors (bad config) are RETURNED as `{ ok: false, errors }`, never thrown.
+#[wasm_bindgen]
+pub fn setup_facts_for_import_json(
+    data: &[u8],
+    format: &str,
+    z_section_mm: Option<f64>,
+    config_json: &str,
+    sim_cell_mm: f64,
+) -> String {
+    let cfg: JobConfig = if config_json.trim().is_empty() {
+        JobConfig::default()
+    } else {
+        match serde_json::from_str(config_json) {
+            Ok(c) => c,
+            Err(e) => return err(&format!("configuration rejected: {e}")),
+        }
+    };
     let cell = if sim_cell_mm > 0.0 { sim_cell_mm } else { 0.6 };
-    let r = plan_report_import_many(
-        &sources,
-        &cfg,
-        cell,
-        surface_cell(surface_cell_mm),
-        mesh_budget(mesh_budget_tris),
-    );
-    serde_json::to_string(&r).unwrap_or_else(|e| err(&e.to_string()))
+    // Same NaN rule as `plan_import_bytes`.
+    let z = z_section_mm.filter(|v| v.is_finite());
+    let a = twobee_cam::setup::setup_for_import(data, format, z, &cfg, cell);
+    serde_json::to_string(&a).unwrap_or_else(|e| err(&e.to_string()))
+}
+
+/// [`setup_facts_for_import_json`] for N placed drawings — the same arguments,
+/// parsed by the same helper, as [`plan_import_many`] (`drawings_json, blobs,
+/// config_json, sim_cell_mm`), planned by the same `plan_report_import_many`.
+///
+/// 🔴 This is the one to pair with a plan made through `planImportMany` — the
+/// path the app plans EVERY import through. A drawing dragged or turned on the
+/// workpiece is a different program from the bytes planned as drawn, and only
+/// this export sees that placement.
+#[wasm_bindgen]
+pub fn setup_facts_for_import_many_json(
+    drawings_json: &str,
+    blobs: &[u8],
+    config_json: &str,
+    sim_cell_mm: f64,
+) -> String {
+    let (sources, cfg) = match import_many_inputs(drawings_json, blobs, config_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let cell = if sim_cell_mm > 0.0 { sim_cell_mm } else { 0.6 };
+    let a = twobee_cam::setup::setup_for_import_many(&sources, &cfg, cell);
+    serde_json::to_string(&a).unwrap_or_else(|e| err(&e.to_string()))
 }

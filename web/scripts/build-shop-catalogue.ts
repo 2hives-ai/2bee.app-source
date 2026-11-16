@@ -48,18 +48,30 @@
 //
 // The card also carries `meshScene`'s own `trust` verdict, unmodified.
 
-import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, rmSync, existsSync, copyFileSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateSync } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { parseScad, type SceneNode } from '../src/cad/scad.ts';
 import { makeLibraryHost, normalisePath, importEdges, type ScadLibrary } from '../src/cad/library.ts';
 import { meshScene } from '../src/cad/mesh.ts';
+import { machineMeasure, type Resolution } from '../src/cad/machine.ts';
 
 const WEB = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CAD_ROOT = join(WEB, '..', '..', '..', 'hardware', 'cad');
-const OUT = join(WEB, 'public', 'shop');
+/* 🔴 BUILT ASIDE, SWAPPED IN AT THE END (2026-10-15). This used to `rmSync` the live
+ * `public/shop/` first and rebuild it in place over several minutes. Every Playwright run
+ * regenerates the catalogue (its webServer step), so a test run emptied the Designs page of
+ * any dev server on this tree for the whole build. The founder saw "The catalogue has not been
+ * built" on localhost:5178 while a suite was running. The build now writes to a sibling
+ * directory and renames it over the live one only once index.json exists, so the live
+ * catalogue is either the old complete one or the new complete one. A failed build leaves the
+ * old one untouched. */
+const LIVE = join(WEB, 'public', 'shop');
+/* Built OUTSIDE `public/` so the dev server's watcher never sees the half-built tree. */
+const OUT = join(WEB, `.shop-building-${process.pid}`);
 
 /** Families we offer, in the order a catalogue should read. Anything outside
  *  this list is not a product surface (vendored libs, archives, scratch). */
@@ -93,6 +105,11 @@ const FAMILIES: { dir: string; label: string; blurb: string }[] = [
   { dir: '2bee_cnc_machine', label: 'CNC machine', blurb: 'Probe and gantry study models.' },
   { dir: '2bee_qr', label: 'Marking', blurb: 'QR and identification plates.' },
   { dir: 'metal_nest', label: 'Metal nest', blurb: 'Nest layouts for steel stock.' },
+  /* ADDED 2026-10-20 on cad's ticket (founder asked for a printed mouse bait box).
+   * Not a fleet product and not in fleet_parts.yaml, so the card carries no part
+   * names. The blurb says so, because that blurb is the only field on the card
+   * that can tell a household item from a hive part. */
+  { dir: '2bee_household', label: 'Household', blurb: 'Household and workshop items. Not a 2bee hive product.' },
 ];
 
 /**
@@ -295,7 +312,10 @@ function kindOf(path: string): string {
    * but not `web/src`. Ten cards carried the retired word. The sweep now
    * covers `web/scripts` too, so this cannot recur silently. */
   if (/_wcnc\.scad$/.test(path)) return 'flat part — cut on the CNC';
-  if (/_acnc\.scad$/.test(path)) return 'flat part — cut on the CNC (alt)';
+  // `_acnc` is ALUMINIUM (hardware/cad/NAMING.md): flat bar, cut and drilled on a drill press —
+  // NOT this router (`make/setup.ts` machineFor). The card said "cut on the CNC (alt)" (bughunt
+  // 2026-11-15), the one sentence that would send it to the wood router.
+  if (/_acnc\.scad$/.test(path)) return 'aluminium part — cut and drilled by hand (drill press), not on the CNC';
   if (/_3d\.scad$/.test(path)) return '3D-printed part';
   if (/_assembly\.scad$/.test(path)) return 'assembly — several parts in place';
   if (/_pcb\.scad$/.test(path)) return 'board outline / PCB stand-in';
@@ -817,6 +837,61 @@ if (TRACKED.size < 100) {
   throw new Error(`git ls-files returned only ${TRACKED.size} path(s) under hardware/cad — that reads as a broken invocation, and an empty set would mark every source untracked or none`);
 }
 
+/**
+ * 🔴 THE FUNCTIONAL SPECIFICATION TRAVELS WITH THE DESIGN (founder 2026-10-16: *"Every
+ * design cad(scad)/pcb have to have a detailed functional specification, show it in cnc,
+ * pcb"*). The spec is cad's file, written by cad (ticket functional-spec-for-every-design),
+ * and this build only COPIES it, like the sources: never generated, never summarised.
+ *
+ *   per-file   `<dir>/<stem>.spec.md` next to `<dir>/<stem>.scad`
+ *   directory  a directory-level spec (`DESIGN-SPEC*.md`, `*-spec.md`) in the design's
+ *              directory or a parent up to the family directory — it describes the
+ *              family, not necessarily this one file, and the page says so
+ *   none       neither exists; the page says cad was asked, and shows no text
+ *
+ * ⚠ A spec is PUBLICATION like everything else on the page, so it gets the same
+ * prohibited-claim and patent-alias scan. A hit WITHHOLDS THAT SPEC (kind `withheld`,
+ * reason recorded), not the whole catalogue: the design is still openable, and refusing
+ * every card because one paragraph of one spec needs rewording would punish the wrong
+ * party. `tracked: false` = cad has written it and not committed it.
+ */
+interface SpecRef {
+  kind: 'per-file' | 'directory' | 'none' | 'withheld';
+  /** Path inside hardware/cad/, or null for `none`. */
+  path: string | null;
+  /** Path under public/shop/ (`s/<id>.md`), or null when nothing was copied. */
+  file: string | null;
+  tracked: boolean | null;
+  why?: string;
+}
+const specFallbackCache = new Map<string, string | null>();
+function dirSpec(dir: string): string | null {
+  if (specFallbackCache.has(dir)) return specFallbackCache.get(dir)!;
+  let found: string | null = null;
+  try {
+    const names = readdirSync(join(CAD_ROOT, dir))
+      .filter((n) => /^DESIGN-SPEC.*\.md$/i.test(n) || (/-spec\.md$/i.test(n) && !/\.spec\.md$/i.test(n)))
+      .sort();
+    found = names.length ? `${dir}/${names[0]}` : null;
+  } catch {
+    found = null;
+  }
+  specFallbackCache.set(dir, found);
+  return found;
+}
+function findSpec(path: string): { kind: 'per-file' | 'directory'; path: string } | null {
+  const own = path.replace(/\.scad$/, '.spec.md');
+  if (existsSync(join(CAD_ROOT, own))) return { kind: 'per-file', path: own };
+  const parts = path.split('/').slice(0, -1);
+  for (let n = parts.length; n >= 1; n--) {
+    const hit = dirSpec(parts.slice(0, n).join('/'));
+    if (hit) return { kind: 'directory', path: hit };
+  }
+  return null;
+}
+/** Lines of spec text fed to the claim patterns — the spec scan's witness. */
+let specLinesScanned = 0;
+
 const PCB_ROOT = join(CAD_ROOT, '..', 'pcb');
 const SYNC_BOARD = /AUTO-GENERATED from pcb\/([A-Za-z0-9_]+)\//;
 
@@ -848,6 +923,173 @@ if (SUPERSEDED_BOARDS.size === 0) {
   throw new Error('no _SUPERSEDED.md found under hardware/pcb — an empty scan and a clean tree produce the same number, so this is treated as broken rather than good news');
 }
 
+/**
+ * cad's per-call-site clearance of 2026-09-09, AND THE PROBE THAT KEEPS IT HONEST.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * WHAT cad ANSWERED
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * The withhold above fires on a REFERENCE in the source closure, and its own
+ * text says a reference is not proof the geometry depends on the board — *"each
+ * one cad clears comes back"*. Asked the question, `cad` traced every call site
+ * by hand (2026-09-09) and came back with a SPLIT, not one verdict for all 17:
+ *
+ *   6 REAL — `brood_panel_wcnc` and `super_panel_wcnc` call
+ *     `sensor_pod_front_cut_at()`, sized from `sensor_pod_v1_ext_w()/_ext_d()`,
+ *     which trace to the sync extracted from the do-not-fab board; the two
+ *     assemblies inherit it; `cnc_nest/cut_outline` projects the pod-cut super
+ *     front; `inwall_decommission_plug_3d` is dimensioned from the sync directly.
+ *     ⇒ THESE STAY WITHHELD. cad has escalated them to `ceo` + `pcb` separately.
+ *
+ *   4 INERT — `fan_box_panel_wcnc`, `fan_box_tray_3d`, `quilt`, and all of
+ *     `2bee_feeder/`: the closure touches `inwall_panel_cut.scad`, but only for
+ *     generic helpers, and no call site reaches a pod-sized dimension.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 🔴 AND A LIST OF PATHS IS EXACTLY THE ARTEFACT THAT ROTS
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * A bare allowlist would encode a correct hand-trace as a permanent exemption,
+ * and the day a cleared file grows a pod-sized cut NOTHING would notice — the
+ * card would keep publishing, and the reason it was cleared would be a sentence
+ * in a ticket nobody re-reads. That is the shape this tree keeps finding.
+ *
+ * So the clearance is CONDITIONAL ON A MEASUREMENT taken at build time, and the
+ * measurement is the one that matches the question cad actually answered — *does
+ * the reference move a coordinate?* The probe PERTURBS the superseded board's
+ * sync constants and re-meshes. If the geometry changes, the design is sized off
+ * that board after all, the clearance LAPSES, and it is withheld with the
+ * measurement attached.
+ *
+ * ⚠ AND IT CARRIES ITS OWN POSITIVE CONTROL, because "the geometry did not
+ * change" is worthless from an instrument that cannot see change at all. One
+ * design cad identified as REALLY dependent is probed on every build; if IT does
+ * not move, the probe is blind, every clearance is refused, and the build says
+ * so. An unchanged fingerprint means something only when a known-dependent file
+ * produces a changed one.
+ */
+const SUPERSEDED_CLEARED: { prefix: string; why: string }[] = [
+  { prefix: '2bee_hive/2bee_hive_fan_box_panel_wcnc.scad', why: 'pulls only inwall_node_wall_cut()/place_inwall_front() from inwall_panel_cut.scad — never sensor_pod_front_cut_at()' },
+  { prefix: '2bee_hive/2bee_hive_fan_box_tray_3d.scad', why: 'depends only on fan_box_panel_wcnc' },
+  { prefix: '2bee_hive/2bee_hive_quilt.scad', why: 'depends on box_panel_wcnc + feeder.scad, neither of which touches sensor_pod' },
+  { prefix: '2bee_feeder/', why: "feeder.scad's only pull from inwall_panel_cut.scad is vent_inwall_cuts(); zero occurrences of `sensor_pod` anywhere in 2bee_feeder/" },
+  /* 🔴 CLEARED 2026-09-17 BY WITHDRAWAL, NOT BY RE-TRACING. These two were in the
+   * 6 REAL group above and that verdict was CORRECT WHEN WRITTEN: super_panel_wcnc
+   * called sensor_pod_front_cut_at() sized from sensor_pod_v1_ext_w()/_ext_d().
+   * `product` then ruled no pod belongs on the super panel and cad withdrew the
+   * opening (8423a3130a) — `super_front_mount_cuts()` is now an EMPTY module body,
+   * verified at HEAD. The closure still `use<>`s sensor_pod_v1_enclosure_3d.scad
+   * (inwall_panel_cut.scad:485), which is why these need a clearance rather than
+   * dropping out: ***the reference survived the dependency.***
+   * ⚠ ONLY THE SUPER SIDE MOVED. `brood_front_mount_cuts()` still calls
+   * sensor_pod_front_cut_at() uncommented, so every design whose closure reaches
+   * `2bee_hive_brood_panel_wcnc.scad` STAYS WITHHELD — that is the 2 brood-only
+   * designs AND the 5 combined/nest designs, which pull BOTH panels through
+   * 2bee_hive_panels_18mm.scad:16-17. Clearing those 5 on "the super was fixed"
+   * would clear a design that is still sized off the board through its other half.
+   * 🟢 This lane's own probe already measured exactly that split on 2026-09-17:
+   * `2bee_hive_brood_panel_wcnc` MOVES · `super_panel_wcnc` still. */
+  { prefix: '2bee_hive/2bee_hive_super_panel_wcnc.scad', why: 'super_front_mount_cuts() is an empty module body since 8423a3130a (product: no pod on the super panel); the sensor_pod_v1 use<> survives in the closure but no call site reaches a pod-sized dimension' },
+  { prefix: '2bee_hive/2bee_hive_super_assembly.scad', why: 'inherits the super panel only — calls super_panel() and has zero direct sensor_pod references; cleared by the same withdrawal as super_panel_wcnc' },
+];
+
+/**
+ * The probe's POSITIVE CONTROL — a design that genuinely reads the superseded
+ * board, so "nothing moved" from it means the instrument is blind.
+ *
+ * 🔴 REPOINTED 2026-09-17, AND THE OLD CONTROL RETIRED BY SOMEBODY DOING
+ * CORRECT WORK. It was `2bee_hive/2bee_hive_super_panel_wcnc.scad`, chosen
+ * because `cad` named it as really dependent. `product` then ruled that no pod
+ * belongs on the super panel and `cad` withdrew the opening (`8423a3130a`,
+ * *"unblocks 7 catalogue designs"*, and `32e71d718c` for the in-wall body).
+ * ⇒ ***The control stopped moving because the dependency it relied on was
+ * correctly removed*** — the instrument was fine and its control had become a
+ * NEGATIVE case.
+ *
+ * ⚠ THE COST OF NOT NOTICING WAS IMMEDIATE AND BACKWARDS: a still control makes
+ * this build refuse EVERY clearance, so `listed` fell 90 → 83 — **`cad`'s work
+ * to unblock 7 designs blocked 7 instead**, and the build said only *"every
+ * clearance is refused this run"*. Diagnosed by bisecting `scad.ts` across two
+ * of this lane's own commits before the cause turned out to be upstream.
+ *
+ * 🟢 THE NEW CONTROL IS STRUCTURALLY DEPENDENT, WHICH THE OLD ONE WAS NOT.
+ * `sensor_pod_v1_enclosure_3d.scad` IS the v1 enclosure built around that board:
+ * its dependency cannot be withdrawn by a product ruling without deleting the
+ * design. A hive panel's pod opening is a product decision; an enclosure's
+ * board is the design. **Measured 2026-09-17 under the perturbation:**
+ * `sensor_pod_v1_enclosure_3d` MOVES · `sensor_pod_v1_assembly` MOVES ·
+ * `sensor_pod_v1_lid_3d` MOVES · `inwall_decommission_plug_3d` MOVES ·
+ * `2bee_hive_brood_panel_wcnc` MOVES · `super_panel_wcnc` **still**.
+ */
+const SUPERSEDED_CONTROL = '2bee_sensor_pod_v1/sensor_pod_v1_enclosure_3d.scad';
+/** Controls this probe has retired, so a future silence is diagnosed in seconds
+ *  rather than bisected. Name, date, and the commit that made it inert. */
+const RETIRED_CONTROLS = [
+  {
+    path: '2bee_hive/2bee_hive_super_panel_wcnc.scad',
+    why: 'cad 8423a3130a + 32e71d718c (2026-09-17) withdrew the sensor-pod opening and the in-wall body from the super panel, per product\'s ruling that no pod belongs on the super. The design is live and correct; it simply no longer reads the superseded board.',
+  },
+];
+
+/** Scale every scalar assignment in a superseded board's sync file. */
+function perturbSync(src: string): string {
+  return src.replace(/^([A-Za-z_][A-Za-z0-9_]*)( *= *)(-?[0-9]+(?:\.[0-9]+)?)( *;)/gm, (_m, name, eq, num, end) => {
+    const v = Number.parseFloat(num);
+    return `${name}${eq}${(v * 1.37 + 7).toFixed(4)}${end}`;
+  });
+}
+
+/** Triangle count + coordinate sum + rounded bounds. Cheap, and it can only be
+ *  wrong in the direction of reporting "did not move" about something that did. */
+function meshPrint(parts: { positions: Float32Array; triangles: number }[]): string {
+  let tri = 0;
+  let sum = 0;
+  for (const p of parts) {
+    tri += p.triangles;
+    for (let i = 0; i < p.positions.length; i += 1) sum += p.positions[i];
+  }
+  return `${tri}|${sum.toFixed(3)}`;
+}
+
+/**
+ * Does this design's geometry MOVE when the superseded board's sync constants
+ * do? `'moves'` = really dependent · `'still'` = the reference is inert ·
+ * `'unreadable'` = the probe could not evaluate it, which is never a clearance.
+ */
+function podPerturbationMoves(entry: string, closure: string[]): 'moves' | 'still' | 'unreadable' {
+  const syncs = closure.filter((f) => f.endsWith('_pcb_sync.scad') && supersededIn([f]).length > 0);
+  if (syncs.length === 0) return 'still';
+  const shifted = new Map(files);
+  for (const f of syncs) shifted.set(f, perturbSync(files.get(f)!));
+  const probe = (m: Map<string, string>): string | null => {
+    try {
+      const h = makeLibraryHost({ files: m, rootName: 'cad', pickedAt: 0, skipped: [] });
+      const parsed = parseScad(m.get(entry)!, { host: h, path: entry });
+      if (parsed.errors.length > 0) return null;
+      return meshPrint(meshScene(parsed.scene).parts);
+    } catch {
+      return null;
+    }
+  };
+  const before = probe(files);
+  const after = probe(shifted);
+  if (before === null || after === null) return 'unreadable';
+  return before === after ? 'still' : 'moves';
+}
+
+/** The positive control, computed once and reused: does a design cad named as
+ *  REALLY dependent actually move under the perturbation? */
+let CONTROL_VERDICT: 'moves' | 'still' | 'unreadable' | null = null;
+function controlMoves(): 'moves' | 'still' | 'unreadable' {
+  if (CONTROL_VERDICT === null) {
+    CONTROL_VERDICT = files.has(SUPERSEDED_CONTROL)
+      ? podPerturbationMoves(SUPERSEDED_CONTROL, closureOf(SUPERSEDED_CONTROL))
+      : 'unreadable';
+  }
+  return CONTROL_VERDICT;
+}
+
 /** Superseded boards referenced anywhere in a design's source closure. */
 function supersededIn(closure: string[]): { board: string; via: string; marker: string }[] {
   const out: { board: string; via: string; marker: string }[] = [];
@@ -875,6 +1117,23 @@ function closureOf(start: string): string[] {
   return [...seen].sort();
 }
 
+for (const [dir, e] of [
+  ...readdirSync(join(WEB, 'public')).map((n) => [join(WEB, 'public'), n] as const),
+  ...readdirSync(WEB).map((n) => [WEB, n] as const),
+]) {
+  // Leftovers of a build that died before it finished: never served as the catalogue, only clutter.
+  // (`public/shop.building|old-*` are the old swap's names; `.shop-building-*` the current one.)
+  const pid = (/^shop\.(?:building|old)-(\d+)$/.exec(e) ?? /^\.shop-building-(\d+)$/.exec(e))?.[1];
+  if (!pid) continue;
+  let alive = false;
+  try {
+    process.kill(Number(pid), 0);
+    alive = true;
+  } catch {
+    /* no such process */
+  }
+  if (!alive) rmSync(join(dir, e), { recursive: true, force: true });
+}
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(join(OUT, 'd'), { recursive: true });
 mkdirSync(join(OUT, 't'), { recursive: true });
@@ -882,12 +1141,16 @@ mkdirSync(join(OUT, 't'), { recursive: true });
 interface Entry {
   id: string; path: string; title: string; family: string; familyBlurb: string;
   kind: string; parts: number; triangles: number; trust: string; trustDetail: string;
+  /** The resolution-ladder tier the machine numbers (parts, trust, sizeMm) were built at — see cad/machine.ts. */
+  resolution: Resolution;
   sizeMm: [number, number, number] | null; files: number; bytes: number; thumb: string | null;
   /** cad's sentence per registered part on this file — a file can carry several.
    *  Empty when cad has written none: NEVER generated here, see the note above. */
   describes: { part: string; text: string }[];
   /** Registered part names this file produces; empty if it is not registered. */
   partNames: string[];
+  /** cad's functional specification for this design — see `SpecRef`. */
+  spec: SpecRef;
 }
 
 const entries: Entry[] = [];
@@ -899,8 +1162,76 @@ let claimLinesScanned = 0;
 let untrackedInClosure: string[] = [];
 const dropped: { path: string; why: string }[] = [];
 const withheld: { path: string; why: string }[] = [];
+/** 🔴 FILES INSIDE AN OFFERED FAMILY THAT DEFINE MODULES AND DRAW NOTHING —
+ *  params files, `*_pcb_sync.scad`, animation helpers. A legitimate exclusion,
+ *  and until 2026-09-17 a COMPLETELY SILENT one: the loop `continue`d and the
+ *  file appeared in no bucket, no count and no reason list. **37 of them**, found
+ *  by the conservation check on its first run (TODO #167). ⚠ It is named and
+ *  counted, not listed among `dropped`: a drop means *this reader could not open
+ *  a design*, and calling a module library a failed design would overstate the
+ *  reader's shortfall by 37 every build. */
+const noPrimitives = new Set<string>();
 /** Directories holding an openable design that `FAMILIES` does not offer. */
 const unlisted = new Map<string, number>();
+
+/* 🔴 UNCHANGED INPUTS, NO REBUILD (2026-11-15). Since the catalogue builds every design as a machine RENDER down a
+ * resolution ladder (74f2160259, 105da52349) one run takes ~10 min on jamesave and ~30 min on the Mac Pro, and the
+ * browser suite's preview server runs it first: at Playwright's 180 s start-up limit the suite could not start at all
+ * (gate I1 "errored" on every run since). The build is a pure function of what it reads, so it is FINGERPRINTED: every
+ * file under hardware/cad it can read (.scad, the .md specs, the .yaml lists), the tracked set, the superseded-board
+ * markers, facts.yaml, the alias list, this script and its import closure (the code that parses, meshes and
+ * renders) plus package-lock.json, and the node version. When the live catalogue was built from the same fingerprint, nothing is redone.
+ * `SHOP_REBUILD=1` forces a build. ⚠ Err on rebuilding: a stale catalogue served as current is the failure this must
+ * never cause; a needless rebuild only costs time. */
+const STAMP = join(LIVE, '.inputs.sha256');
+const inputSha = (() => {
+  const h = createHash('sha256');
+  const add = (k: string, v: string | Buffer) => { h.update(k); h.update('\0'); h.update(v); h.update('\0'); };
+  const walkAll = (root: string, keep: (n: string) => boolean, skip: (n: string) => boolean) => {
+    const out: string[] = [];
+    (function w(d: string) {
+      for (const e of readdirSync(d).sort()) {
+        if (skip(e)) continue;
+        const p = join(d, e);
+        if (statSync(p).isDirectory()) w(p);
+        else if (keep(e)) out.push(p);
+      }
+    })(root);
+    return out;
+  };
+  for (const p of walkAll(CAD_ROOT, (n) => /\.(scad|md|ya?ml)$/.test(n), (n) => n === '.git' || n === '__pycache__')) add(relative(CAD_ROOT, p), readFileSync(p));
+  add('tracked', [...TRACKED].sort().join('\n'));
+  add('superseded', JSON.stringify([...SUPERSEDED_BOARDS.entries()].sort()));
+  add('facts', readFileSync(join(CAD_ROOT, '..', '..', 'legal', 'canon', 'facts.yaml')));
+  add('script', readFileSync(fileURLToPath(import.meta.url)));
+  // The CODE that builds it: this script's own import closure (relative imports, followed transitively; packages are
+  // pinned by package-lock.json). Not all of web/src — an edit to a page the catalogue never imports must not cost a
+  // 10-30 min rebuild. An import this scan cannot follow (computed specifier) is a refusal to skip, below.
+  const seen = new Set<string>();
+  const queue = [fileURLToPath(import.meta.url)];
+  while (queue.length) {
+    const f = queue.pop()!;
+    if (seen.has(f)) continue;
+    seen.add(f);
+    const src = readFileSync(f, 'utf8');
+    add(relative(WEB, f), src);
+    for (const m of src.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(['"])(\.{1,2}\/[^'"]+)\1/g)) {
+      const base = join(dirname(f), m[2]);
+      const hit = [base, `${base}.ts`, `${base}.tsx`, `${base}.mjs`, `${base}.js`, join(base, 'index.ts')].find((c) => existsSync(c) && statSync(c).isFile());
+      if (!hit) throw new Error(`catalogue fingerprint: cannot resolve import '${m[2]}' in ${relative(WEB, f)} — refusing to guess what the build depends on`);
+      queue.push(hit);
+    }
+  }
+  add('package-lock', existsSync(join(WEB, 'package-lock.json')) ? readFileSync(join(WEB, 'package-lock.json')) : '');
+  add('node', process.version);
+  return h.digest('hex');
+})();
+if (process.env.SHOP_REBUILD !== '1' && existsSync(STAMP) && existsSync(join(LIVE, 'index.json')) && readFileSync(STAMP, 'utf8').trim() === inputSha) {
+  rmSync(OUT, { recursive: true, force: true });
+  console.log(`catalogue inputs unchanged (${inputSha.slice(0, 12)}): ${relative(WEB, LIVE)}/ kept as built. SHOP_REBUILD=1 rebuilds.`);
+  console.log(`-> ${relative(WEB, LIVE)}/index.json`);
+  process.exit(0);
+}
 
 for (const fam of FAMILIES) {
   for (const path of [...files.keys()].sort()) {
@@ -924,7 +1255,8 @@ for (const fam of FAMILIES) {
      * a source we could not read would be the more confident error. ⇒ Naming it
      * so the next reader knows the drop list is "what we could not assess", not
      * "what was assessed and found readable-but-fine". */
-    if (parsed.counts.primitives === 0) continue; // a library of modules, not a design
+    // A library of modules, not a design. COUNTED — see `noPrimitives`.
+    if (parsed.counts.primitives === 0) { noPrimitives.add(path); continue; }
     if (parsed.errors.length > 0) {
       dropped.push({ path, why: `this reader reported ${parsed.errors.length} error(s): ${parsed.errors[0].message.slice(0, 120)}` });
       continue;
@@ -968,18 +1300,25 @@ for (const fam of FAMILIES) {
       continue;
     }
 
-    let lo: [number, number, number] = [Infinity, Infinity, Infinity];
-    let hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
-    for (const p of drawable) {
-      if (!p.bounds) continue;
-      for (let a = 0; a < 3; a++) {
-        lo[a] = Math.min(lo[a], p.bounds.min[a]);
-        hi[a] = Math.max(hi[a], p.bounds.max[a]);
-      }
+    /* 🔴 THE NUMBERS A MACHINE IS PLANNED ON COME FROM THE RENDER (2026-11-12).
+     * `meshed` above is the PREVIEW (`$preview` true) and stays the thumbnail —
+     * it is what the viewer shows. But `sizeMm` feeds the Make step's setup
+     * checklist and fit check, and `parts`/`trust` describe the part: a source
+     * that draws display-only geometry under `if ($preview)` (the gland plate's
+     * 13 mm stubs) measured 12 parts / 17 mm here instead of 1 part / 4 mm. */
+    const forMachine = machineMeasure(files.get(path)!, { host, path });
+    if (forMachine && forMachine.exhausted !== null) {
+      /* The resolution ladder (cad/machine.ts) ran out AND the render drew nothing: dropped with the KERNEL'S
+       * reason, not "produced no triangles". (A ladder that ran out but still draws is listed with its verdict,
+       * as a partial render was before the ladder; its machine files are refused at write.) */
+      dropped.push({ path, why: `the render draws nothing within the in-browser kernel's budget at any resolution down to ${forMachine.resolution}: ${forMachine.exhausted.slice(0, 160)}` });
+      continue;
     }
-    const sizeMm: [number, number, number] | null = Number.isFinite(lo[0])
-      ? [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]].map((v) => Math.round(v * 10) / 10) as [number, number, number]
-      : null;
+    if (!forMachine) {
+      dropped.push({ path, why: 'the preview draws, but the render (`$preview` false) produced no triangles' });
+      continue;
+    }
+    const sizeMm = forMachine.sizeMm;
 
     const id = path.replace(/\.scad$/, '').replace(/[^a-zA-Z0-9]+/g, '-');
 
@@ -1055,7 +1394,43 @@ for (const fam of FAMILIES) {
     }
 
     const onSuperseded = supersededIn(closure);
-    if (onSuperseded.length > 0) {
+    const cleared = SUPERSEDED_CLEARED.find((c) => path === c.prefix || path.startsWith(c.prefix));
+    if (onSuperseded.length > 0 && cleared) {
+      /* 🔴 THE CLEARANCE IS RE-EARNED ON EVERY BUILD, NEVER ASSUMED. `cad`
+       * traced these call sites by hand; this asks the same question of the
+       * geometry — perturb the superseded board's sync constants and see whether
+       * anything moves — so a cleared file that later grows a pod-sized cut goes
+       * back behind the withhold on its own, with the measurement attached. */
+      const control = controlMoves();
+      const verdict = podPerturbationMoves(path, closure);
+      if (control !== 'moves') {
+        reasons.push(
+          `cad cleared this file 2026-09-09 (${cleared.why}), and THE CLEARANCE WAS NOT ACCEPTED: this build's ` +
+            `positive control (${SUPERSEDED_CONTROL}, structurally dependent on that board) came back ` +
+            // 🔴 THE RETIREMENT HISTORY IS PRINTED HERE, NOT KEPT AS A COMMENT.
+            // A still control cost 30 minutes of bisecting this lane's own
+            // commits on 2026-09-17 before the cause turned out to be a correct
+            // upstream withdrawal. The next reader gets the list for free.
+            `(controls retired so far: ${RETIRED_CONTROLS.map((c) => `${c.path} — ${c.why}`).join(' · ') || 'none'}) ` +
+            `"${control}" when the superseded board's sync constants were perturbed. An unchanged fingerprint ` +
+            'means nothing from an instrument that cannot see change, so every clearance is refused this run.',
+        );
+      } else if (verdict === 'moves') {
+        reasons.push(
+          `cad cleared this file 2026-09-09 (${cleared.why}) and THE MEASUREMENT DISAGREES: perturbing the ` +
+            "superseded board's sync constants CHANGED this design's mesh, so a coordinate here is sized off " +
+            'that board after all. The clearance is self-revoking by construction and has revoked itself — this ' +
+            'is a finding for cad, not a build fault.',
+        );
+      } else if (verdict === 'unreadable') {
+        reasons.push(
+          `cad cleared this file 2026-09-09 (${cleared.why}) and the probe COULD NOT EVALUATE it, which is not a ` +
+            'clearance. A design this generator cannot mesh twice cannot be certified independent of the board.',
+        );
+      }
+      /* verdict === 'still' with a live control: cad's trace is confirmed by
+       * measurement and no reason is pushed — the design publishes. */
+    } else if (onSuperseded.length > 0) {
       const boards = [...new Set(onSuperseded.map((b) => b.board))];
       reasons.push(
           `source closure references ${boards.join(', ')} — ` +
@@ -1094,15 +1469,37 @@ for (const fam of FAMILIES) {
     if (shot) writeFileSync(join(OUT, 't', `${id}.png`), shot.png);
     writeFileSync(join(OUT, 'd', `${id}.json`), JSON.stringify({ id, path, entry: path, sources }));
 
+    let spec: SpecRef = { kind: 'none', path: null, file: null, tracked: null };
+    const found = findSpec(path);
+    if (found) {
+      const text = readFileSync(join(CAD_ROOT, found.path), 'utf8');
+      const hits: string[] = [];
+      for (const line of text.split('\n')) {
+        specLinesScanned++;
+        for (const re of PROHIBITED_CLAIMS) if (re.test(line)) hits.push(`prohibited claim: ${line.trim().slice(0, 100)}`);
+        for (const a of bannedAliasesIn(line)) hits.push(`patent alias "${a}"`);
+      }
+      const tracked = TRACKED.has(found.path);
+      if (hits.length > 0) {
+        spec = { kind: 'withheld', path: found.path, file: null, tracked, why: `not published — ${hits.length} line(s) this page may not carry: ${hits.slice(0, 3).join('; ')}. cad rewords it in their file.` };
+      } else {
+        mkdirSync(join(OUT, 's'), { recursive: true });
+        writeFileSync(join(OUT, 's', `${id}.md`), text);
+        spec = { kind: found.kind, path: found.path, file: `s/${id}.md`, tracked };
+      }
+    }
+
     entries.push({
       id, path, title: titleOf(path), family: fam.label, familyBlurb: fam.blurb,
-      kind: kindOf(path), parts: drawable.length, triangles: shot?.triangles ?? 0,
-      trust: meshed.trust, trustDetail: meshed.trustDetail,
+      kind: kindOf(path), parts: forMachine.parts, triangles: shot?.triangles ?? 0,
+      trust: forMachine.trust, trustDetail: forMachine.trustDetail,
+      resolution: forMachine.resolution,
       sizeMm, files: closure.length, bytes, thumb: shot ? `t/${id}.png` : null,
       partNames: pathToNames.get(path) ?? [],
       describes: (pathToNames.get(path) ?? [])
         .filter((n) => DESCRIPTIONS.has(n))
         .map((n) => ({ part: n, text: DESCRIPTIONS.get(n)! })),
+      spec,
     });
     process.stdout.write(`  ${entries.length.toString().padStart(3)}. ${path} (${drawable.length}p, ${ms}ms)\n`);
   }
@@ -1119,6 +1516,158 @@ for (const path of files.keys()) {
   const parsed = parseScad(files.get(path)!, { host, path });
   if (parsed.counts.primitives === 0 || parsed.errors.length > 0 || parsed.unsupported.length > 0) continue;
   unlisted.set(dir, (unlisted.get(dir) ?? 0) + 1);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 🔴 CONSERVATION — EVERY SCANNED FILE LANDS IN EXACTLY ONE BUCKET. TODO #167.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * `index.json` publishes `scanned` and `listed` side by side and asserts NO
+ * RELATION between them. **Measured:** `scanned` fell 635 → 389 (-39%) when `cad`
+ * removed `hardware/cad/archive/`, and `listed`, `dropped` and `withheld` all
+ * held. That move was benign — `archive/` was never offered — but ⚠ **nothing in
+ * this build could tell it apart from a walk that had narrowed**: a stray
+ * `continue`, a rename, a directory that became unreadable each move `scanned`
+ * exactly the same way. ⇒ ***A number that can move 40% while every number
+ * downstream of it holds is not a number anyone is reading.***
+ *
+ * 🔴 NOT A RATCHET ON `scanned`, AND THAT WAS THE TEMPTING WRONG FIX. A floor on
+ * an input count reds every time `cad` legitimately reorganises — which is
+ * exactly what happened here — and a check that fires on correct work is one
+ * people disarm. `ceo` and `legal` have both ruled that shape out.
+ *
+ * So this balances the population instead: green through `cad`'s archive move,
+ * red on a narrowing walk. **The skips are the substance** — files excluded
+ * BEFORE the filter were entirely uncounted, so until now there was nothing to
+ * balance against, and the first thing this had to do was name them.
+ *
+ * ⚠ EVERY BUCKET IS DERIVED FROM `files` ONE FILE AT A TIME, never accumulated
+ * inside the family loop. That loop runs once PER FAMILY over every path, so a
+ * counter incremented in it counts a file once per family and the total would
+ * balance against an inflated population — a conservation check that proves its
+ * own arithmetic rather than the walk. */
+const claimed = new Map<string, string>();
+const claim = (path: string, bucket: string) => {
+  const prior = claimed.get(path);
+  if (prior && prior !== bucket) {
+    throw new Error(
+      `${path} is in TWO buckets — '${prior}' and '${bucket}'. The catalogue's population is ` +
+        'double-counted, so the conservation sum below would balance while the page was wrong.',
+    );
+  }
+  claimed.set(path, bucket);
+};
+for (const e of entries) claim(e.path, 'listed');
+for (const d of dropped) claim(d.path, 'dropped');
+for (const w of withheld) claim(w.path, 'withheld');
+
+/* The named skips. Each predicate is the SAME EXPRESSION the walk and the family
+ * loop use — written once here would be better, and is not possible without
+ * restructuring the loop, so ⚠ if either changes, this goes red rather than
+ * silently re-classifying: an unclaimed file has no bucket and the sum fails. */
+const offeredDirs = new Set(FAMILIES.map((f) => f.dir));
+/* 🔴 ONE BUCKET PER EXCLUSION CLAUSE, NOT ONE PER GROUP OF THEM. Added
+ * 2026-09-17 after `cad` found and removed a stale `archive` entry in their own
+ * `SKIP_DIRS` — *"a decided case going unnoticed"*, since the fleet-wide
+ * remove-all-archives ruling means no `archive/` can ever match it again.
+ *
+ * ⚠ THIS FILE HAD THE SAME CLAUSE AND THE SAME STALENESS, HIDDEN BY ITS OWN
+ * ARITHMETIC. The bucket was `archiveOrLib: 84` — and **measured: 0 of those 84
+ * are under any `archive/` directory; all 84 are `lib/`.** A combined count
+ * cannot express that one of its clauses is dead, so the number looked busy and
+ * healthy while half the predicate matched nothing.
+ *
+ * ⇒ **Split, so a dead exclusion prints `0` every build and says so itself.**
+ * Not DELETED: an exclusion that stops matching is evidence, and removing the
+ * clause removes the only thing that would show it came back. */
+const skips: Record<string, number> = { archive: 0, lib: 0, model3d: 0, notOffered: 0, looseAtRoot: 0, noPrimitives: 0 };
+/* Claimed FIRST: these were reached by the family loop, so classifying them by
+ * directory afterwards would file them under a reason that did not apply. */
+for (const path of noPrimitives) { if (!claimed.has(path)) { skips.noPrimitives++; claim(path, 'skip:noPrimitives'); } }
+for (const path of files.keys()) {
+  if (claimed.has(path)) continue;
+  const dir = path.split('/')[0];
+  if (dir === 'archive' || /\/archive\//.test(path)) {
+    skips.archive++;
+    claim(path, 'skip:archive');
+  } else if (dir === 'lib' || /\/lib\//.test(path)) {
+    skips.lib++;
+    claim(path, 'skip:lib');
+  } else if (dir === '3dmodels') {
+    skips.model3d++;
+    claim(path, 'skip:model3d');
+  } else if (!path.includes('/')) {
+    skips.looseAtRoot++;
+    claim(path, 'skip:looseAtRoot');
+  } else if (!offeredDirs.has(dir)) {
+    skips.notOffered++;
+    claim(path, 'skip:notOffered');
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 🔴 THE WALK, AGAINST A SECOND AND INDEPENDENT DERIVATION OF THE POPULATION.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * ⚠ THE CONSERVATION SUM BELOW DOES NOT CATCH #167's DEFECT, AND THIS WAS
+ * MEASURED RATHER THAN REASONED. Planting a narrowing walk — one `continue` in
+ * the `readdirSync` recursion, dropping `metal_nest/` — produced:
+ *
+ *     scanned 386 .scad · listed 87 · dropped 38 · withheld 16
+ *
+ * **and the build PASSED.** Files that never enter `files` reduce `scanned` and
+ * every bucket together, so the sum balances perfectly while the page has
+ * silently narrowed. ⇒ ***A conservation check can only balance the population it
+ * was given; it has nothing to say about the population it was denied.***
+ *
+ * So the walk is compared against `TRACKED` — `git ls-files`, a derivation that
+ * shares no code with `readdirSync`. A directory the walk stops descending into
+ * is still in git's index and shows up here by NAME. `cad` deleting `archive/`
+ * removes the files from BOTH, so this stays green through the reorganisation
+ * that the rejected `scanned` ratchet would have reddened on.
+ *
+ * ⚠ ONE DIRECTION ONLY, DELIBERATELY. Files in the walk but not in git are
+ * UNTRACKED — someone's work in progress on a tree thirty lanes share — which is
+ * normal and already handled by `withheldUntracked`. Files in git but not in the
+ * walk are the narrowing. Requiring set equality would red on every lane's
+ * uncommitted file and get this disarmed inside a week. */
+const trackedScad = [...TRACKED].filter((p) => p.endsWith('.scad')).map(normalisePath).filter(Boolean) as string[];
+const missedByWalk = trackedScad.filter((p) => !files.has(p));
+if (missedByWalk.length > 0) {
+  throw new Error(
+    `the walk did not reach ${missedByWalk.length} .scad file(s) that git tracks under hardware/cad: ` +
+      missedByWalk.slice(0, 8).join(', ') +
+      (missedByWalk.length > 8 ? `, +${missedByWalk.length - 8} more` : '') +
+      '. The catalogue is built from a NARROWER tree than the repository holds, which the ' +
+      'conservation sum cannot see — it balances whatever it was given. Either the walk lost a ' +
+      'directory, or these files were deleted and the index has not been refreshed.',
+  );
+}
+
+/* 🔴 THE UNACCOUNTED SET IS THE FINDING, NOT THE SUM. A total that fails to
+ * balance tells you a number is wrong; the PATHS tell you which walk lost them,
+ * which is the only form of this a reader can act on. So the error names them. */
+const unaccounted = [...files.keys()].filter((p) => !claimed.has(p));
+if (unaccounted.length > 0) {
+  throw new Error(
+    `${unaccounted.length} scanned file(s) reached no bucket — neither listed, dropped, withheld, ` +
+      `nor a NAMED skip: ${unaccounted.slice(0, 8).join(', ')}` +
+      (unaccounted.length > 8 ? `, +${unaccounted.length - 8} more` : '') +
+      '. A file that leaves the population unaccounted is exactly the narrowing this check exists ' +
+      'to catch, and a new legitimate exclusion must be given a NAME here rather than allowed to ' +
+      'fall through.',
+  );
+}
+const skipTotal = Object.values(skips).reduce((a, b) => a + b, 0);
+const accountedFor = entries.length + dropped.length + withheld.length + skipTotal;
+if (accountedFor !== files.size) {
+  throw new Error(
+    `conservation FAILED: scanned ${files.size} but accounted for ${accountedFor} ` +
+      `(listed ${entries.length} + dropped ${dropped.length} + withheld ${withheld.length} + ` +
+      `skips ${JSON.stringify(skips)}). ` +
+      'The two sides are computed from the same `files` map, so a mismatch here means a bucket ' +
+      'holds a path that is not in it, not that the walk lost something.',
+  );
 }
 
 /**
@@ -1178,7 +1727,7 @@ for (const path of files.keys()) {
  *
  * So on a firing: find the design, and ask what CHANGED about it — never start
  * from the constant. */
-const LISTED_FLOOR = 81; // measured 2026-09-05, after ceo's superseded-board refusal
+const LISTED_FLOOR = 88; // measured 2026-11-13: 88. -2 = autoframe_lid_3d + autoframe/enclosure, over the kernel polygon budget even at the cap32 render tier (machine.ts ladder); a declared reader regression, not a design change
 const LISTED_CEILING = LISTED_FLOOR + 15;
 /* 🔴 BANDED ON THE COMMITTED-TREE POPULATION, not on what this run happened to
  * list. Caught the first time the band fired for real: it reported 80 against a
@@ -1199,6 +1748,9 @@ const LISTED_CEILING = LISTED_FLOOR + 15;
 const offencesFound: string[] = [];
 const bandable = entries.length + withheld.filter((w) => w.why.includes('git does not track')).length;
 if (bandable < LISTED_FLOOR || bandable > LISTED_CEILING) {
+  // The index is not written on this path, so the reasons would otherwise be lost with it.
+  for (const d of dropped) process.stderr.write(`  dropped  ${d.path} — ${d.why}\n`);
+  for (const w of withheld) process.stderr.write(`  withheld ${w.path} — ${w.why.slice(0, 200)}\n`);
   throw new Error(
     `the catalogue lists ${entries.length} design(s) (${bandable} on a committed tree), outside the declared band ` +
       `${LISTED_FLOOR}..${LISTED_CEILING}. ` +
@@ -1227,6 +1779,20 @@ const index = {
   scanned: files.size,
   listed: entries.length,
   dropped: dropped.length,
+  /** 🔴 THE SKIPS, NAMED AND COUNTED — TODO #167. Published because `scanned`
+   *  and `listed` sat side by side for weeks with no relation between them, and
+   *  `scanned` fell 39% with every downstream number holding. These three are
+   *  what closes the sum: `listed + dropped + withheld + skipped === scanned`,
+   *  asserted at build time and refused there, not merely reported here. */
+  skipped: skips,
+  skippedTotal: skipTotal,
+  /** The walk's population proven against `git ls-files`, a derivation sharing no
+   *  code with it. Published because the conservation sum alone balances a
+   *  narrowed walk perfectly — measured, see the note at the check. */
+  walkVsGit: `${trackedScad.length} tracked .scad, ${missedByWalk.length} missed by the walk`,
+  /** The witness that the sum was actually evaluated this run — a conservation
+   *  check whose PASS emits nothing cannot prove it ran. */
+  conservation: `${entries.length}+${dropped.length}+${withheld.length}+${skipTotal}=${files.size}`,
   droppedReasons: dropped.slice(0, 60),
   /** Listed designs carrying cad's sentence, and those carrying none. An
    *  undescribed card is a VISIBLE gap on purpose — the alternative is a
@@ -1293,6 +1859,18 @@ const index = {
    *  (ceo 2026-09-05), and closing the 28-vs-17 gap will not report on the
    *  second. Nothing here checks a description against its part. */
   descriptionsVerified: 0,
+  /** cad's functional specifications on LISTED designs (founder 2026-10-16). `with` =
+   *  per-file + directory; a directory spec describes the family, not this one file.
+   *  `linesScanned` is the claim/alias scan's witness over the spec text. */
+  specs: {
+    with: entries.filter((e) => e.spec.kind === 'per-file' || e.spec.kind === 'directory').length,
+    without: entries.filter((e) => e.spec.kind === 'none').length,
+    perFile: entries.filter((e) => e.spec.kind === 'per-file').length,
+    directory: entries.filter((e) => e.spec.kind === 'directory').length,
+    withheld: entries.filter((e) => e.spec.kind === 'withheld').length,
+    untracked: entries.filter((e) => e.spec.tracked === false).length,
+    linesScanned: specLinesScanned,
+  },
   /** Designs whose source closure references a PCB marked do-not-fab. Published
    *  because the card offers a design to make and the board under it is one we
    *  have said we will not fabricate — a contradiction that must be VISIBLE
@@ -1304,6 +1882,15 @@ const index = {
    * was emptied is worse than no number: it says "nothing here is on a
    * do-not-fab board" while meaning "we stopped listing the ones that are". */
   withheldOnSupersededBoard: withheld.filter((w) => w.why.includes('closure references')).length,
+  /**
+   * 🔴 THE CLEARANCE PROBE'S OWN POSITIVE CONTROL, PUBLISHED RATHER THAN INFERRED.
+   * Every cleared design publishes only because perturbing the superseded board's
+   * sync constants did NOT move its mesh — and that "did not move" is worth
+   * nothing unless the same perturbation DOES move a design known to depend on
+   * the board. Reading the control's verdict off the fact that cards appeared is
+   * an inference; this is the measurement.
+   */
+  supersededProbe: { control: SUPERSEDED_CONTROL, verdict: controlMoves(), cleared: SUPERSEDED_CLEARED.map((c) => c.prefix) },
   /** Designs held back because part of their source is not committed. Expected
    *  to be NON-ZERO on a shared tree with work in progress — a snapshot of
    *  another lane's uncommitted state, not a defect count. */
@@ -1427,9 +2014,66 @@ const index = {
   }
 }
 writeFileSync(join(OUT, 'index.json'), JSON.stringify(index, null, 1));
+rmSync(STAMP, { force: true }); // a swap that dies half way must not leave a stamp vouching for it
+{
+  /* 🔴 FILE BY FILE, NOT A DIRECTORY SWAP (2026-10-15). The swap below this comment's
+   * predecessor renamed `public/shop` away and the new tree in. A running Vite dev server
+   * keeps a per-PATH set of public files, updated from watcher add/unlink events, and after
+   * the swap it had dropped the thumbnails: every `/shop/t/*.png` was answered with the SPA's
+   * index.html (200, text/html), so every Designs card showed a broken image until the dev
+   * server was restarted. Founder saw it on localhost:5178 ("all 3d visualization are
+   * corrupt?") right after a Playwright run regenerated the catalogue.
+   * Now: copy every built file over its live path (an existing path stays known to Vite; a
+   * new one arrives as an add), index.json LAST so it never names a file not yet in place,
+   * then delete live files the new build no longer has. */
+  const rel: string[] = [];
+  const list = (dir: string, pre: string) => {
+    for (const n of readdirSync(dir)) {
+      const full = join(dir, n);
+      if (statSync(full).isDirectory()) list(full, `${pre}${n}/`);
+      else rel.push(`${pre}${n}`);
+    }
+  };
+  list(OUT, '');
+  const keep = new Set(rel);
+  for (const r of rel) {
+    if (r === 'index.json') continue;
+    mkdirSync(dirname(join(LIVE, r)), { recursive: true });
+    copyFileSync(join(OUT, r), join(LIVE, r));
+  }
+  copyFileSync(join(OUT, 'index.json'), join(LIVE, 'index.json'));
+  if (existsSync(LIVE)) {
+    const live: string[] = [];
+    const listLive = (dir: string, pre: string) => {
+      for (const n of readdirSync(dir)) {
+        const full = join(dir, n);
+        if (statSync(full).isDirectory()) listLive(full, `${pre}${n}/`);
+        else live.push(`${pre}${n}`);
+      }
+    };
+    listLive(LIVE, '');
+    for (const r of live) if (!keep.has(r)) rmSync(join(LIVE, r), { force: true });
+  }
+  rmSync(OUT, { recursive: true, force: true });
+}
+writeFileSync(STAMP, inputSha + '\n');
 console.log(
   `\nscanned ${files.size} .scad · listed ${entries.length} · dropped ${dropped.length}` +
-    ` · withheld ${withheld.length} · described ${index.described}/${entries.length}`,
+    ` · withheld ${withheld.length} · described ${index.described}/${entries.length}` +
+    ` · specs ${index.specs.with}/${entries.length} (per-file ${index.specs.perFile}, directory ${index.specs.directory}, none ${index.specs.without}, withheld ${index.specs.withheld})` +
+    /* 🔴 THE BLIND STATE RIDES ON THE LINE PEOPLE ACTUALLY READ — `ceo`'s
+     * `§19ai`, 2026-09-17. The probe already printed `control -> still` on its
+     * own line, and that was not enough: when `cad`'s correct withdrawal retired
+     * the old control, the visible effect was `listed` falling 90 → 83 and a
+     * per-design reason saying *"every clearance is refused this run"*.
+     * ⇒ ***That reads as a STRICT gate doing its job, not a BLIND one*** — a
+     * fail-closed instrument that has lost its sight fails closed on everything,
+     * which is indistinguishable from rigour. So the summary says it too. */
+    (controlMoves() === 'moves'
+      ? ''
+      : ` · ⚠ CLEARANCE PROBE BLIND (control ${controlMoves()}) — every cad clearance refused this` +
+        ' run, so `withheld` is an OVER-count and `listed` an UNDER-count. This is not the rule' +
+        ' being strict; it is the instrument being unable to see.'),
 );
 if (unlisted.size > 0) {
   console.log(
@@ -1437,4 +2081,8 @@ if (unlisted.size > 0) {
       `FAMILIES does not offer: ${[...unlisted.keys()].join(', ')}`,
   );
 }
-console.log(`-> ${relative(WEB, OUT)}/index.json`);
+console.log(
+  `superseded-board clearance probe: control ${SUPERSEDED_CONTROL} -> ${controlMoves()} ` +
+    `(must be "moves", or every clearance is refused this run)`,
+);
+console.log(`-> ${relative(WEB, LIVE)}/index.json`);

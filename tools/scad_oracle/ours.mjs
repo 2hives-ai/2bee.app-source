@@ -323,6 +323,7 @@ export function runOurs(src, plant = null, ctx = null) {
     counts: parsed.counts,
     canon,
     tris: total,
+    work: meshed.stats.work,
     inv: invariants(total),
     solidParts: solids.length,
     flatParts: flats.length,

@@ -186,6 +186,17 @@ export function canUndo(s: EditorState): boolean {
   return s.past.length > 0;
 }
 
+/**
+ * Whether the newest step is `what` — the test for an undo offered on ONE
+ * action's own control (the chat's "Undo" on an AI message). `canUndo` is not
+ * enough there: a parameter switch or a design opened since pushes its own step,
+ * and the chat's Undo then put back THAT step while saying the AI change was
+ * undone (bughunt 2026-11-15).
+ */
+export function canUndoAction(s: EditorState, what: string): boolean {
+  return s.past.length > 0 && s.past[s.past.length - 1].what === what;
+}
+
 /** Whether the redo control may be offered at all. */
 export function canRedo(s: EditorState): boolean {
   return s.future.length > 0;

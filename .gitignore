@@ -57,3 +57,9 @@ web/.env.*.local
 # `gcommit` pathspec and it lands in the shared history, where it cannot be
 # taken back out cheaply. It is NOT evidence about this lane's output.
 grblhal/
+
+# Playwright's run marker when it is invoked from THIS directory rather than
+# from web/ (web/test-results/ is ignored above). `test-results/.last-run.json`
+# was committed by the 2026-08-13 index-recovery restore and sat tracked,
+# reading "status": "failed", as evidence of nothing. Removed 2026-10-12.
+test-results/

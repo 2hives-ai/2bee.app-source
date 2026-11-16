@@ -184,3 +184,52 @@ test('the material-agnostic panel sizes state NOTHING, and are not filled in wit
   assert.equal(SHEET_SIZES.find((s) => s.id === 'ply-baltic-1525x1525')!.material, 'Plywood');
   assert.equal(SHEET_SIZES.find((s) => s.id === 'alu-au-3000x1500')!.material, 'Aluminium');
 });
+
+// 🔴 2026-11-14: 2bee.cnc and the Make step planned every CNC job on the store's initial 'Plywood' and printed
+// "Material: Plywood, from your 2bee.cnc settings" — a material nobody chose. Only the Expert tab restored the
+// saved one. The store now records whether its material was STATED, and both planners go through
+// `operatorMaterial`, which refuses a placeholder and a name the library does not carry.
+test('a CNC plan uses the operator\'s material only when stated and known; the placeholder is refused', async () => {
+  const { useCncStore } = await import('../src/store/cncStore.ts');
+  const lib = ['Plywood', 'MDF', 'Acrylic'];
+  const fresh = useCncStore.getState();
+  assert.equal(fresh.materialStated, false, 'nothing saved: the initial material is a placeholder');
+  assert.equal(jm.operatorMaterial(fresh, lib).state, 'not-stated');
+  useCncStore.getState().setMaterial('MDF');
+  assert.deepEqual(jm.operatorMaterial(useCncStore.getState(), lib), { state: 'known', name: 'MDF' });
+  useCncStore.getState().setMaterial('Birch ply');
+  assert.equal(jm.operatorMaterial(useCncStore.getState(), lib).state, 'unknown');
+});
+
+test('both CNC planners take the material through operatorMaterial, never straight from the store', async () => {
+  const { readFileSync } = await import('node:fs');
+  for (const f of ['../src/cncjob/plan.ts', '../src/make/MakeFlow.tsx']) {
+    const src = readFileSync(new URL(f, import.meta.url), 'utf8');
+    assert.ok(src.includes('operatorMaterial(useCncStore.getState()'), `${f} does not resolve the material`);
+    assert.ok(!/useCncStore\.getState\(\)\.material\b/.test(src), `${f} still reads the raw store material`);
+  }
+});
+
+// 🔴 2026-11-14: every machine card's Send queued the plans made for the SELECTED card's cutters.
+test('2bee.cnc offers Send only on the machine the designs were planned for', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../src/cncjob/CncPage.tsx', import.meta.url), 'utf8');
+  assert.match(src, /disabled=\{!!sendBlocked\(m\.id\)\}/, 'the card button must ask sendBlocked for ITS machine');
+  assert.match(src, /machineId !== machine\?\.id/, 'sendBlocked must compare against the planned-for machine');
+  assert.match(src, /const blocked = sendBlocked\(machineId\);\s*if \(blocked\)/, 'send() must refuse on its own, not only via the button');
+});
+
+// 🔴 2026-11-14: 2bee.cnc sent no machine to the core, so every plan used the generic 600x900 travel and 24000 rpm.
+test('a 2bee.cnc plan carries the router\'s stated travel and spindle, and says what was not stated', async () => {
+  const { machineConfig } = await import('../src/cncjob/machines.ts');
+  const full = machineConfig({ hostname: 'cnc-01', profile: { firmware: 'grblHAL', travel: { X: 400, Y: 300, Z: 80 }, spindleMaxRpm: 18000, flags: 0, analysedAt: 1 } });
+  assert.deepEqual(full.machine, { name: 'cnc-01', travel_x_mm: 400, travel_y_mm: 300, travel_z_mm: 80, spindle_max_rpm: 18000 });
+  assert.match(full.note, /from its controller/);
+  const part = machineConfig({ hostname: 'cnc-sim', profile: { firmware: null, travel: { X: null, Y: null, Z: null }, spindleMaxRpm: null, flags: 0, analysedAt: 1 } });
+  assert.deepEqual(part.machine, { name: 'cnc-sim' }, 'a null is LEFT OUT, never sent as 0');
+  assert.match(part.note, /not stated by its controller: X travel, Y travel, Z travel, max spindle rpm/);
+  const none = machineConfig({ hostname: 'cnc-02', profile: null });
+  assert.match(none.note, /has not been analysed/);
+  const src = (await import('node:fs')).readFileSync(new URL('../src/cncjob/CncPage.tsx', import.meta.url), 'utf8');
+  assert.match(src, /planDesign\(it\.entry, \{[^}]*\bmachine \}/, 'CncPage must pass the target machine to planDesign');
+});

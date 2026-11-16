@@ -86,7 +86,8 @@
 // state, and the geometry is derived from `touchplates.ts` rather than re-keyed,
 // so a corrected number cannot leave a stale drawing behind.
 
-import type { ReactElement } from 'react';
+import { lazy, Suspense, type ReactElement } from 'react';
+import { webglAvailable } from './tool3d/webgl';
 import { findTouchPlate, TOUCH_PLATES, type TouchPlate } from './touchplates';
 
 // -- the sheet of mm this drawing is a window onto ---------------------------
@@ -744,6 +745,31 @@ function footer(p: TouchPlate, kind: Kind): { text: string; cls: string } {
   };
 }
 
+/**
+ * The words this drawing prints inside its frame, as plain lines — the side
+ * note, the radius line and the footer, with the class that colours each.
+ * Exported so the 3D view (`tool3d/Catalogue3D.tsx`) shows the SAME caption
+ * under its solid rather than writing a second one that drifts. `null` for an
+ * unknown id.
+ */
+export function touchPlateCaption(id: string): { text: string; tone: 'muted' | 'accent' | 'warn' }[] | null {
+  const p = findTouchPlate(id);
+  if (!p) return null;
+  const kind = kindOf(p);
+  const side =
+    kind === 'setter'
+      ? 'it is bolted to the MACHINE — heights are from the spoilboard'
+      : kind === 'datum'
+        ? 'no device at all: Z is zeroed on the spoilboard'
+        : 'it registers on the WORKPIECE — it moves when the workpiece does';
+  const f = footer(p, kind);
+  return [
+    { text: side, tone: 'muted' },
+    { text: radiusLine(p), tone: 'muted' },
+    { text: f.text, tone: f.cls === 'tps-warntext' ? 'warn' : 'accent' },
+  ];
+}
+
 // -- the component -----------------------------------------------------------
 
 export interface TouchPlateShapeProps {
@@ -760,7 +786,27 @@ export interface TouchPlateShapeProps {
  * drawing where a plate should be is an absence rendered as a reassuring state,
  * which is the same failure a check that cannot run reports PENDING to avoid.
  */
-export function TouchPlateShape({ id, className }: TouchPlateShapeProps): ReactElement {
+// Founder 2026-10-15: *"in the tool list show the preview not a drawing but a
+// 3d object (have to build up all objects in 3d)"*. The preview is now a 3D
+// solid built from the same catalogue numbers (`tool3d/geometry.ts`), with this
+// drawing's caption lines printed under it. This flat drawing is still what
+// renders while the 3D chunk loads and wherever WebGL is unavailable.
+const TouchPlate3D = lazy(() => import('./tool3d/Catalogue3D').then((m) => ({ default: m.TouchPlate3D })));
+
+export function TouchPlateShape(props: TouchPlateShapeProps): ReactElement {
+  if (webglAvailable()) {
+    const flat = <TouchPlateShape2D {...props} />;
+    return (
+      <Suspense fallback={flat}>
+        <TouchPlate3D id={props.id} className={props.className} fallback={flat} />
+      </Suspense>
+    );
+  }
+  return <TouchPlateShape2D {...props} />;
+}
+
+/** The flat plan + side drawing — the 3D view's fallback. */
+export function TouchPlateShape2D({ id, className }: TouchPlateShapeProps): ReactElement {
   // 🔴 The entry and its kind travel together or not at all.
   //
   // `kindOf` is TOTAL — every catalogue entry has a `references` and an `axes`,

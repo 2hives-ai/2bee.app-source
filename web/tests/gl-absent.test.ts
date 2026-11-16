@@ -263,11 +263,63 @@ test('🔴 PLANT — the degraded state is REPORTED, and the probes stay absent 
   // which is only ever assigned by the setup effect — with no renderer it
   // renders, looks live, and does nothing when pressed. A dead control teaches
   // that the tab is broken rather than that the picture is absent.
+  //
+  // ⚠ THE WINDOW WAS 900 CHARACTERS AND IS NOW 3000, AND A WIDENED WINDOW IS
+  // EXACTLY THE CHANGE THAT LATER READS AS A WEAKENED CONTROL — so what replaced
+  // the tightness is stated here. The bottom bar (2026-09-11) put four named-view
+  // buttons and their reasons between the branch and `Fit`, which is legitimate
+  // markup growth, not a control escaping its gate. The distance was never the
+  // property; being in the ELSE branch is. So the two assertions below pin the
+  // branch itself: every camera control is after the `:`, and the degraded
+  // branch still contains the sentence that stands in for them.
   assert.match(
     preview,
-    /\{gl && !gl\.ok \? \([\s\S]{0,400}?\) : \([\s\S]{0,900}?data-testid="cad-preview-fit"/,
+    /\{gl && !gl\.ok \? \([\s\S]{0,400}?\) : \([\s\S]{0,3000}?data-testid="cad-preview-fit"/,
     'the CAD preview’s camera controls are no longer gated on there being a camera — ' +
       '`Fit` is back in the degraded state, where it cannot do anything',
+  );
+  // The named views are camera controls too, and they arrived after this test
+  // was written — a gate that only knew about `Fit` would have let four new dead
+  // controls into the degraded state without a word.
+  //
+  // ⚠ BY POSITION, NOT BY A REGEX WINDOW. The first attempt at this loop built a
+  // pattern with an alternation that could match the bare testid ANYWHERE in the
+  // file — a control that cannot fail, which is the thing this suite is about.
+  {
+    /* The OVERLAY branch, which is the second of the two `gl && !gl.ok` tests in
+     * this file — the first guards the absence panel. `lastIndexOf` rather than
+     * `indexOf`, or this measures the wrong branch and passes for the wrong
+     * reason. */
+    const branch = preview.lastIndexOf('{gl && !gl.ok ? (');
+    const elseAt = preview.indexOf(') : (', branch);
+    assert.ok(branch >= 0 && elseAt > branch, 'the degraded-state branch has been restructured — this check has gone blind');
+    /* ⚠ THE TESTIDS ARE BUILT, NOT WRITTEN: `data-testid={`cad-view-${v}`}`. A
+     * first version of this looked for the literal `cad-view-iso`, found -1 in
+     * the source, and "failed" on code that was correct — a check that cannot
+     * see its subject reports a defect in the subject. So it asserts the two
+     * things that ARE in the source, both after the `:`. */
+    for (const needle of ['cad-view-${v}', "['iso', 'top', 'front', 'right'] as ViewName[]"]) {
+      const at = preview.indexOf(needle);
+      assert.ok(at > elseAt, `the named-view controls are not inside the has-a-renderer branch (${needle})`);
+    }
+  }
+  // 🔴 AND THE DEGRADED BRANCH MUST STILL SAY SOMETHING. If the `:` branch ever
+  // swallowed the true branch, the regex above would still match and the
+  // operator would get a blank corner.
+  assert.match(
+    preview,
+    /\{gl && !gl\.ok \? \([\s\S]{0,400}?Nothing this app has produced has ever been cut/,
+    'the degraded state no longer carries its one sentence',
+  );
+
+  // 🔴 THE CORNER GIZMO IS A CAMERA CONTROL AND IS GATED THE SAME WAY. Six
+  // clickable axis ends with no camera behind them is six dead controls, which
+  // is the failure this whole block exists to stop — and it is a NEW surface, so
+  // nothing else here would have noticed.
+  assert.match(
+    preview,
+    /\{gl\?\.ok \? <CornerGizmo/,
+    'the corner gizmo renders without a renderer — every one of its ends would be a dead control',
   );
 
   // And nothing invents a probe value in the degraded state. Every probe is

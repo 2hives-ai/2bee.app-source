@@ -223,6 +223,107 @@ test('a non-ASCII character is refused rather than silently costing extra bytes'
   assert.throws(() => encodeLine('G0 X0 ( 12° )'), /non-ASCII/);
 });
 
+test('🔴 a failed write ends the stream — nothing after the hole goes out', async () => {
+  /* The write rejection used to escape `pump()` with the line counted as sent
+   * and the stream still running; the next `ok` resumed from the line AFTER
+   * the lost one. A lost `G0 Z20` retract put the following XY rapid at Z5. */
+  const wire: string[] = [];
+  let n = 0;
+  const rx: { deliver: (c: Uint8Array) => void } = { deliver: () => undefined };
+  const link = {
+    async write(bytes: Uint8Array) {
+      n += 1;
+      if (n === 2) throw new Error('transient write failure');
+      wire.push(String.fromCharCode(...bytes).trimEnd());
+    },
+    onData(cb: (c: Uint8Array) => void) {
+      rx.deliver = cb;
+      return () => undefined;
+    },
+    async close() {},
+  };
+  const streamer = new Streamer({
+    lines: ['G0 Z5', 'G0 Z20', 'G0 X100 Y100', 'G1 Z-3 F300'],
+    mode: 'send-response',
+    rxBufferSize: null,
+  });
+  const pump = new StreamPump({ link, streamer });
+  pump.attach();
+  await pump.pump();
+  for (let k = 0; k < 3; k++) {
+    rx.deliver(new Uint8Array([0x6f, 0x6b, 0x0a]));
+    await settle();
+  }
+  assert.deepEqual(wire, ['G0 Z5'], 'lines after the failed write reached the wire');
+  assert.equal(pump.state, 'aborted');
+});
+
+test('🔴 a soft reset ends the stream even when no ALARM comes back', async () => {
+  /* At rest grblHAL answers 0x18 with a banner and no ALARM, so the streamer
+   * never heard. It kept lines outstanding, and the next `ok` resumed the
+   * program mid-way with the spindle off. */
+  const written: number[][] = [];
+  const link = {
+    async write(bytes: Uint8Array) {
+      written.push([...bytes]);
+    },
+    onData: () => () => undefined,
+    async close() {},
+  };
+  const streamer = new Streamer({
+    lines: ['G0 X1', 'G0 X2', 'G0 X3'],
+    mode: 'send-response',
+    rxBufferSize: null,
+  });
+  const pump = new StreamPump({ link, streamer });
+  await pump.pump();
+  assert.equal(pump.state, 'streaming');
+  await pump.realtime('reset');
+  assert.equal(pump.state, 'aborted', 'the stream outlived the reset');
+  pump.accept('ok');
+  await pump.pump();
+  const lines = written.filter((b) => b.length > 1).length;
+  assert.equal(lines, 1, `an ok after the reset fed ${lines - 1} more line(s)`);
+});
+
+test('🔴 Stop mid-batch: no line after the Stop reaches the wire, and `sent` counts only what left', async () => {
+  /* The pump writes a batch line by line, awaiting each write. It used to
+   * write the whole batch whatever happened between two of those awaits, so
+   * a Stop pressed mid-batch still put the rest of the batch on the wire. */
+  const written: string[] = [];
+  let pump: StreamPump | null = null;
+  const link = {
+    async write(bytes: Uint8Array) {
+      written.push(String.fromCharCode(...bytes).trimEnd());
+      if (written.length === 2) pump?.stop('operator pressed Stop');
+    },
+    onData: () => () => undefined,
+    async close() {},
+  };
+  const streamer = new Streamer({
+    lines: ['G0 X1', 'G0 X2', 'G0 X3', 'G0 X4', 'G0 X5'],
+    mode: 'character-counting',
+    rxBufferSize: 128,
+  });
+  pump = new StreamPump({ link, streamer });
+  await pump.pump();
+  assert.deepEqual(written, ['G0 X1', 'G0 X2'], 'lines after the Stop went out');
+  assert.equal(pump.state, 'aborted');
+  assert.equal(pump.sent, 2, '`sent` counts lines that never left');
+});
+
+test('a realtime or control byte inside a line is refused — grblHAL acts on it even in a comment', () => {
+  /* `~` resumes a held feed, `!` holds it, 0x18 soft-resets. The serial layer
+   * acts on them before the line parser sees the comment around them, so a
+   * part named `PANEL~1!` would hold and resume the machine mid-program. */
+  for (const line of ['(PANEL~1)', 'G0 X0 (stop!)', '(what?)', 'G0 X0\x18', 'G1\tX1']) {
+    assert.throws(() => encodeLine(line), /realtime or control byte/, JSON.stringify(line));
+  }
+  for (const line of ['$I', '$$', '$J=G91 X1 F100', '(D6 - 3x2 _v2_)']) {
+    assert.doesNotThrow(() => encodeLine(line), line);
+  }
+});
+
 test('RUN-4 — a realtime command goes out as ONE byte, not as UTF-8', async () => {
   const fake = new FakeController('healthy');
   const pump = new StreamPump({
@@ -549,6 +650,15 @@ export function markerProblems(svg: string): string[] {
   if (shapeOf(measured) === shapeOf(predicted)) problems.push('same shape');
   return problems;
 }
+
+test('the progress canvas draws a 300,000-point program (bounds were Math.min(...path), RangeError past ~120k)', () => {
+  // bughunt 2026-11-15: spreading the path into Math.min/max passed one argument per point.
+  const n = 300_000;
+  const path = Array.from({ length: n }, (_, i) => ({ x: (i % 1000) * 0.5, y: Math.floor(i / 1000) * 2, z: -1, feed: 1200, rapid: false, line: i }));
+  const big: RunProgram = { ...PROGRAM, name: 'sheet', lines: path.map((_, i) => `G1 X${i}`), path };
+  const svg = renderToStaticMarkup(h(ProgressCanvas, { program: big, matched: 10, predicted: 20 }));
+  assert.match(svg, /<svg/);
+});
 
 test('RUN-17 — the predicted and measured markers differ in fill AND in shape', () => {
   const svg = renderToStaticMarkup(
@@ -1880,4 +1990,24 @@ test('🔴 the verdict is sticky across reports, and a reconnect is what clears 
   artefact.feed('Idle', 1024);
   artefact.feed('Idle', 1024 - RING_ARTEFACT_CHARS);
   assert.equal(artefact.tracked.portOwnership, 'no-disagreement');
+});
+
+test('the fake holds at EACH M0 like grblHAL: no ok and no further line until Resume (two M0s a comment apart need two)', async () => {
+  // bughunt 2026-11-15: the fake answered M0 at once and kept executing while held, so a tool change
+  // followed by "set Z zero by hand" was released by ONE Resume (e2e J9 hung on the second takeover).
+  const f = new FakeController('healthy', { bannerOnConnect: false });
+  const got: string[] = [];
+  f.onData((c) => got.push(...new TextDecoder().decode(c).split(/\r?\n/).filter(Boolean)));
+  const oks = () => got.filter((l) => l === 'ok').length;
+  await f.write(new TextEncoder().encode('G0 Z5\nM0\n( SET Z ZERO -> T2 )\nM0\nG0 Z10\n'));
+  assert.equal(oks(), 1, 'only G0 Z5 answered; the M0 owes its ok until Resume');
+  await f.write(new Uint8Array([0x7e]));
+  assert.equal(oks(), 3, 'Resume answers the first M0 and the comment, then holds on the second M0');
+  await f.write(new Uint8Array([0x7e]));
+  assert.equal(oks(), 5, 'the second Resume releases the rest');
+  // A soft reset drops the owed ok with the buffer.
+  await f.write(new TextEncoder().encode('M0\nG0 Z1\n'));
+  await f.write(new Uint8Array([0x18]));
+  await f.write(new TextEncoder().encode('G0 Z2\n'));
+  assert.equal(got.filter((l) => l === 'ok').length, 6, 'after reset the parser runs again');
 });

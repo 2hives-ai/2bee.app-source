@@ -66,7 +66,7 @@ import {
   type WorkerCommand,
   type WorkerEvent,
 } from './transport';
-import { Streamer, realtimeBytes } from './protocol';
+import { LineAssembler, Streamer, realtimeBytes } from './protocol';
 
 /** How long without a resolved write before the window is told (ms). */
 const STALL_WARN_MS = 750;
@@ -158,15 +158,15 @@ async function attach(cmd: Extract<WorkerCommand, { t: 'attach' }>): Promise<voi
   // 🔴 Reader first, then anything else (design §11). A banner that arrives
   // while nobody is reading is lost, and its absence is then indistinguishable
   // from a board that is not grblHAL at all.
+  // 🔴 The window CLASSIFIES these lines (ALARM, error, status), so they must
+  // be whole lines. This used to split each chunk on newlines with no carry,
+  // and a serial read ends wherever the USB packet ends: `ALAR` + `M:1` arrived
+  // as two lines, neither classified as an alarm, and the window kept trusting
+  // a position the controller had just told it was lost. Same assembler the
+  // pump uses, one per connection.
+  const consoleLines = new LineAssembler();
   l.onData((chunk) => {
-    // Framing and classification happen inside the pump, which owns
-    // `./protocol`'s LineAssembler. This listener exists only to give the window
-    // the raw bytes for the console — decoded here, never re-framed.
-    let text = '';
-    for (const b of chunk) text += String.fromCharCode(b);
-    for (const line of text.split(/\r?\n/)) {
-      if (line.length) post({ t: 'line', line, at: Date.now() });
-    }
+    for (const line of consoleLines.push(chunk)) post({ t: 'line', line, at: Date.now() });
     checkStall();
   });
   l.onFailure((failure) => {
@@ -230,6 +230,16 @@ async function handle(cmd: WorkerCommand): Promise<void> {
               'This is a defect in this app, not a machine fault — connect first.',
           },
         });
+        return;
+      }
+      // 🔴 Never replace a pump that is still streaming: its lines are in the
+      // controller's RX buffer and their `ok`s would be credited to the new
+      // one. The window refuses this first (`RunTab.tsx` startJob); this is the
+      // second wall, and it leaves the running stream exactly as it was. It
+      // posts no `line`: that channel is the CONTROLLER's, and a message of
+      // ours on it would be classified as something the board said.
+      if (pump && pump.state === 'streaming') {
+        publishStream();
         return;
       }
       pump?.detach();

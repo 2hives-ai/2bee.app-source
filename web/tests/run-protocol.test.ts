@@ -785,7 +785,7 @@ test('🔴 PLANT overcount, driven end to end — the fake records the overrun a
 });
 
 test('a status report arriving mid-stream decrements nothing', () => {
-  const s = new Streamer({ lines: program(4), mode: 'character-counting', rxBufferSize: 1024 });
+  const s = new Streamer({ lines: program(4), mode: 'character-counting', rxBufferSize: 26 });
   s.nextLines();
   const before = s.pendingChars;
   s.onReply(classifyInbound('<Run|MPos:1.000,2.000,3.000|Bf:35,900>'));
@@ -797,7 +797,7 @@ test('a status report arriving mid-stream decrements nothing', () => {
 });
 
 test('PLANT count-status-as-ok, at the streamer — a report acknowledges a line that was never answered', () => {
-  const s = new Streamer({ lines: program(4), mode: 'character-counting', rxBufferSize: 1024 });
+  const s = new Streamer({ lines: program(4), mode: 'character-counting', rxBufferSize: 26 });
   s.nextLines();
   s.onReply(classifyInbound('<Run|MPos:1.000,2.000,3.000>', 'count-status-as-ok'));
   assert.equal(s.acknowledged, 1, 'the plant credits an acknowledgement nobody sent');
@@ -2121,10 +2121,13 @@ test('the desync abort names the second writer, because that is what produces it
    * on one tty split the bytes. The symptom this tab sees is an `ok` with
    * nothing outstanding — and until 2026-08-11 the message described the
    * symptom and named no cause an operator could act on. */
-  const s = new Streamer({ lines: program(2), mode: 'character-counting', rxBufferSize: 1024 });
-  s.nextLines();
-  s.onReply(classifyInbound('ok'));
-  s.onReply(classifyInbound('ok'));
+  /* MID-STREAM, with lines still to send: that is where an extra reply can
+   * corrupt the count. (Since 2026-11-14 a stream that is already `done`
+   * ignores replies — after the end they belong to the console, jogs, `$H`.) */
+  const s = new Streamer({ lines: program(4), mode: 'character-counting', rxBufferSize: 26 });
+  const first = s.nextLines().length;
+  for (let i = 0; i < first; i++) s.onReply(classifyInbound('ok'));
+  assert.equal(s.state, 'streaming', 'the stream ended before the extra reply could be tested');
   s.onReply(classifyInbound('ok'));            // one more than we sent
   assert.equal(s.state, 'aborted');
   assert.equal(s.abort?.reason, 'desync');
@@ -2179,5 +2182,31 @@ test('a foreign writer really does overrun the controller under a correct stream
   /* And nothing on the wire says so. grblHAL sets `rxbuf.overflow = 1`
    * (`usb_serial.c:258`) — a flag written in four places and read in none. */
   assert.equal(s.state, 'streaming', 'the sender has no idea: no error, no alarm, no report field');
+  assert.equal(s.abort, null);
+});
+
+// Added 2026-10-14: the consent probe's `$I` reply ends with `[FIRMWARE:grblHAL]`
+// (grblHAL report.c:1056). A running board that sends no banner must still be
+// identified as grblHAL from it — e2e/journey-router.spec.ts found it was not.
+test('identify: [FIRMWARE:grblHAL] in the $I reply is grblHAL, and grbl 1.1 output is not', () => {
+  const v = identify(['[VER:1.1f.20260811:]', '[OPT:VNMHTL,35,1024,3,0]', '[FIRMWARE:grblHAL]', 'ok']);
+  assert.equal(v.verdict, 'grblHAL');
+  assert.match(v.evidence, /FIRMWARE:grblHAL/);
+  const g = identify(['[VER:1.1h.20190825:]', '[OPT:V,15,128]', 'ok']);
+  assert.notEqual(g.verdict, 'grblHAL');
+});
+
+test('🔴 a finished stream stays finished when the console’s `ok` arrives after it', () => {
+  /* The pump stays attached after `done`. The first `ok` to a `$$`, a jog or
+   * `$H` used to land here with nothing outstanding and turn a completed job
+   * into `aborted:desync` — and the tab answered with a feed hold. */
+  const s = new Streamer({ lines: program(2), mode: 'character-counting', rxBufferSize: 1024 });
+  s.nextLines();
+  s.onReply(classifyInbound('ok'));
+  s.onReply(classifyInbound('ok'));
+  assert.equal(s.state, 'done');
+  s.onReply(classifyInbound('ok'));            // the console's `$$`
+  s.onReply(classifyInbound('ALARM:2'));       // and anything after it
+  assert.equal(s.state, 'done', 'a reply after the end rewrote a finished job');
   assert.equal(s.abort, null);
 });

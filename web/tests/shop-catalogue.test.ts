@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { byFamily, loadCatalogue, loadDesign, trustLine, type ShopEntry } from '../src/shop/catalogue.ts';
+import { byFamily, loadCatalogue, loadDesign, trustLine, trustShort, type ShopEntry } from '../src/shop/catalogue.ts';
 
 function entry(p: Partial<ShopEntry> = {}): ShopEntry {
   return {
@@ -19,7 +19,7 @@ function entry(p: Partial<ShopEntry> = {}): ShopEntry {
 }
 
 const ok = (body: unknown): typeof fetch =>
-  (async () => ({ ok: true, status: 200, json: async () => body })) as unknown as typeof fetch;
+  (async () => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) })) as unknown as typeof fetch;
 
 test('a 404 is ABSENT with a reason, never an empty catalogue', async () => {
   const f = (async () => ({ ok: false, status: 404 })) as unknown as typeof fetch;
@@ -88,4 +88,39 @@ test('a non-trusted card QUOTES the mesher, it does not paraphrase the verdict',
 
   assert.match(trustLine(entry({ trust: 'trusted' })), /closed|manifold/);
   assert.ok(trustLine(entry({ trust: 'nothing', trustDetail: '' })).length > 0, 'never empty');
+});
+
+test('the card line is an EXCERPT of the verdict, never a paraphrase — and never empty off trusted', () => {
+  // Founder 2026-10-12, "too many words". The card shows a short line and keeps
+  // the full sentence in its tooltip. The short line must be cut FROM the
+  // mesher's words, for the reason trustLine gives: a paraphrase drifts silently.
+  const real = [
+    'Every solid drawn is watertight and manifold — but 3 construct(s) were REFUSED (0 by the parser, 3 by the kernel) and are missing from this picture entirely. What you see is a subset of the model, so it is not the part.',
+    'Every solid drawn is watertight and manifold, and nothing was refused — but 1 construct(s) did not draw what the source describes (difference()). Watertight is a statement about the MESH.',
+    '🔴 At least one solid is non-manifold: an edge shared by three or more faces. Do not cut from this.',
+    'Only 2D shapes were produced. They are drawn as zero-thickness plates.',
+  ];
+  const want = [
+    '3 construct(s) were REFUSED and are missing from this picture entirely.',
+    '1 construct(s) did not draw what the source describes (difference()).',
+    '🔴 At least one solid is non-manifold',
+    'Only 2D shapes were produced.',
+  ];
+  real.forEach((detail, i) => {
+    const s = trustShort(entry({ trust: 'suspect', trustDetail: detail }));
+    assert.equal(s, want[i]);
+    // Every word of the excerpt is in the source sentence, in order.
+    const words = s.split(/\s+/);
+    let at = 0;
+    for (const w of words) {
+      const j = detail.indexOf(w, at);
+      assert.ok(j >= 0, `"${w}" is not in the mesher's own words`);
+      at = j + w.length;
+    }
+  });
+  assert.equal(trustShort(entry({ trust: 'trusted' })), '');
+  assert.ok(trustShort(entry({ trust: 'suspect', trustDetail: '' })).length > 0, 'never empty');
+  // PLANT, by hand: a cause the mesher adds later, with no preamble and no
+  // sentence end, is quoted whole rather than dropped.
+  assert.equal(trustShort(entry({ trust: 'untrusted', trustDetail: 'a new cause' })), 'a new cause');
 });

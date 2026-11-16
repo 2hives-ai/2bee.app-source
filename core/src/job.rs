@@ -39,6 +39,15 @@ pub struct Job {
     pub clamp_phases: Option<Vec<crate::fixture::ClampPhase>>,
     /// Re-probe Z after a work-holding change. Default true.
     pub probe_after_clamp_change: bool,
+    /// When a cut crosses a declared clamp, split the job into two clamping
+    /// phases with a pause between them (`crate::reclamp`) instead of leaving
+    /// it refused. **Default false** — a host opts in. Ignored when
+    /// `clamp_phases` is declared by hand: those are the operator's.
+    ///
+    /// ⚠ It never lets a cut through a clamp. Every phase is still checked
+    /// against its own clamp set and the hold-down check reads the emitted
+    /// program against the set in force at each move.
+    pub auto_reclamp: bool,
     pub operations: Vec<Operation>,
     /// Re-probe Z after every tool change. Default **true**: skipping it is a
     /// deliberate choice with a physical consequence, not a default.
@@ -121,6 +130,28 @@ pub struct Job {
     /// it is a defect with a checkbox.
     pub plant_ignores_drawing_offset: bool,
 
+    /// 🔴 **NEGATIVE-CONTROL KNOB. Every real job leaves this at `false`.**
+    ///
+    /// Makes the re-clamp plan FORGET TO MOVE THE CLAMPS: the second phase is
+    /// given the first phase's clamp set, so the emitted program pauses, tells
+    /// nobody to move anything, and then cuts straight through the clamp the
+    /// pause existed to clear. The per-phase fixture check must refuse it and
+    /// the `reclamp_*` tests reading the emitted program must go red. Reachable
+    /// from no config, no CLI flag and no UI control.
+    pub plant_reclamp_keeps_clamps: bool,
+
+    /// 🔴 **NEGATIVE-CONTROL / COMPARISON KNOB. Real jobs leave it `false`.**
+    /// Plans the phased job with NO stop optimisation — no boundary reorder,
+    /// no merged clamp+cutter stop — so a test can count the `M0`s the
+    /// optimisation saves in the EMITTED program rather than in the plan.
+    pub plant_interventions_unoptimised: bool,
+
+    /// 🔴 **NEGATIVE-CONTROL KNOB. Real jobs leave it `false`.** Lets the
+    /// boundary reorder ignore the release order, so a part's outline can be
+    /// moved before its own hole. The cross-sequence release check must
+    /// refuse the result.
+    pub plant_reorder_ignores_release: bool,
+
     /// **Leave an outline edge that lies on the workpiece edge UNCUT.**
     ///
     /// 🔴 **DEFAULT `false`, and that is not timidity.** Turning it on changes
@@ -172,6 +203,7 @@ impl Job {
             fixturing: Fixturing::default(),
             clamp_phases: None,
             probe_after_clamp_change: true,
+            auto_reclamp: false,
             operations: Vec::new(),
             probe_after_toolchange: true,
             material: Material::Plywood,
@@ -182,6 +214,9 @@ impl Job {
             drawing_offset_x_mm: 0.0,
             drawing_offset_y_mm: 0.0,
             plant_ignores_drawing_offset: false,
+            plant_reclamp_keeps_clamps: false,
+            plant_interventions_unoptimised: false,
+            plant_reorder_ignores_release: false,
             use_workpiece_edge: false,
             workpiece_edge_tolerance_mm: DEFAULT_WORKPIECE_EDGE_TOLERANCE_MM,
         }
@@ -627,6 +662,30 @@ pub struct JobResult {
     ///
     /// 🔴 Nothing in this crate applies one. See [`OfferedFix`].
     pub offered_fixes: Vec<OfferedFix>,
+    /// The clamping phases the program was planned with — declared by hand or
+    /// planned by [`crate::reclamp`]. **Empty = one phase**, the clamps are
+    /// `job.fixturing` throughout.
+    pub clamp_phases: Vec<crate::fixture::ClampPhase>,
+    /// What the operator moves at the pause, when the phases were planned by
+    /// [`crate::reclamp`]. Empty for hand-declared phases (their note is the
+    /// instruction) and for a single-phase job.
+    pub clamp_moves: Vec<crate::reclamp::ClampMove>,
+    /// Operator stops as PLANNED (all zero on a job with no clamp move). The
+    /// emitted program's own count is `summary.tool_changes` (every `M0`).
+    pub interventions: InterventionCounts,
+}
+
+/// Operator stops in a job that moves its clamps, by kind.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InterventionCounts {
+    pub cutter: usize,
+    pub clamps: usize,
+    /// Clamp moves made at the same stop as a cutter change.
+    pub merged: usize,
+    /// `cutter + clamps - merged`: the `M0`s a person meets.
+    pub stops: usize,
+    /// What the stops would have been without merging.
+    pub stops_unmerged: usize,
 }
 
 impl JobResult {
@@ -867,11 +926,29 @@ fn summarize_program(gcode: &str, machine: &Machine) -> Emitted {
      * first for both. */
     let mut feed_rejected = false;
 
+    // The `M0` after a `( SET Z ZERO -> … )` comment is the SECOND stop of a
+    // cutter change already charged at its first stop — not another change.
+    let zero_comment = format!("( {}", crate::setup::ZERO_PREFIX.trim_end());
+    let mut zero_stop_next = false;
+    // The `M0` after a `( TOUCH PLATE -> … )` comment is a person lifting the
+    // plate off the work after a probe — no cutter changes, so no change charge.
+    let plate_comment = format!("( {}", crate::setup::PLATE_PREFIX.trim_end());
+    let mut plate_stop_next = false;
     for raw in gcode.lines() {
+        if raw.trim_start().starts_with(&zero_comment) {
+            zero_stop_next = true;
+            continue;
+        }
+        if raw.trim_start().starts_with(&plate_comment) {
+            plate_stop_next = true;
+            continue;
+        }
         let line = strip_comment(raw);
         if line.trim().is_empty() {
             continue;
         }
+        let zero_stop = std::mem::take(&mut zero_stop_next);
+        let plate_stop = std::mem::take(&mut plate_stop_next);
         let words = block_words(&line);
         let get = |l: char| words.iter().rev().find(|(c, _)| *c == l).map(|(_, v)| *v);
         /* Set when the `F` arm below has already named this block's F word, so
@@ -1315,6 +1392,27 @@ fn summarize_program(gcode: &str, machine: &Machine) -> Emitted {
                 // The manual tool change. Position in XY is unchanged — nothing
                 // moved — but Z is now referenced to a DIFFERENT tool length, so
                 // it is unknown until the re-probe writes a new WCS.
+                0 if zero_stop => {
+                    // Operator time with no rate anyone declared or measured:
+                    // not charged, and SAID not to be.
+                    e.name_blind_spot(
+                        "setting Z zero by hand after a cutter change (no Z probe) — a person's \
+                         time no rate covers",
+                    );
+                    // The person jogged to touch off: X, Y and Z are all theirs.
+                    x = None;
+                    y = None;
+                    z = None;
+                }
+                0 if plate_stop => {
+                    e.name_blind_spot(
+                        "taking the touch plate off the work after a probe — a person's time no \
+                         rate covers",
+                    );
+                    x = None;
+                    y = None;
+                    z = None;
+                }
                 0 => {
                     e.pauses += 1;
                     // The DECLARED rate — resolved once at the top of this
@@ -1408,6 +1506,46 @@ fn collet_program_comment(
         // a comment nobody can ever read is not a warning.
         (ColletVerdict::TooLarge { .. } | ColletVerdict::TooSmall { .. }, _) => None,
     }
+}
+
+/// Where the program stops for a cutter change on a machine with no Z probe:
+/// over a corner of the workpiece, at safe Z, where a person can reach the
+/// collet and where no clamp stands (checked against EVERY clamp the job
+/// declares, in every phase, widened by the largest cutter radius).
+///
+/// ⚠ The machine model has no declared tool-change position, so none is
+/// used: a position in MACHINE coordinates would need `G53`, which this post
+/// does not emit and nothing here has verified on the controller. The
+/// workpiece corner is in work coordinates, like every other move.
+fn manual_change_position(
+    job: &Job,
+    phases: &Option<Vec<crate::fixture::ClampPhase>>,
+    groups: &[(Tool, Vec<Operation>)],
+) -> Result<(f64, f64, &'static str), String> {
+    let r = groups.iter().map(|(t, _)| t.radius_mm()).fold(0.0_f64, f64::max);
+    let mut clamps: Vec<&crate::fixture::Clamp> = job.fixturing.clamps.iter().collect();
+    if let Some(ph) = phases {
+        for p in ph {
+            clamps.extend(p.clamps.iter());
+        }
+    }
+    let (sx, sy) = (job.stock.size_x_mm, job.stock.size_y_mm);
+    let corners = [
+        ((0.0, 0.0), "the workpiece's first corner"),
+        ((sx, 0.0), "the workpiece's second corner"),
+        ((0.0, sy), "the workpiece's fourth corner"),
+        ((sx, sy), "the workpiece's third corner"),
+    ];
+    for ((x, y), name) in corners {
+        let (px, py) = job.stock.place(x, y);
+        if !clamps.iter().any(|c| c.contains(px, py, r)) {
+            return Ok((px, py, name));
+        }
+    }
+    Err("a cutter change on a machine with no Z probe stops over a workpiece corner so you can \
+         reach the collet and set Z zero by hand — and a clamp stands on every corner of this \
+         workpiece. Move a clamp off one corner"
+        .into())
 }
 
 /// Plan the whole job.
@@ -1574,6 +1712,27 @@ pub fn plan_job(job: &Job) -> JobResult {
             ));
             op.params.depth_per_pass_mm = max_doc;
         }
+        // 🔴 ...AND THE PECK, which is the depth per pass of a drill cycle. The
+        // clamp above was reported for drill ops too ("reduced to 0.90mm — Aluminium
+        // will not take a deeper cut") while G83 still carried Q4.000: 4.4x what
+        // the note said, and the operator told it was limited.
+        // Clamped on every op (the value must never be emitted unclamped), but
+        // SAID only where a peck reaches the program: a drill op, or the corner
+        // reliefs a profile bores with the same cycle.
+        let pecks = op.params.op_type == OpType::Drill || op.params.dogbone != DogboneStyle::None;
+        if op.params.peck_depth_mm > max_doc && pecks {
+            res.notes.push(format!(
+                "{}: peck depth reduced from {:.2} to {:.2}mm — {} will not take a deeper \
+                 cut with a {:.2}mm tool",
+                op.name,
+                op.params.peck_depth_mm,
+                max_doc,
+                m.as_str(),
+                op.tool.diameter_mm
+            ));
+            op.params.peck_depth_mm = max_doc;
+        }
+        op.params.peck_depth_mm = op.params.peck_depth_mm.min(max_doc);
         if op.params.rpm > m.max_rpm() {
             res.notes.push(format!(
                 "{}: spindle reduced from {:.0} to {:.0} rpm — above that, {} welds to the flutes",
@@ -1794,10 +1953,103 @@ pub fn plan_job(job: &Job) -> JobResult {
     // translation, so it cannot change which order is shortest, and reporting the
     // travel in machine coordinates keeps this number in the same frame as every
     // other number in the report.
-    let (ops, route) = optimise_route_with(ops, job.group_order);
+    // ---- re-clamping mid-job (founder 2026-10-16) ---------------------------
+    //
+    // A cut that crosses a clamp is NEVER cut through it. With `auto_reclamp`
+    // on, the job is split instead: phase 1 cuts what is clear of the clamps as
+    // fitted, the program pauses (`MoveKind::ClampChange` -> retract, M5,
+    // comment, M0), the operator moves the named clamps, phase 2 cuts the rest.
+    // `crate::reclamp` chooses the positions and states every rule they meet;
+    // the per-phase fixture check and the phased hold-down check below are
+    // what VERIFY the emitted program, and either still refuses it.
+    let mut auto_plan: Option<crate::reclamp::ReclampPlan> = None;
+    if job.auto_reclamp && job.clamp_phases.as_ref().map_or(true, |p| p.is_empty()) {
+        match crate::reclamp::plan_reclamp(
+            &ops,
+            &job.fixturing,
+            &job.machine,
+            &job.stock,
+            edge_rule.as_ref(),
+        ) {
+            crate::reclamp::Reclamp::Planned(mut p) => {
+                if job.plant_reclamp_keeps_clamps && p.phases.len() > 1 {
+                    let first = p.phases[0].clamps.clone();
+                    p.phases[1].clamps = first;
+                }
+                if p.op_phase.iter().any(|ph| *ph == 0) {
+                    auto_plan = Some(p);
+                } else {
+                    // Every operation waits for the move: there is nothing to
+                    // cut before it, so a pause would only ask the operator to
+                    // fit the clamps twice. Said, not planned.
+                    res.notes.push(format!(
+                        "re-clamping mid-job was not planned: EVERY operation runs under the                          clamps as fitted, so there is nothing to cut before moving them. Fit                          them where the move would put them instead — {}",
+                        crate::reclamp::instruction(&p.moves)
+                    ));
+                }
+            }
+            crate::reclamp::Reclamp::Impossible(why) => res.notes.push(format!(
+                "re-clamping mid-job was tried and no plan meets its rules: {why}"
+            )),
+            crate::reclamp::Reclamp::NotNeeded => {}
+        }
+    }
+    let clamp_phases: Option<Vec<crate::fixture::ClampPhase>> = match &auto_plan {
+        Some(p) => Some(p.phases.clone()),
+        // 🔴 An EMPTY phase list declares no work-holding at all. It was taken as
+        // "phased", `phases.get(0)` found nothing, and no clamp was checked —
+        // not even the "nothing declared" warning — while `clamps` stayed in
+        // `fixturing` for the hold-down check (bughunt 2026-11-15: a full-depth
+        // cut through a 40mm clamp, rc=0). It is the single-phase path now.
+        None => job.clamp_phases.clone().filter(|p| !p.is_empty()),
+    };
 
-    // Group by tool, preserving the caller's ordering within each group.
-    let groups = crate::toolpath::group_by_tool(ops);
+    // Route ordering runs PER PHASE when the phases were planned from the
+    // geometry: an operation may not cross the pause in either direction, and
+    // the phase-2 operations are exactly the ones that cannot run before it.
+    let mut routes: Vec<RouteReport> = Vec::new();
+    let (groups, group_phase) = if let Some(plan) = &auto_plan {
+        let mut g: Vec<(Tool, Vec<Operation>)> = Vec::new();
+        let mut gp: Vec<usize> = Vec::new();
+        for ph in 0..plan.phases.len() {
+            let sub: Vec<Operation> = ops
+                .iter()
+                .zip(&plan.op_phase)
+                .filter(|(_, p)| **p == ph)
+                .map(|(o, _)| o.clone())
+                .collect();
+            if sub.is_empty() {
+                continue;
+            }
+            let (sub, route) = optimise_route_with(sub, job.group_order);
+            routes.push(route);
+            for grp in crate::toolpath::group_by_tool(sub) {
+                g.push(grp);
+                gp.push(ph);
+            }
+        }
+        // 🔴 FEWER STOPS: make the cutter at the end of one phase the cutter
+        // at the start of the next, when a release-safe reorder allows it —
+        // then the clamp move needs no cutter change beside it.
+        let before = crate::reclamp::cutter_changes(&g);
+        if !job.plant_interventions_unoptimised {
+            crate::reclamp::align_boundaries(&mut g, &gp, job.plant_reorder_ignores_release);
+        }
+        let after = crate::reclamp::cutter_changes(&g);
+        if after < before {
+            res.notes.push(format!(
+                "cutter changes {before} -> {after}: the operations either side of the clamp \
+                 move were reordered so one cutter carries across it. No part is released \
+                 before its own interior work"
+            ));
+        }
+        (g, Some(gp))
+    } else {
+        let (ops, route) = optimise_route_with(ops, job.group_order);
+        routes.push(route);
+        // Group by tool, preserving the caller's ordering within each group.
+        (crate::toolpath::group_by_tool(ops), None)
+    };
 
     // ---- multi-phase clamping ------------------------------------------------
     //
@@ -1809,9 +2061,15 @@ pub fn plan_job(job: &Job) -> JobResult {
     // The fixture check runs PER PHASE against that phase's clamps. The global
     // `fixturing.clamps` is ignored when phases are present — the phases carry
     // their own clamp sets.
-    let phase_count = job.clamp_phases.as_ref().map_or(1, |p| p.len().max(1));
+    let phase_count = clamp_phases.as_ref().map_or(1, |p| p.len().max(1));
     let phase_of_group = |gi: usize| -> usize {
-        if phase_count <= 1 { 0 } else { gi * phase_count / groups.len() }
+        if let Some(gp) = &group_phase {
+            gp[gi]
+        } else if phase_count <= 1 {
+            0
+        } else {
+            gi * phase_count / groups.len()
+        }
     };
     // Validate: each phase must have at least one group.
     if phase_count > 1 && groups.len() < phase_count {
@@ -1827,7 +2085,7 @@ pub fn plan_job(job: &Job) -> JobResult {
         return res;
     }
     // Validate: no empty clamp sets.
-    if let Some(phases) = &job.clamp_phases {
+    if let Some(phases) = &clamp_phases {
         for (i, phase) in phases.iter().enumerate() {
             if phase.clamps.is_empty() {
                 res.refusals.push(Refusal {
@@ -1844,19 +2102,91 @@ pub fn plan_job(job: &Job) -> JobResult {
         }
     }
 
+    // ---- the final operation order honours "interior before release" -----
+    //
+    // 🔴 Checked on the SEQUENCE THAT WILL BE EMITTED, across the pause. The
+    // route module checks its own output per call; the phase split and the
+    // boundary reorder above happen outside it, so this is where a part cut
+    // free before its own hole would otherwise go unrefused.
+    {
+        let seq: Vec<Operation> = groups.iter().flat_map(|(_, o)| o.iter().cloned()).collect();
+        for why in crate::reclamp::release_order_violations(&seq) {
+            res.refusals.push(Refusal { what: job.name.clone(), why });
+        }
+    }
+
     let mut moves: Vec<Move> = vec![Move::comment(format!("job: {}", job.name))];
     let mut used: Vec<String> = Vec::new();
     let mut current_phase: Option<usize> = None;
+    // Operator stops, counted as they are PLANNED here and reported against
+    // the counterfactual; the summary's `tool_changes` stays the count of
+    // `M0` in the EMITTED program, which is the number that reaches a person.
+    let (mut stops_cutter, mut stops_clamp, mut stops_merged) = (0usize, 0usize, 0usize);
+    let mut merged_probe = false;
 
+    let mut spun_at: Option<f64> = None;
     for (gi, (tool, ops)) in groups.iter().enumerate() {
         // ---- phase boundary --------------------------------------------------
         let phase_idx = phase_of_group(gi);
-        let phase_changed = current_phase.map_or(true, |p| p != phase_idx);
+        // 🔴 A BOUNDARY IS BETWEEN TWO PHASES, never before the first one.
+        // This read `map_or(true, …)` until 2026-10-16, so the first group of
+        // every phased program opened with a CLAMP CHANGE pause — and the
+        // per-phase fixture check below, which counts pauses to know which
+        // clamp set is in force, then checked phase 1's cuts against phase
+        // 2's clamps and every later phase against the next one's. Found by
+        // the first test that read a phased PROGRAM (`reclamp_*` tests);
+        // nothing had ever planned one.
+        let phase_changed = current_phase.is_some_and(|p| p != phase_idx);
+        current_phase = Some(phase_idx);
+        // 🔴 A CUTTER CHANGE ON A MACHINE WITH NO Z PROBE (founder 2026-10-16:
+        // *"change the different drilling tools are priority"*, on a machine
+        // with no probe too). The new cutter has a new length, so Z must be
+        // set again — by the person, since nothing on the machine can measure
+        // it. The program lifts, goes to a stated change position the person
+        // can reach, stops for the cutter, stops AGAIN for Z zero, and then
+        // lifts Z alone before it moves anywhere (`MoveKind::ManualZero`).
+        let cutter_changes_here = gi > 0 && groups[gi - 1].0.name != tool.name;
+        let manual_change = cutter_changes_here && !job.machine.probe_enabled;
+        if manual_change {
+            match manual_change_position(job, &clamp_phases, &groups) {
+                Ok((cx, cy, where_)) => {
+                    let safe = job.machine.safe_z_mm;
+                    // Straight up first, from wherever the last cut ended.
+                    if let Some(last) = moves.iter().rev().find(|m| {
+                        matches!(
+                            m.kind,
+                            MoveKind::Rapid | MoveKind::Feed | MoveKind::ArcCW | MoveKind::ArcCCW | MoveKind::DrillCycle
+                        )
+                    }) {
+                        let (lx, ly) = (last.to.x, last.to.y);
+                        moves.push(Move::rapid(crate::types::Vec3::new(lx, ly, safe)));
+                    }
+                    moves.push(Move::rapid(crate::types::Vec3::new(cx, cy, safe)));
+                    moves.push(Move::comment(format!(
+                        "change cutter: {} -> {}, then set Z zero by hand. Stopped at safe Z over \
+                         {where_}, X{cx:.1} Y{cy:.1}",
+                        groups[gi - 1].0.name, tool.name
+                    )));
+                }
+                Err(why) => {
+                    res.refusals.push(Refusal { what: tool.name.clone(), why });
+                    return res;
+                }
+            }
+        }
         if phase_changed && phase_count > 1 {
-            current_phase = Some(phase_idx);
-            let phase_label = if let Some(phases) = &job.clamp_phases {
+            let phase_label = if let Some(phases) = &clamp_phases {
                 if let Some(phase) = phases.get(phase_idx) {
-                    let label = format!("phase {} — {} clamp(s)", phase_idx, phase.clamps.len());
+                    // 1-based: this text is read by a person at the machine,
+                    // and "phase 1" for the SECOND setup is a misreading
+                    // waiting to happen.
+                    // No parentheses: the post rewrites them to `_`.
+                    let label = format!(
+                        "phase {} of {}, {} clamps",
+                        phase_idx + 1,
+                        phases.len(),
+                        phase.clamps.len()
+                    );
                     if let Some(note) = &phase.note {
                         format!("{label}: {note}")
                     } else {
@@ -1868,10 +2198,44 @@ pub fn plan_job(job: &Job) -> JobResult {
             } else {
                 format!("phase {phase_idx}")
             };
+            let tool_changes_here = gi > 0 && groups[gi - 1].0.name != tool.name;
+            let merge = tool_changes_here && !job.plant_interventions_unoptimised;
+            // 🔴 A CLAMP-ONLY STOP ON A MACHINE WITH NO Z PROBE is ALLOWED,
+            // WITH A WARNING (founder 2026-10-16: *"have as a warning allow
+            // without z probe"*). The same cutter stays in the collet, so its
+            // length — and Z — are unchanged; what nothing can catch is a
+            // knocked cutter. The warning is written into the program, BEFORE
+            // the stop, where the person at the machine reads it.
+            let clamp_noprobe = !merge && job.probe_after_clamp_change && !job.machine.probe_enabled;
+            if clamp_noprobe {
+                moves.push(Move::comment(crate::setup::CLAMP_NO_ZCHECK));
+            }
             // Insert clamp-change boundary: retract, M5, comment, M0.
             // The post handles the actual G-code (MoveKind::ClampChange).
             moves.push(Move::clamp_change(&phase_label));
-            if job.probe_after_clamp_change {
+            stops_clamp += 1;
+            // 🔴 The post writes M5 at a clamp change (hands go near the clamps).
+            // `spun_at` still said the spindle turned at this rpm, so a phase that
+            // kept the same cutter and speed got NO M3: every auto-reclamp job
+            // with one cutter across the stop was refused by the post ("cutting
+            // move emitted while the spindle is off") — bughunt 2026-11-15.
+            spun_at = None;
+            // 🔴 ONE STOP, NOT TWO, when the cutter changes here too (founder
+            // 2026-10-16: "less change … make it quicker"). The post writes
+            // the clamp comment, the tool comment and ONE `M0`; the probe is
+            // written once, after the tool change below, which re-references
+            // Z for both reasons at once.
+            if merge {
+                merged_probe = job.probe_after_clamp_change;
+                stops_merged += 1;
+            } else if clamp_noprobe {
+                res.notes.push(format!(
+                    "{phase_label}: WARNING — {}. This machine has no Z probe, so nothing \
+                     re-measures Z after this stop; the cutter is not changed here, so Z is \
+                     still right only if nobody moves it",
+                    crate::setup::CLAMP_NO_ZCHECK
+                ));
+            } else if job.probe_after_clamp_change {
                 moves.push(Move::probe());
             } else {
                 res.notes.push(format!(
@@ -1936,7 +2300,12 @@ pub fn plan_job(job: &Job) -> JobResult {
             }),
         }
 
-        used.push(tool.name.clone());
+        // One name per CUTTER: `group_by_tool` splits one tool's work into
+        // holes-then-outline groups, and each group used to add its name again
+        // (`report plate`: the 6mm listed twice, `job pocket`: tools=2 with one).
+        if !used.contains(&tool.name) {
+            used.push(tool.name.clone());
+        }
 
         // 🔴 THE COLLET FACT GOES INTO THE PROGRAM, NOT ONLY INTO THE REPORT.
         //
@@ -1978,11 +2347,31 @@ pub fn plan_job(job: &Job) -> JobResult {
         // `group_by_tool` groups on.
         let tool_changed = gi > 0 && groups[gi - 1].0.name != tool.name;
         if tool_changed {
+            let change_at = moves.len();
             moves.push(Move::tool_change(tool.name.clone()));
+            stops_cutter += 1;
             // 🔴 NOT counted here. `summary.tool_changes` is the number of `M0`
             // blocks in the EMITTED program — planning a change and emitting one
             // are different facts, and only the second reaches the operator.
-            if job.probe_after_toolchange {
+            let merged = std::mem::take(&mut merged_probe);
+            if (job.probe_after_toolchange || merged) && manual_change {
+                let surface = match job.stock.z_datum {
+                    crate::types::ZDatum::WorkpieceTop => "the workpiece top, on material that is not cut away",
+                    crate::types::ZDatum::SpoilboardTop => "the spoilboard top beside the workpiece, the same surface the job was zeroed on",
+                };
+                moves.push(Move::manual_zero(format!(
+                    "{}: touch the new cutter off on {surface}, set Z zero there with the \
+                     controller, then resume. The program lifts Z first",
+                    tool.name
+                )));
+                res.notes.push(format!(
+                    "cutter change {} -> {}: this machine has no Z probe, so the program stops \
+                     TWICE — once to change the cutter, once for you to set Z zero by hand with the \
+                     new cutter on {surface}. After you resume it lifts Z alone to safe Z before any \
+                     move. Nothing in the program checks the zero you set",
+                    groups[gi - 1].0.name, tool.name
+                ));
+            } else if job.probe_after_toolchange || merged {
                 moves.push(Move::probe());
             } else {
                 res.notes.push(format!(
@@ -1990,13 +2379,32 @@ pub fn plan_job(job: &Job) -> JobResult {
                      tool is wrong by the difference in tool length",
                     tool.name
                 ));
+                // 🔴 AND IN THE PROGRAM, BEFORE THE M0 — the collet argument above:
+                // the report is a panel that may not be open, the operator at the
+                // machine holds the `.nc`. `job plate --no-probe` went straight
+                // from `M0` to `M3` with nothing saying Z was not set for the new
+                // cutter: a longer one drills into the bed, a shorter one leaves
+                // the part uncut. No parentheses — see the collet note.
+                moves.insert(
+                    change_at,
+                    Move::comment(format!(
+                        "WARNING Z IS NOT RE-REFERENCED for {} - set Z zero for this cutter before \
+                         resuming, or every cut is off by the difference in tool length",
+                        tool.name
+                    )),
+                );
             }
         }
 
         // rpm belongs to the operation, so the spindle starts after the change
         // with the NEW tool's speed rather than inheriting the old one.
         let rpm = ops.first().map(|o| o.params.rpm).unwrap_or(18_000.0);
-        moves.push(Move::spindle_on(rpm));
+        // Same cutter, same speed, spindle still turning from the previous group
+        // (see the matching skip at the group's end): no M3 and no spin-up dwell.
+        if tool_changed || gi == 0 || spun_at != Some(rpm) {
+            moves.push(Move::spindle_on(rpm));
+        }
+        spun_at = Some(rpm);
 
         for op in ops {
             let r = crate::toolpath::plan_operation_with_edge_rule(
@@ -2021,7 +2429,14 @@ pub fn plan_job(job: &Job) -> JobResult {
             }));
         }
 
-        moves.push(Move::spindle_off());
+        // 🔴 A group boundary with the SAME cutter next is not a stop: it used to
+        // emit M5, then M3 + a spin-up dwell, between a part's holes and its
+        // outline. The spindle stays on; the last group, and any group before a
+        // change, still stops it.
+        if groups.get(gi + 1).map_or(true, |g| g.0.name != tool.name) {
+            moves.push(Move::spindle_off());
+            spun_at = None;
+        }
     }
 
     let mut path = Toolpath { moves, tool: groups.first().map(|g| g.0.clone()).unwrap_or_default(), ..Default::default() };
@@ -2101,12 +2516,21 @@ pub fn plan_job(job: &Job) -> JobResult {
     // against that phase's own clamp set. The global `fixturing.clamps` is
     // ignored — the phases carry their own clamps.
     let biggest_r = groups.iter().map(|(t, _)| t.radius_mm()).fold(0.0_f64, f64::max);
-    if let Some(phases) = &job.clamp_phases {
+    if let Some(phases) = &clamp_phases {
         // Split the path at ClampChange boundaries and check each segment
         // against its phase's clamps.
         let mut seg_start = 0;
         let mut phase_idx = 0;
+        // Where the tool is when each phase's slice begins: the post retracts
+        // to safe Z at the last XY before the pause, so the next phase's first
+        // rapid starts THERE and is tested as the line it travels.
+        let mut last_xy: Option<crate::types::Vec3> = None;
+        let mut seg_from: Option<crate::types::Vec3> = None;
         for (i, mv) in path.moves.iter().enumerate() {
+            use crate::types::MoveKind as K;
+            if matches!(mv.kind, K::Feed | K::Rapid | K::ArcCW | K::ArcCCW | K::DrillCycle) {
+                last_xy = Some(mv.to);
+            }
             if mv.kind == crate::types::MoveKind::ClampChange {
                 // Check the segment before this boundary.
                 if let Some(phase) = phases.get(phase_idx) {
@@ -2115,13 +2539,14 @@ pub fn plan_job(job: &Job) -> JobResult {
                         tool: path.tool.clone(),
                         ..Default::default()
                     };
-                    let findings = phase.as_fixturing().check(
-                        &seg, biggest_r, job.stock.thickness_mm, &job.machine,
+                    let findings = phase.as_fixturing().check_from(
+                        &seg, biggest_r, job.stock.thickness_mm, &job.machine, seg_from,
                     );
                     res.fixture_findings.extend(findings);
                 }
                 seg_start = i;
                 phase_idx += 1;
+                seg_from = last_xy.map(|p| crate::types::Vec3::new(p.x, p.y, job.machine.safe_z_mm));
             }
         }
         // Check the final segment (after the last boundary).
@@ -2131,8 +2556,8 @@ pub fn plan_job(job: &Job) -> JobResult {
                 tool: path.tool.clone(),
                 ..Default::default()
             };
-            let findings = phase.as_fixturing().check(
-                &seg, biggest_r, job.stock.thickness_mm, &job.machine,
+            let findings = phase.as_fixturing().check_from(
+                &seg, biggest_r, job.stock.thickness_mm, &job.machine, seg_from,
             );
             res.fixture_findings.extend(findings);
         }
@@ -2195,9 +2620,17 @@ pub fn plan_job(job: &Job) -> JobResult {
                 tool_table.push((t.name.clone(), t.radius_mm()));
             }
         }
-        let hd = crate::fixture::check_hold_down(
+        // 🔴 PER PHASE when the clamps move mid-job: the material each move
+        // enters must be held by the clamps in force AT THAT MOVE. Checking a
+        // phased program against the first set would call the moved clamp's
+        // old place "held" for every cut after it left.
+        let sets: Vec<crate::fixture::Fixturing> = match &clamp_phases {
+            Some(ph) if !ph.is_empty() => ph.iter().map(|p| p.as_fixturing()).collect(),
+            _ => vec![job.fixturing.clone()],
+        };
+        let hd = crate::fixture::check_hold_down_phased(
             posted.as_ref().map(|p| p.gcode.as_str()).unwrap_or(""),
-            &job.fixturing,
+            &sets,
             &job.stock,
             &tool_table,
             HOLD_DOWN_CELL_MM,
@@ -2212,6 +2645,41 @@ pub fn plan_job(job: &Job) -> JobResult {
         res.notes.extend(hd.lines());
     }
 
+    if let Some(ph) = &clamp_phases {
+        if ph.len() > 1 {
+            res.clamp_phases = ph.clone();
+        }
+    }
+    if stops_clamp > 0 {
+        let stops = stops_cutter + stops_clamp - stops_merged;
+        let rate = job
+            .machine
+            .tool_change_seconds
+            .unwrap_or(DEFAULT_TOOL_CHANGE_SECONDS);
+        res.notes.push(format!(
+            "operator stops: {stops} — {stops_cutter} cutter change(s), {stops_clamp} clamp \
+             move(s), {stops_merged} clamp move(s) done at the same stop as a cutter change \
+             (one M0, one Z re-reference). Without merging that would be {} stop(s). Each stop \
+             is charged at {rate:.0}s in the estimate — the machine's declared tool-change time, \
+             or the core's default when none is declared; a clamp move has no measured time of \
+             its own and is ASSUMED to cost the same",
+            stops_cutter + stops_clamp
+        ));
+        res.interventions = InterventionCounts {
+            cutter: stops_cutter,
+            clamps: stops_clamp,
+            merged: stops_merged,
+            stops,
+            stops_unmerged: stops_cutter + stops_clamp,
+        };
+    }
+    if let Some(p) = &auto_plan {
+        res.clamp_moves = p.moves.clone();
+        res.notes.push(format!(
+            "CLAMPS MOVE MID-JOB: a cut runs where a clamp is fitted, so the program cuts              everything clear of the clamps first, then STOPS (M5, M0) for you to {} — then              cuts the rest. Nothing is cut under a clamp: each phase was checked against the              clamps in force during it",
+            crate::reclamp::instruction(&p.moves)
+        ));
+    }
     res.summary.tools_used = used;
     res.summary.tool_changes = em.pauses;
     res.summary.cutting_distance_mm = em.cut_mm;
@@ -2291,7 +2759,9 @@ pub fn plan_job(job: &Job) -> JobResult {
     // every rapid in the emitted program, lead-ins and tab lifts and pass
     // returns included. Reporting the first as a reduction in the second would
     // be a number nobody measured.
-    report_route(&mut res, &route);
+    for route in &routes {
+        report_route(&mut res, route);
+    }
 
     // ---- where the program would have to sit, REPORTED, never applied -------
     //
@@ -2538,6 +3008,7 @@ pub fn assign_tools_from_set(
         &RecommendOptions::default(),
     );
 
+    let mut skipped: Vec<usize> = Vec::new();
     for (k, choice) in rec.choices.iter().enumerate() {
         let idx = targets[k];
         let Some(tool_id) = &choice.tool_id else {
@@ -2548,6 +3019,69 @@ pub fn assign_tools_from_set(
             let mut why = choice.reason.clone();
             for r in &choice.rejected {
                 why.push_str(&format!("\n  - {}", r.sentence()));
+            }
+            // Founder 2026-10-16: "NO TOOL IN THIS LIBRARY CAN CUT THIS POCKET ->
+            // this should be a warning, not an error" and "create a generic tool
+            // what can do the work if this is happening".
+            //
+            // A POCKET no selected tool can cut is SKIPPED, not cut with the wrong
+            // tool: the operation is removed, so nothing at all happens there, and
+            // the rest of the job is planned. The warning says so in words
+            // ("SKIPPED", "NOT cut") and names a cutter from the FULL library that
+            // can cut it, so the operator can add it and re-plan. A skipped pocket
+            // makes a part that is missing a recess — visible, and warned; it does
+            // not put a cutter where it does not fit. HOLES and PROFILES stay
+            // refusals: a missing outline is a part never cut free, and a hole
+            // is usually a fastener position.
+            if features[k].kind == FeatureKind::Pocket {
+                let alt = recommend(
+                    &features[k..=k],
+                    &job.machine,
+                    &job.stock,
+                    job.material,
+                    library,
+                    &RecommendOptions::default(),
+                );
+                let mut suggest = alt.choices.first().and_then(|c| c.tool_id.clone());
+                // Nothing in the catalogue either: try GENERIC end mills, largest
+                // first, with a cutting length that clears the depth and a shank the
+                // machine has a collet for. The first one the SAME recommender accepts
+                // is named — never one it would refuse.
+                if suggest.is_none() {
+                    let depth = features[k].depth_mm;
+                    let mut collets: Vec<f64> = job.machine.spare_collets_mm.clone();
+                    if job.machine.collet_mm > 0.0 {
+                        collets.push(job.machine.collet_mm);
+                    }
+                    let cut = ((depth + 2.0) / 5.0).ceil() * 5.0;
+                    'find: for d in [12.0, 10.0, 8.0, 6.0, 5.0, 4.0, 3.175, 3.0, 2.5, 2.0, 1.5, 1.0] {
+                        let mut shanks: Vec<f64> = collets.iter().copied().filter(|s| *s >= d).collect();
+                        shanks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        for sh in shanks {
+                            let g = crate::tools::generic_end_mill(d, cut.max(d), sh);
+                            let r = recommend(&features[k..=k], &job.machine, &job.stock, job.material, &[g.clone()], &RecommendOptions::default());
+                            if r.choices.first().and_then(|c| c.tool_id.as_ref()) == Some(&g.id) {
+                                suggest = Some(g.id);
+                                break 'find;
+                            }
+                        }
+                    }
+                }
+                out.notes.push(format!(
+                    "⚠ WARNING — {}: {} This pocket is SKIPPED (NOT cut); the rest of the job is planned. {}",
+                    job.operations[idx].name,
+                    choice.reason,
+                    match &suggest {
+                        Some(id) if id.starts_with("GENERIC") => format!("No catalogue cutter can cut it; a generic cutter can cut it: '{id}' — buy one to this spec, add it in cnc.tools and plan again."),
+                        Some(id) => format!("A catalogue cutter can cut it: '{id}' — add it in cnc.tools and plan again."),
+                        None => "No cutter in the whole catalogue can cut it either; change the pocket (wider corners, shallower) or add a cutter by hand in cnc.tools.".to_string(),
+                    }
+                ));
+                for r in &choice.rejected {
+                    out.notes.push(format!("{}:   - {}", job.operations[idx].name, r.sentence()));
+                }
+                skipped.push(idx);
+                continue;
             }
             out.refusals.push(Refusal { what: job.operations[idx].name.clone(), why });
             continue;
@@ -2578,7 +3112,7 @@ pub fn assign_tools_from_set(
             && matches!(op.params.op_type, OpType::Drill | OpType::Profile)
         {
             if let Some((_, _, r)) = op.contour.as_circle() {
-                let exact = (r - op.tool.radius_mm()).abs() <= 0.05;
+                let exact = crate::toolpath::drills_to_size(r, op.tool.radius_mm());
                 let want = if exact { OpType::Drill } else { OpType::Profile };
                 if want != op.params.op_type {
                     out.notes.push(format!(
@@ -2600,7 +3134,12 @@ pub fn assign_tools_from_set(
         }
     }
 
-    out.notes.extend(rec.notes.iter().cloned());
+    // Remove skipped pockets last, highest index first, so `targets` stays valid above.
+    skipped.sort_unstable();
+    for idx in skipped.into_iter().rev() {
+        job.operations.remove(idx);
+    }
+    out.notes.extend(rec.notes.iter().filter(|n| !n.contains("have no tool in this library")).cloned());
     if rec.tool_set.len() > 1 {
         out.notes.push(format!(
             "{} tools are needed for this job ({}), which costs {} tool change(s)",
@@ -3078,6 +3617,154 @@ mod tests {
         assert_eq!(r.summary.tools_used.len(), 3);
     }
 
+    /// The emitted program's lines after the `( SET Z ZERO -> … )` stop must
+    /// lift Z ALONE to safe Z before any X/Y move, and no move until the first
+    /// plunge may go below safe Z. Returns what is wrong, empty when right.
+    /// Written against the TEXT, independently of `rezero_lift_errors`, so the
+    /// two can disagree.
+    fn rezero_faults(g: &str, safe: f64) -> Vec<String> {
+        let lines: Vec<&str> = g.lines().map(str::trim).collect();
+        let mut out = Vec::new();
+        let zs: Vec<usize> = (0..lines.len()).filter(|i| lines[*i].starts_with("( SET Z ZERO ->")).collect();
+        if zs.is_empty() {
+            out.push("no set-Z-zero stop".into());
+        }
+        for z in zs {
+            if lines.get(z + 1) != Some(&"M0") {
+                out.push(format!("line {}: set-Z-zero not followed by M0", z + 1));
+                continue;
+            }
+            let mut lifted = false;
+            let mut g90 = false;
+            for l in &lines[z + 2..] {
+                if l.starts_with('(') || l.is_empty() {
+                    continue;
+                }
+                let w: Vec<&str> = l.split_whitespace().collect();
+                if w.contains(&"G90") {
+                    g90 = true;
+                }
+                let zw = w.iter().find(|t| t.starts_with('Z')).and_then(|t| t[1..].parse::<f64>().ok());
+                let xy = w.iter().any(|t| t.starts_with('X') || t.starts_with('Y'));
+                if !lifted {
+                    if xy || zw.is_some() {
+                        if !(w[0] == "G0" && !xy && g90 && zw.is_some_and(|v| v >= safe - 1e-9)) {
+                            out.push(format!("first move after the hand zero is `{l}` (G90 seen: {g90})"));
+                            break;
+                        }
+                        lifted = true;
+                    }
+                    continue;
+                }
+                // Up to and including the first plunge: nothing below safe Z
+                // except the plunge itself, which is a G1.
+                if w[0] == "G1" || w[0] == "G2" || w[0] == "G3" || w[0].starts_with("G8") {
+                    break;
+                }
+                if let Some(v) = zw {
+                    if v < safe - 1e-9 {
+                        out.push(format!("`{l}` goes below safe Z before the first cut"));
+                        break;
+                    }
+                }
+            }
+            if !lifted && out.is_empty() {
+                out.push("no lift after the hand zero".into());
+            }
+        }
+        out
+    }
+
+    /// 🔴 Founder 2026-10-16: *"change the different drilling tools are
+    /// priority"* — on a machine with NO Z probe too. Per change: retract, M5,
+    /// a stated change position, the stop naming old -> new, a SECOND stop to
+    /// set Z zero by hand, then a Z-only lift to safe Z before anything moves.
+    /// Asserted on the EMITTED program.
+    #[test]
+    fn a_cutter_change_without_a_probe_stops_twice_and_lifts_z_alone_before_moving() {
+        let mut j = job_with(vec![op("a", tool("6mm end mill", 6.0, 6.0)), op("b", tool("3mm drill", 3.0, 6.0))]);
+        j.machine.probe_enabled = false;
+        j.machine.touch_plate_mm = None;
+        let r = plan_job(&j);
+        assert!(r.is_runnable(), "{:?}", r.refusals);
+        let g = post_grblhal(&r.path, &j.machine, &j.stock, &OperationParams::default(), &PostOptions::default());
+        if std::env::var("NOPROBE_DUMP").is_ok() {
+            eprintln!("{}", g.gcode);
+        }
+        assert!(g.ok(), "{:?}", g.errors);
+        let gc = &g.gcode;
+        let lines: Vec<&str> = gc.lines().map(str::trim).collect();
+        assert!(!gc.contains("G38"), "a probe on a machine with none");
+        // The cutter stop.
+        let t = lines.iter().position(|l| l.starts_with("( TOOL CHANGE -> 3mm drill")).expect("no tool change");
+        assert_eq!(lines[t + 1], "M0");
+        let lead = &lines[..t];
+        let named = lead.iter().rposition(|l| l.contains("change cutter: 6mm end mill -> 3mm drill")).expect("old -> new not named");
+        let m5 = lead.iter().rposition(|l| *l == "M5").expect("no M5 before the stop");
+        let corner = lead.iter().rposition(|l| l.starts_with("G0 X") && !l.contains('Z')).expect("no move to the change position");
+        let lift = lead[..corner].iter().rposition(|l| *l == "G0 Z5.000").expect("no retract before the change position");
+        assert!(m5 < corner && lift < corner && corner < named, "order: M5 {m5} lift {lift} corner {corner} named {named}");
+        // Nothing cuts between the last cut and the stop.
+        assert!(!lines[m5..t].iter().any(|l| l.starts_with("G1") || l.starts_with("G2") || l.starts_with("G3")));
+        // The second stop, right after the first.
+        assert!(lines[t + 2].starts_with("( SET Z ZERO -> 3mm drill: touch the new cutter off on the workpiece top"), "{}", lines[t + 2]);
+        assert_eq!(lines[t + 3], "M0");
+        let f = rezero_faults(gc, 5.0);
+        assert!(f.is_empty(), "{f:?}\n{gc}");
+        // Counted once: one cutter change, the hand zero is a blind spot.
+        assert_eq!(r.summary.tool_changes, 1);
+        assert_eq!(r.summary.basis.tool_changes_charged, 1);
+        assert!(r.summary.basis.blind_spots.iter().any(|b| b.contains("Z zero by hand")));
+        // One intervention, two stops.
+        let st = crate::setup::interventions_of(gc);
+        assert_eq!(st.len(), 1, "{st:?}");
+        assert_eq!(st[0].items.iter().map(|i| i.kind).collect::<Vec<_>>(), vec!["cutter"]);
+        assert!(!st[0].reprobe);
+        assert_eq!(st[0].zero_pause_line, Some(t + 4));
+        assert!(st[0].warning.is_none());
+        let facts = crate::setup::setup_facts(&crate::setup::SetupDeclared::from_job(&j), gc);
+        assert!(facts.mismatches.is_empty(), "{:?}", facts.mismatches);
+        assert!(facts.other_pauses.is_empty(), "the hand-zero stop read as unexplained: {:?}", facts.other_pauses);
+        assert_eq!(facts.zero_pauses.len(), 1);
+        assert!(r.notes.iter().any(|n| n.contains("stops TWICE")), "{:?}", r.notes);
+    }
+
+    /// NEGATIVE CONTROL for both readers of the lift: the same program with
+    /// the Z-only lift after the hand zero removed. The next move is then the
+    /// first operation's X/Y rapid from a cutter that is touching the work.
+    #[test]
+    fn plant_dropping_the_lift_after_a_hand_zero_is_caught_by_both_readers() {
+        let mut j = job_with(vec![op("a", tool("6mm", 6.0, 6.0)), op("b", tool("3mm", 3.0, 6.0))]);
+        j.machine.probe_enabled = false;
+        j.machine.touch_plate_mm = None;
+        let r = plan_job(&j);
+        let g = post_grblhal(&r.path, &j.machine, &j.stock, &OperationParams::default(), &PostOptions::default());
+        assert!(g.ok(), "{:?}", g.errors);
+        let lines: Vec<&str> = g.gcode.lines().collect();
+        let z = lines.iter().position(|l| l.trim().starts_with("( SET Z ZERO ->")).unwrap();
+        assert_eq!(lines[z + 3].trim(), "G0 Z5.000", "premise: the lift is where this plant removes it");
+        let planted: String =
+            lines.iter().enumerate().filter(|(i, _)| *i != z + 3).map(|(_, l)| format!("{l}\n")).collect();
+        assert!(!rezero_faults(&planted, 5.0).is_empty(), "the test reader missed the dropped lift");
+        assert!(
+            !crate::post_grblhal::rezero_lift_errors(&planted, 5.0).is_empty(),
+            "the post's own audit missed the dropped lift"
+        );
+        // And on the real program, the post's audit is quiet.
+        assert!(crate::post_grblhal::rezero_lift_errors(&g.gcode, 5.0).is_empty());
+    }
+
+    /// A stop with a probe is unchanged: the probing machine still re-probes
+    /// and never writes a hand-zero stop.
+    #[test]
+    fn a_cutter_change_with_a_probe_still_reprobes_and_never_asks_for_a_hand_zero() {
+        let j = job_with(vec![op("a", tool("6mm", 6.0, 6.0)), op("b", tool("3mm", 3.0, 6.0))]);
+        let g = posted(&j);
+        assert!(g.contains("G38.2"));
+        assert!(!g.contains("SET Z ZERO"));
+        assert!(!g.contains("change cutter:"));
+    }
+
     #[test]
     fn one_tool_needs_no_change_at_all() {
         let r = plan_job(&job_with(vec![op("a", tool("6mm", 6.0, 6.0)), op("b", tool("6mm", 6.0, 6.0))]));
@@ -3134,10 +3821,15 @@ mod tests {
 
     #[test]
     fn asking_to_probe_on_a_machine_with_no_probe_is_an_error_not_a_shrug() {
-        let mut j = job_with(vec![op("a", tool("6mm", 6.0, 6.0)), op("b", tool("3mm", 3.0, 6.0))]);
-        j.machine.probe_enabled = false;
+        // ⚠ Since 2026-10-16 the PLANNER never asks a probe-less machine for a
+        // probe — it plans a hand zero (`MoveKind::ManualZero`). The post's
+        // refusal is still the guard for any path that asks anyway, so the
+        // probe is planned on a probing machine and posted to one without.
+        let j = job_with(vec![op("a", tool("6mm", 6.0, 6.0)), op("b", tool("3mm", 3.0, 6.0))]);
         let r = plan_job(&j);
-        let g = post_grblhal(&r.path, &j.machine, &j.stock, &OperationParams::default(), &PostOptions::default());
+        assert!(r.path.moves.iter().any(|m| m.kind == MoveKind::Probe), "premise: a probe is planned");
+        let no_probe = Machine { probe_enabled: false, ..j.machine.clone() };
+        let g = post_grblhal(&r.path, &no_probe, &j.stock, &OperationParams::default(), &PostOptions::default());
         assert!(!g.ok(), "a probe was requested and silently skipped");
         assert!(g.errors.iter().any(|e| e.contains("no probe")));
     }
@@ -3556,8 +4248,11 @@ mod tests {
         let two_tools =
             || vec![op("a", tool("6mm", 6.0, 6.0)), op("b", tool("3mm", 3.0, 6.0))];
         let probed = plan_job(&job_with(two_tools()));
+        // A probe the post REFUSES: enabled, but no plate thickness declared
+        // (decision #43 P0). Was `probe_enabled = false` until 2026-10-16; a
+        // probe-less machine now plans a hand zero instead of a probe.
         let mut no_probe_job = job_with(two_tools());
-        no_probe_job.machine.probe_enabled = false;
+        no_probe_job.machine.touch_plate_mm = None;
         let refused = plan_job(&no_probe_job);
 
         let probes = |r: &JobResult| {
@@ -3914,6 +4609,81 @@ mod material_datum_tests {
             r.path.moves.iter().filter(|m| m.feed > 400.0).map(|m| m.feed).fold(0.0, f64::max)
         };
         assert!(feed_of(&a) > feed_of(&b) * 2.0, "ply {} vs alu {}", feed_of(&a), feed_of(&b));
+    }
+
+    #[test]
+    fn a_peck_cycle_plunges_at_the_plunge_feed_and_pecks_no_deeper_than_the_material_takes() {
+        // 🔴 G83's F is the Z feed. The drill planner used the SIDEWAYS cutting
+        // feed whenever one was set: `job plate` pecked a 6 mm end mill 18 mm
+        // into ply at F3600 (its profile plunge was F300), and in aluminium Q
+        // stayed 4 mm while the note said depth was limited to 0.9 mm.
+        use crate::fixtures::{build, JobPlant};
+        for name in ["plate", "socket"] {
+            for mat in [Material::Plywood, Material::Aluminium] {
+                let mut job = build(name, JobPlant::None).expect("fixture").job;
+                job.material = mat;
+                let r = plan_job(&job);
+                let drills: Vec<&Move> =
+                    r.path.moves.iter().filter(|m| m.kind == MoveKind::DrillCycle).collect();
+                assert!(!drills.is_empty(), "{name}: no peck cycle to check");
+                // Bounds over every op in the job: a peck move does not carry
+                // which op made it, so it must sit inside the loosest of them.
+                let plunge = job.operations.iter().map(|o| o.params.plunge_mm_min).fold(0.0, f64::max);
+                let doc = job
+                    .operations
+                    .iter()
+                    .map(|o| o.tool.diameter_mm * mat.max_doc_ratio(job.machine.machine_class))
+                    .fold(0.0, f64::max);
+                for d in &drills {
+                    assert!(d.feed <= plunge + 1e-9, "{name}/{mat:?}: G83 at F{} — the plunge feed is {plunge}", d.feed);
+                    assert!(d.value <= doc + 1e-9, "{name}/{mat:?}: Q{} — the material takes {doc:.2}", d.value);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn one_cutter_split_into_two_groups_is_one_tool_and_one_spindle_run() {
+        // `group_by_tool` cuts a part's holes before its outline as two groups
+        // of the SAME cutter. Each group added the name again (`report plate`
+        // listed the 6mm twice) and stopped and restarted the spindle between
+        // them (M5, M3, spin-up dwell) at a boundary that changes nothing.
+        use crate::fixtures::{build, JobPlant};
+        for name in ["plate", "pocket"] {
+            let job = build(name, JobPlant::None).expect("fixture").job;
+            let r = plan_job(&job);
+            let mut seen = std::collections::HashSet::new();
+            assert!(
+                r.summary.tools_used.iter().all(|t| seen.insert(t.clone())),
+                "{name}: a cutter is listed twice: {:?}",
+                r.summary.tools_used
+            );
+            let offs = r.path.moves.iter().filter(|m| m.kind == MoveKind::SpindleOff).count();
+            assert_eq!(
+                offs,
+                r.summary.tools_used.len(),
+                "{name}: {offs} spindle stops for {} cutter(s)",
+                r.summary.tools_used.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_tool_change_without_a_z_reference_says_so_in_the_program_before_the_stop() {
+        // 🔴 `job plate --no-probe` went M0 -> M3 with nothing in the file
+        // saying Z was not set for the new cutter; only the report did.
+        use crate::fixtures::{build, JobPlant};
+        let mut job = build("plate", JobPlant::None).expect("fixture").job;
+        job.probe_after_toolchange = false;
+        let r = plan_job(&job);
+        let change = r.path.moves.iter().position(|m| m.kind == MoveKind::ToolChange);
+        let change = change.expect("plate has no tool change, so this test checks nothing");
+        let warned = r.path.moves[..change]
+            .iter()
+            .rev()
+            .take_while(|m| m.kind != MoveKind::SpindleOn)
+            .any(|m| m.kind == MoveKind::Comment && m.text.contains("NOT RE-REFERENCED"));
+        assert!(warned, "the stop before the new cutter carries no Z warning in the program");
     }
 
     #[test]
@@ -4923,6 +5693,32 @@ mod wiring_tests {
             said.contains("12mm"),
             "the refusal does not name the tool that was refused: {said}"
         );
+    }
+
+    #[test]
+    fn a_pocket_no_selected_tool_can_cut_is_skipped_with_a_warning_and_a_catalogue_cutter_named() {
+        // Founder 2026-10-16: a pocket with no tool is a WARNING, and a cutter that
+        // can do it is offered. The pocket is removed from the job (NOT cut with the
+        // 12mm tool); the panel profile is still planned.
+        let lib = default_library();
+        let mut j = set_job();
+        j.operations[0].contour = Contour::rounded_rect(150.0, 150.0, 30.0, 30.0, 2.0); // 30x30 pocket, R2 corners cap the cutter at R2
+        j.operations[0].name = "pocket".into();
+        j.machine.spare_collets_mm = vec![12.0, 6.0, 3.175];
+        let r = plan_job_with_tools(&j, &["End Mill - Up-cut 12mm 2F".to_string()], &lib);
+
+        assert!(r.is_runnable(), "a skipped pocket refused the job: {:?}", r.refusals);
+        assert!(!r.path.moves.is_empty(), "the rest of the job produced no program");
+        let warn = r.notes.iter().find(|n| n.starts_with("⚠ WARNING — pocket:")).unwrap_or_else(|| panic!("no warning: {:?}", r.notes));
+        assert!(warn.contains("NO TOOL IN THIS LIBRARY CAN CUT THIS POCKET"), "{warn}");
+        assert!(warn.contains("SKIPPED (NOT cut)"), "{warn}");
+        assert!(warn.contains("can cut it: '"), "no cutter was offered: {warn}");
+        // The R2 corners cap the cutter at R2 and 18mm depth beats the 4mm's 17mm
+        // flutes, so the catalogue has nothing: a GENERIC spec is named instead.
+        assert!(warn.contains("'GENERIC End Mill 4mm x 20mm cut"), "{warn}");
+        // Nothing was cut inside the 30x30 pocket: no move ends strictly inside it.
+        let inside = r.path.moves.iter().filter(|m| m.to.x > 150.5 && m.to.x < 179.5 && m.to.y > 150.5 && m.to.y < 179.5).count();
+        assert_eq!(inside, 0, "the skipped pocket was cut anyway");
     }
 
     #[test]

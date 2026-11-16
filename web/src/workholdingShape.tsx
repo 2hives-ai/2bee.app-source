@@ -71,7 +71,8 @@
 // This module renders; it does not decide. Nothing here reads or writes app
 // state, and it is deliberately importable without touching the panel.
 
-import type { ReactElement } from 'react';
+import { lazy, Suspense, type ReactElement } from 'react';
+import { webglAvailable } from './tool3d/webgl';
 import { WORKHOLDING } from './workholding';
 
 // -- the sheet of mm this drawing is a window onto ---------------------------
@@ -885,6 +886,29 @@ export function shapeFor(id: string): Shape | undefined {
   };
 }
 
+/**
+ * The words this drawing prints inside its frame, as plain lines — the side
+ * note, the caption and the warning. Exported so the 3D view
+ * (`tool3d/Catalogue3D.tsx`) shows the SAME caption under its solid. `null`
+ * for an id with no drawing.
+ */
+export function workholdingCaption(id: string): { text: string; tone: 'muted' | 'accent' | 'warn' }[] | null {
+  const s = shapeFor(id);
+  if (!s) return null;
+  const side =
+    s.kind === 'under'
+      ? 'the obstruction is UNDER the stock'
+      : s.kind === 'tool'
+        ? 'it is on the spindle, not the machine'
+        : 'heights are from the SPOILBOARD, not the workpiece top';
+  const out: { text: string; tone: 'muted' | 'accent' | 'warn' }[] = [
+    { text: side, tone: 'muted' },
+    { text: s.caption, tone: 'muted' },
+  ];
+  if (s.warn) out.push({ text: s.warn, tone: 'warn' });
+  return out;
+}
+
 export interface WorkholdingShapeProps {
   /** A `Workholding.id`. An unknown id renders an explicit PENDING panel — it
    *  must never render an empty box that reads as "nothing is in the way". */
@@ -900,7 +924,27 @@ export interface WorkholdingShapeProps {
  * reassuring state, and that is the failure mode this whole catalogue exists to
  * avoid — the same reason a check that cannot run reports PENDING, never PASS.
  */
-export function WorkholdingShape({ id, className }: WorkholdingShapeProps): ReactElement {
+// Founder 2026-10-15: *"in the tool list show the preview not a drawing but a
+// 3d object (have to build up all objects in 3d)"*. The preview is now a 3D
+// solid built from the same catalogue numbers (`tool3d/geometry.ts`), with this
+// drawing's caption lines printed under it. This flat drawing is still what
+// renders while the 3D chunk loads and wherever WebGL is unavailable.
+const Workholding3D = lazy(() => import('./tool3d/Catalogue3D').then((m) => ({ default: m.Workholding3D })));
+
+export function WorkholdingShape(props: WorkholdingShapeProps): ReactElement {
+  if (webglAvailable()) {
+    const flat = <WorkholdingShape2D {...props} />;
+    return (
+      <Suspense fallback={flat}>
+        <Workholding3D id={props.id} className={props.className} fallback={flat} />
+      </Suspense>
+    );
+  }
+  return <WorkholdingShape2D {...props} />;
+}
+
+/** The flat plan + side drawing — the 3D view's fallback. */
+export function WorkholdingShape2D({ id, className }: WorkholdingShapeProps): ReactElement {
   const s = shapeFor(id);
   const hatch = `whs-hatch-${id}`;
   return (

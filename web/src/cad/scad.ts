@@ -249,6 +249,17 @@ export interface CircleParams extends Facets {
 export interface PolygonParams {
   kind: 'polygon';
   points: [number, number][];
+  /**
+   * `paths=` — each a loop of indices into `points`. Absent ⇔ the points in
+   * order are the one loop. 🔴 UNTIL 2026-10-14 THIS WAS PARSED AND THROWN
+   * AWAY ("For now, ignore paths"), so a plate with a hole came out as one
+   * loop zig-zagging through both rings. The loops are filled EVEN-ODD, which
+   * is what openscad 2026.08.07 does — measured: two overlapping 10×10 squares
+   * as two paths enclose 150 mm², not 175; a hole's winding does not matter
+   * (64 either way); the same square twice encloses nothing. Every index here
+   * is an in-range integer — anything else was refused in the parser.
+   */
+  paths?: number[][];
 }
 /**
  * ⚠ `extends Facets` SINCE 2026-09-03, AND IT DID NOT BEFORE.
@@ -344,6 +355,23 @@ export interface ParseDiagnostics {
   warnings: number;
 }
 
+/**
+ * Which corner an `offset()` draws — the ONE thing that separates `r` from `delta`.
+ *
+ * `'round'` is `offset(r = k)`: convex corners become arcs of radius `k`.
+ * `'miter'` is `offset(delta = k)`: the two offset edges are extended to their
+ * intersection, so a 90° corner lands `k·√2` from the original vertex.
+ *
+ * ⚠ THERE IS A THIRD, `chamfer = true`, AND WE REFUSE IT RATHER THAN PICK ONE OF
+ * THESE. Clipper's square join cuts the corner on a line whose position is not
+ * derivable from `delta` alone, and both joins here are visibly wrong for it:
+ * measured on `square([10,10])` at `delta = 2`, openscad 2026.08.07 gives
+ * **193.255** against miter's 196.000 and round's 191.243. No file in
+ * `hardware/cad/` uses it (checked 2026-09-21), so the cost of refusing is zero
+ * and the cost of guessing is a part cut to the wrong outline.
+ */
+export type OffsetJoin = 'round' | 'miter';
+
 export interface GroupNode {
   kind: 'group';
   /** `{ }`, a `for` body, a user module body, or the program root. */
@@ -375,7 +403,17 @@ export interface GroupNode {
    *  `twist`/`scale` is REFUSED at the evaluator and never produces this. */
   extrude?: { height: number; center: boolean; fn: number | null };
   /** Set by `offset()`. The mesh kernel offsets the children's flat outlines. */
-  offset?: { r: number };
+  /** Set by `offset()`. `f` is the `$fn`/`$fa`/`$fs` in force at the call site —
+   *  carried since 2026-09-18 (TODO #169), because `offsetOutline` had been
+   *  tessellating every arc at a hardcoded 16 regardless of what the source asked.
+   *
+   *  `join` is which corner OpenSCAD draws, and it is NOT a styling choice:
+   *  `r` rounds convex corners with an arc, `delta` runs the two offset edges out
+   *  to their intersection (a miter). They enclose different area — measured on
+   *  `square([10,10])` at 2 mm, openscad 2026.08.07: **round 191.243, miter
+   *  196.000**. Carried since 2026-09-21; before that `delta` was DISCARDED and
+   *  the call was executed as `offset(r = 0)`, i.e. as no offset at all. */
+  offset?: { r: number; f: Facets; join: OffsetJoin };
   /** Set by `rotate_extrude()`. The mesh kernel revolves the children's flats.
    *  `fn` is the `$fn` in effect at the call site (same semantics as
    *  {@link Facets.fn}: NaN kept — OpenSCAD reads it as "no answer" = 3; a
@@ -442,7 +480,55 @@ export interface ScadOptions {
   host?: ScadFileHost;
   /** The path of `src` itself, passed to `host.read` as `from`. */
   path?: string;
+  /**
+   * The animation step bound to `$t`. Default 0, which is what OpenSCAD binds
+   * at every non-animated invocation — so omitting it reproduces this reader's
+   * behaviour exactly as it was before the option existed.
+   *
+   * ⚠ A source that never reads `$t` produces identical geometry at every
+   * value, and that identity is the SIGNAL the verifier uses: "mentions `$t`"
+   * and "moves when `$t` moves" are different facts, and only the second is an
+   * animation.
+   */
+  t?: number;
+  /**
+   * Evaluate for a PRINT, not a picture (2026-11-12: the pot saucer printed as visible flats — 48 segments of 9.15 mm
+   * on a 140 mm rim, 0.15 mm off the circle — because the STL sent to the 3d tab was built with `$preview` true and the
+   * source says `$fn = $preview ? 48 : 160`). When set: `$preview` is FALSE, as in OpenSCAD's own `-o stl`, and the
+   * root binds `$fa = PRINT_FA` / `$fs = PRINT_FS` instead of OpenSCAD's coarse 12 / 2, which give 30 flats on any
+   * large circle. A source that sets its own `$fn`/`$fa`/`$fs` still wins: those bind below the root.
+   * ⚠ The sibling-union rule in `mesh.ts` is NOT moved with it (see `rootEnv`): top-level siblings stay separate
+   * solids in the STL, which the slicer reads as overlapping shells. Absent ⇒ behaviour exactly as before.
+   */
+  render?: boolean;
+  /**
+   * With `render`, the root `$fa`/`$fs` (default `PRINT_FA`/`PRINT_FS`). `cad/machine.ts`'s resolution ladder passes
+   * OpenSCAD's own 12 / 2 here as its second tier. A source's own `$fn`/`$fa`/`$fs` still win, exactly as with the
+   * default. Ignored without `render` (the preview's root never bound them).
+   */
+  renderFaFs?: { fa: number; fs: number };
+  /**
+   * An UPPER BOUND on fragments per full circle, applied where this evaluator resolves `$fn`/`$fa`/`$fs` for a curve
+   * (`facetsFrom`, `rotate_extrude`, `linear_extrude`). It overrides even the source's own `$fn` — but only
+   * downwards: a source asking for fewer than the cap keeps what it asked for, and nothing is ever raised.
+   *
+   * 🔴 USED ONLY BY `cad/machine.ts`'s RESOLUTION LADDER (2026-11-13), as its last two tiers, when a machine build
+   * at a finer resolution ran out of the kernel's polygon/work budget. The SHAPE is unchanged (same `$preview`, same
+   * tree); only the circles are coarser, and the ladder reports which tier was used so the coarsening is stated,
+   * never silent.
+   *
+   * ⚠ A source that builds its own circle out of `polygon()` points (a `for` over `$fn`) is NOT capped: those are
+   * the source's coordinates, not a tessellation this evaluator chose.
+   *
+   * Absent ⇒ no cap (the viewport, and every caller before the ladder). Must be an integer ≥ 5 — the `$fa`/`$fs`
+   * path never draws fewer than 5 (OpenSCAD's own floor), so a smaller cap could not be honoured; it is refused.
+   */
+  maxFragments?: number;
 }
+
+/** Print defaults for `render`: a 70 mm radius gets 180 segments (0.011 mm off the circle), a 1.5 mm hole (r 0.75) 16, from max(5, ceil(min(360/$fa, 2πr/$fs))). */
+export const PRINT_FA = 2;
+export const PRINT_FS = 0.3;
 
 export interface ScadResult {
   /** Always present. Empty children means nothing was understood, not "nothing was drawn". */
@@ -469,6 +555,34 @@ export interface ScadResult {
 
 const MAX_NODES = 20000;
 const MAX_CALL_DEPTH = 64;
+/**
+ * Nesting depth of BUILT-IN statements (`translate`, `union`, `difference`, …).
+ *
+ * 🔴 `MAX_CALL_DEPTH` DOES NOT COVER THIS AND ITS NAME SAYS IT DOES. (#163,
+ * 2026-09-17.) That counter is incremented only for USER module and function
+ * calls; `Evaluator.exec` ⇄ `Evaluator.execCall` recurses once per nested
+ * built-in and touches it never. **Measured:** `translate([0,0,1])` nested 616
+ * deep threw a raw `RangeError: Maximum call stack size exceeded` out of
+ * `parseScad`, with `MAX_CALL_DEPTH` sitting at 64 the whole way down.
+ *
+ * ⚠ A GUARD WHOSE NAME DESCRIBES THE DEFECT IT DOES NOT CATCH IS WORSE THAN NO
+ * GUARD. Anyone auditing this file for unbounded recursion finds `MAX_CALL_DEPTH`,
+ * reads "call depth", and stops looking.
+ *
+ * **200, and it MUST STAY BELOW `MAX_DEPTH` in `mesh.ts` (256).** The deepest
+ * design in `hardware/cad` is **21** (389 of 389 files, median 3, p99 13); the
+ * measured ceiling here is **616**; and a stack limit belongs to the RUNTIME, so
+ * the browser's is not node's.
+ *
+ * 🔴 THE GAP BETWEEN THE TWO IS THE POINT, NOT SLACK. Setting both to 256 was
+ * tried and was wrong: `meshScene` walks the parser's tree **plus the root group
+ * the parser adds**, so source nested 255 deep arrives as a scene of depth 256
+ * and was refused by the mesher after the parser had accepted it. ⇒ **A file the
+ * reader accepted then drew nothing, with two different limits both reading 256
+ * and neither obviously at fault.** Two counters that count different things must
+ * not be given the same number just because the number looks tidy.
+ */
+const MAX_NEST_DEPTH = 200;
 const MAX_LOOP_ITERATIONS = 200000;
 /**
  * User FUNCTIONS get their own, deeper budget than modules.
@@ -812,7 +926,18 @@ type Stmt =
    */
   | { t: 'inline'; body: Stmt[]; path: string; line: number }
   /** A resolved `use <...>`: its modules and functions only, closing over ITS OWN scope. */
-  | { t: 'use'; body: Stmt[]; path: string; line: number }
+  | {
+      t: 'use';
+      body: Stmt[];
+      path: string;
+      line: number;
+      /** 🔴 THIS BODY CAME FROM A DEFINITIONS-ONLY RE-READ OF A CYCLED FILE.
+       *  Its top-level assignments are BOUND (so a module's default parameter can
+       *  name its own file's variables — TODO #165) but their failures are NOT
+       *  REPORTED, because the file is mid-cycle and names it imports may not
+       *  exist yet in that re-read. See `bindScope`'s `quiet` branch. */
+      defsOnly?: true;
+    }
   /** The `!` root modifier: this subtree BECOMES the whole model. */
   | { t: 'root'; body: Stmt; line: number }
   /**
@@ -1075,10 +1200,63 @@ interface ImportCtx {
   host: ScadFileHost | undefined;
   /** Files opened so far this parse, cycles excluded. Guards `MAX_IMPORTS`. */
   count: number;
+  /**
+   * 🔴 DEFINITIONS-ONLY READS, MEMOISED BY RESOLVED PATH FOR THE LIFE OF ONE
+   * PARSE. TODO #165.
+   *
+   * **Why this is sound, stated because a wrong memo key is how a cache becomes
+   * a correctness bug:** a definitions-only read keeps only `function` and
+   * `module` definitions and now follows its own imports IN THE SAME MODE. Its
+   * result is therefore a function of the resolved path and nothing else — not
+   * of `openPaths`, not of who asked. ⚠ That was NOT true before this change,
+   * when defs-only reads refused their imports: a result then depended on where
+   * the refusal landed, which is exactly the shape that makes a path-keyed cache
+   * return one caller's answer to another. **A first attempt at memoising was
+   * reverted for regressing `2bee_hive_super_panel_wcnc.scad` from clean to 26
+   * errors** — same key, but caching a context-dependent value.
+   *
+   * **And it is the memo that makes following imports affordable at all.**
+   * Without it, `2bee_hive/2bee_hive_panels_18mm.scad` burned the 128-file budget
+   * on re-reads of the same handful of files and refused
+   * `use <2bee_hive_floor_wcnc.scad>`, reporting `bb_floor_flat()` as unknown
+   * while it was defined one file away. `count` is incremented on a MISS ONLY —
+   * charging the budget per encounter instead of per file is the same defect
+   * wearing a counter.
+   */
+  /**
+   * 🔴 RESOLVED PATHS ALREADY CHARGED TO `count`. TODO #165, 2026-09-17.
+   *
+   * `MAX_IMPORTS` exists to bound how much of a tree one parse pulls in. It was
+   * charging **per ENCOUNTER**, so a file imported by ten siblings cost ten.
+   * **Measured on `2bee_hive/2bee_hive_panels_18mm_inner_wcnc.scad`: 146 host
+   * reads for 33 DISTINCT files**, and the 128 budget ran out before
+   * `2bee_hive_floor_wcnc.scad` was ever read — which is why `bb_floor_flat()`
+   * was reported as *"not a module this subset knows"* while sitting in a file
+   * the source names on line 18.
+   *
+   * ⚠ THE BUDGET IS UNCHANGED AND DELIBERATELY SO. Raising it was tried and
+   * produced **154 evaluation errors** on this same file; the fan-out was the
+   * disease. This charges the same 128 against the quantity the limit was always
+   * describing — *files pulled into one parse* — rather than the number of times
+   * they were mentioned.
+   *
+   * ⚠ AND IT IS NOT A PARSE CACHE. The body is still parsed per site, because a
+   * file's parse depends on `openPaths` — the same file is a cycle from one
+   * importer and not from another — and reusing one caller's tree for another is
+   * precisely what regressed `2bee_hive_super_panel_wcnc.scad` from clean to 26
+   * errors when a memo was last attempted here. **Only the ACCOUNTING is shared.**
+   */
+  charged: Set<string>;
+  defsMemo: Map<string, Stmt[]>;
+  /** Paths whose defs-only read is on the stack right now. A second encounter
+   *  returns no definitions rather than recursing — the cycle's base case. */
+  defsOpen: Set<string>;
 }
 
 class Parser {
   private p = 0;
+  /** Statement nesting while BUILDING the tree. See `MAX_NEST_DEPTH`. */
+  private nest = 0;
 
   constructor(
     private toks: Token[],
@@ -1096,6 +1274,15 @@ class Parser {
      *  rule `subErrors` follows, for the same reason: a line number that indexes
      *  a different file is worse than no line number. */
     private warnings: ScadWarning[] = [],
+    /**
+     * Definitions-only mode: every nested `include`/`use` is REFUSED by name.
+     *
+     * 🔴 IT EXISTS FOR ONE CASE — a `use` whose target is already open, i.e. a
+     * cycle. See `parseIncludeLike`. It is what stops that re-read from
+     * recursing forever, and it is why the refusal it emits is a real refusal
+     * with a sentence rather than a silent empty body.
+     */
+    private defsOnly = false,
   ) {}
 
   private peek(k = 0): Token {
@@ -1316,7 +1503,27 @@ class Parser {
       this.p++;
       return null;
     }
-    return this.parseStatement();
+    // 🔴 THE THIRD RECURSION, AND IT IS THE ONE I NEARLY SHIPPED AS FIXED (#163).
+    // Guarding `Mesher.evalNode` and `Evaluator.execCall` left this one — the AST
+    // BUILD, before any evaluation happens — and the raw `RangeError` simply moved
+    // from depth 616 to depth ~5000. `parseStatement` ⇄ `parseChildStatement` is
+    // the pair; it was found by counting repeated frames with
+    // `Error.stackTraceLimit = 200`, because the default 10 frames showed only the
+    // expression parser that happened to be on top when the stack ran out.
+    //
+    // ⚠ THE LESSON IS IN THE FIRST TWO FIXES, NOT THIS ONE: both were correct,
+    // both raised the depth at which the crash happens, and neither removed it.
+    // A guard on one of several recursions over the same input converts a
+    // reproducible crash into a rarer one.
+    if (this.nest >= MAX_NEST_DEPTH) {
+      throw new ParseFailure(this.peek().line, `statements nest deeper than ${MAX_NEST_DEPTH} levels`);
+    }
+    this.nest++;
+    try {
+      return this.parseStatement();
+    } finally {
+      this.nest--;
+    }
   }
 
   private parseModuleDef(): Stmt {
@@ -1413,6 +1620,86 @@ class Parser {
       return refuse(`${kw.text} <>`, 'the path between the angle brackets is empty, so nothing was read');
     }
 
+    if (this.defsOnly) {
+      /* 🔴 FOLLOW IT — IN THE SAME MODE, THROUGH THE MEMO. TODO #165, 2026-09-17.
+       * This used to refuse outright, which is why a name imported BY a cycled
+       * file stayed undefined and `2bee_hive_panels_18mm_*_wcnc.scad` plus
+       * `cnc_nest/nest_flat.scad` were dropped reporting `bb_floor_flat()` as a
+       * construct this reader does not implement — a maximally misleading
+       * message, since it named a function defined one file away.
+       *
+       * ⚠ THE REFUSAL WAS NOT WRONG WHEN IT WAS WRITTEN. Following these imports
+       * without a memo re-reads the same files once per encounter, burns
+       * `MAX_IMPORTS`, and raising the budget then produced 154 evaluation
+       * errors — the fan-out was the disease. The memo is what changes the cost
+       * from per-encounter to per-file; see `ImportCtx.defsMemo`. */
+      const resolvedDefs = this.imports.host ? this.imports.host.read(spec, this.selfPath) : null;
+      if (resolvedDefs && kw.text === 'use') {
+        const memo = this.imports.defsMemo.get(resolvedDefs.path);
+        if (memo) return { t: 'use', body: memo, path: resolvedDefs.path, line };
+        if (this.imports.defsOpen.has(resolvedDefs.path)) {
+          // Already being read defs-only further up this stack: the cycle's base
+          // case. Empty rather than a refusal — the definitions ARE being
+          // collected by the frame that opened it, and a refusal here would
+          // report a loss that is not happening.
+          return { t: 'use', body: [], path: resolvedDefs.path, line };
+        }
+        if (this.imports.count >= MAX_IMPORTS) {
+          return refuse(label, `more than ${MAX_IMPORTS} files pulled into one parse; <${spec}> was not read`);
+        }
+        this.imports.count++;
+        this.imports.defsOpen.add(resolvedDefs.path);
+        const dErrors: ScadError[] = [];
+        const dWarnings: ScadWarning[] = [];
+        const dParser = new Parser(
+          tokenize(resolvedDefs.source, dErrors, undefined, dWarnings),
+          dErrors,
+          resolvedDefs.source,
+          this.imports,
+          resolvedDefs.path,
+          [...this.openPaths, resolvedDefs.path],
+          dWarnings,
+          true,
+        );
+        const dBody = dParser.parseProgram();
+        this.imports.defsOpen.delete(resolvedDefs.path);
+        /* ⚠ ERRORS FROM A DEFS-ONLY READ ARE DROPPED, AND THAT IS THE EXISTING
+         * SEMANTIC, NOT A NEW SILENCE. `use` keeps a file's definitions and
+         * discards its geometry and its top-level statements; an error raised by
+         * material this read is throwing away would redden a design for a
+         * problem in a part of a file it never uses. The reporting gap already
+         * named in #165 — `execUse` never walks a `use` body for refusals — is
+         * unchanged by this and is still open. */
+        const dDefs = dBody.filter(
+          (st) => st.t === 'functiondef' || st.t === 'moduledef' || st.t === 'assign',
+        );
+        this.imports.defsMemo.set(resolvedDefs.path, dDefs);
+        return { t: 'use', body: dDefs, path: resolvedDefs.path, line, defsOnly: true };
+      }
+
+      // 🔴 A DEFINITIONS-ONLY RE-READ DOES NOT FOLLOW ITS OWN IMPORTS, and the
+      // alternative was measured rather than assumed. Letting it descend (with
+      // the flag propagated) recovered a few more names and multiplied the
+      // re-reads: `2bee_hive/2bee_hive_panels_18mm.scad` then burned the
+      // 128-file budget and refused `use <2bee_hive_floor_wcnc.scad>`, so
+      // `bb_floor_flat()` was reported as an unknown module while being defined
+      // one file away — and raising the budget to remove that symptom produced
+      // **154 evaluation errors** on the same file, because the fan-out was the
+      // disease and the budget was the only thing containing it.
+      //
+      // ⚠ SO THIS IS A DELIBERATE PARTIAL FIX, AND THE PART IT DOES NOT REACH IS
+      // NAMED: a name that is imported BY a cycled file is still undefined.
+      // `2bee_hive_panels_18mm_*_wcnc.scad` and `cnc_nest/nest_flat.scad` remain
+      // dropped for exactly that reason. Shipping the fan-out to fix them would
+      // trade a legible refusal for a page of plausible errors.
+      return refuse(
+        label,
+        `this file is being re-read for DEFINITIONS ONLY because it is part of an import cycle, so <${spec}> ` +
+          'was not followed. Names it would have provided are undefined in this re-read — a smaller and more ' +
+          'legible loss than the cycle, and stated here rather than left to be discovered.',
+      );
+    }
+
     const host = this.imports.host;
     if (!host) {
       return refuse(
@@ -1425,9 +1712,10 @@ class Parser {
     if (this.openPaths.length > MAX_IMPORT_DEPTH) {
       return refuse(label, `imports nested deeper than ${MAX_IMPORT_DEPTH}; <${spec}> was not read`);
     }
-    if (this.imports.count >= MAX_IMPORTS) {
-      return refuse(label, `more than ${MAX_IMPORTS} files pulled into one parse; <${spec}> was not read`);
-    }
+    /* ⚠ THE BUDGET IS CHARGED AFTER RESOLUTION, NOT BEFORE. It used to be tested
+     * here, where the resolved path is not yet known, so it could only count
+     * ENCOUNTERS — and an encounter of a file already pulled in costs nothing.
+     * See `ImportCtx.charged`. */
 
     let resolved: { path: string; source: string } | null;
     try {
@@ -1443,14 +1731,97 @@ class Parser {
           'empty file would turn every module it defines into an "unknown module" and blame your source.',
       );
     }
-    if (this.openPaths.includes(resolved.path)) {
-      return refuse(
-        label,
-        `circular import: ${[...this.openPaths, resolved.path].join(' -> ')}. The second opening was refused.`,
-      );
+    /* Charge the budget ONCE per distinct file. See `ImportCtx.charged` for the
+     * measurement that produced this (146 reads, 33 files, budget 128). */
+    if (!this.imports.charged.has(resolved.path)) {
+      if (this.imports.charged.size >= MAX_IMPORTS) {
+        return refuse(label, `more than ${MAX_IMPORTS} files pulled into one parse; <${spec}> was not read`);
+      }
+      this.imports.charged.add(resolved.path);
+      this.imports.count = this.imports.charged.size;
     }
 
-    this.imports.count++;
+    if (this.openPaths.includes(resolved.path)) {
+      // 🔴 `include` STILL REFUSES, AND `use` NO LONGER DOES. Corrected
+      // 2026-09-09, and the cost of the old behaviour was measurable: it took
+      // out THE HIVE PANELS.
+      //
+      // `hardware/cad/` has a real, intentional cycle —
+      // `2bee_hive/inwall_panel_cut.scad` uses the v3 pod's enclosure, whose
+      // params file uses `inwall_panel_cut.scad` back for the two functions that
+      // say where the pod sits (`brood_pod_l_yc()` / `brood_pod_l_zbot()`). That
+      // is not a mistake in cad's tree: OpenSCAD parses each file's definitions
+      // once and a circular `use` resolves, because `use` imports NAMES and does
+      // not splice or execute anything.
+      //
+      // Refusing it wholesale left those two functions undefined, so every file
+      // downstream reported *"not a function this subset knows"* and was dropped
+      // from the catalogue. MEASURED 2026-09-09 on the shop build: **12 designs
+      // in `2bee_hive` alone**, including `2bee_hive_super_panel_wcnc.scad`,
+      // `2bee_hive_brood_panel_wcnc.scad`, both `panels_18mm_*_wcnc` and the
+      // `cnc_nest` files — ***the sheet-cut panels are the most product-shaped
+      // thing this company has, and none of them reached the Designs tab.***
+      // ⚠ And the failure was maximally misleading: the message named a
+      // FUNCTION, so a reader goes looking for a missing definition that is
+      // right there in the file the message names.
+      //
+      // What happens instead: the file is re-read with `defsOnly`, which refuses
+      // its own imports — terminating the recursion — and only its `function`
+      // and `module` definitions are kept. Its top-level assignments and any
+      // geometry are dropped, which is exactly what `use` already does with a
+      // non-cyclic file, so this is not a new semantic; it is the existing one
+      // reaching a case it used to abandon.
+      if (kw.text === 'include') {
+        return refuse(
+          label,
+          `circular import: ${[...this.openPaths, resolved.path].join(' -> ')}. \`include\` is TEXTUAL — splicing ` +
+            'it again would duplicate the file into itself without end, so the second opening was refused. ' +
+            '(A circular `use` is read for its definitions; `include` cannot be.)',
+        );
+      }
+      const cycErrors: ScadError[] = [];
+      const cycWarnings: ScadWarning[] = [];
+      const cyc = new Parser(
+        tokenize(resolved.source, cycErrors, undefined, cycWarnings),
+        cycErrors,
+        resolved.source,
+        this.imports,
+        resolved.path,
+        [...this.openPaths, resolved.path],
+        cycWarnings,
+        true,
+      );
+      const cycBody = cyc.parseProgram();
+      for (const e of cycErrors) this.errors.push({ line, message: `in ${resolved.path} line ${e.line}: ${e.message}` });
+      for (const w of cycWarnings) this.warnings.push({ line, message: `in ${resolved.path} line ${w.line}: ${w.message}` });
+      // ⚠ ONLY DEFINITIONS, AND A KNOWN REPORTING GAP RIDES WITH THAT.
+      // `refused` nodes were briefly kept here so the re-read's own refusal
+      // would be visible — and they are INERT, because `execUse` binds a `use`
+      // body's scope and never executes its statements, so nothing in a `use`
+      // body reaches `unsupported`. The line was removed rather than left
+      // looking like it did something. ⇒ The consequence, stated because it is
+      // the kind of silence this file exists to refuse: a name that only a
+      // cycled file's OWN imports would have provided is missing, and this parse
+      // reports no reason for it. Surfacing it means teaching `execUse` to walk
+      // for refusals, which would newly redden every design whose `use`d files
+      // refuse anything — a real change with a large blast radius, and not one
+      // to make in the same commit as the cycle fix.
+      /* 🔴 ASSIGNMENTS ARE KEPT — TODO #165, 2026-09-17. `inwall_panel_cut.scad`
+       * assigns `inwall_cut_pilots_default` at file level and uses it as a
+       * DEFAULT PARAMETER of a module it defines; dropping the assignment left
+       * the default undefined and cost two designs.
+       * ⚠ THE FIRST ATTEMPT KEPT THEM AND REPORTED THEIR FAILURES, which broke
+       * `tests/scad-circular-use.test.ts`: a cycled file's own `x = b_zbot()` is
+       * evaluated in a re-read where `b_zbot` does not exist yet, so a function
+       * that IS defined became an unsupported construct — the exact failure the
+       * circular-`use` fix was written to remove. `defsOnly` marks the body so
+       * `bindScope` binds them QUIETLY instead. */
+      const defs = cycBody.filter(
+        (st) => st.t === 'functiondef' || st.t === 'moduledef' || st.t === 'assign',
+      );
+      return { t: 'use', body: defs, path: resolved.path, line, defsOnly: true };
+    }
+
     const subErrors: ScadError[] = [];
     const subWarnings: ScadWarning[] = [];
     const sub = new Parser(
@@ -1846,6 +2217,19 @@ class Parser {
    * is NAMED; it does not get reported as the author's typo.
    */
   private parseElement(): Expr {
+    /* 🔴 A GENERATOR IN ANY POSITION — `[0, for (t = ts) t[3]/2]`. OpenSCAD lets
+     * every element of a vector be a comprehension; this reader only accepted
+     * one as the WHOLE vector, so the `for` after a comma parsed as a call and
+     * failed with `expected "]", found "t"`. One such line in
+     * 2bee_sensor_pod_v3/sensor_pod_v3_enclosure_3d.scad:138, pulled in through
+     * inwall_panel_cut.scad, made SIX cut files (hive brood/super/fan-box/18 mm
+     * panels, feeder box panel) unreadable — gate CAD1H, 2026-10-14. The element
+     * is the comprehension spliced in: `each [for (…) …]`, which the evaluator
+     * already handles. */
+    if (this.isLCompStart()) {
+      const line = this.peek().line;
+      return { t: 'each', value: this.parseGenerator(line), line };
+    }
     if (!this.isIdent('each')) return this.parseExpr();
     const line = this.next().line; // 'each'
     return { t: 'each', value: this.parseExpr(), line };
@@ -1871,6 +2255,24 @@ class Parser {
    *              | 'if'  '(' expr ')'
    */
   private parseListComp(line: number): Expr {
+    const gen = this.parseGenerator(line);
+    if (this.isOp(',')) {
+      /* More elements follow: `[for (…) x, 5]`. The first becomes a spliced
+       * element like any other generator. */
+      const items: Expr[] = [{ t: 'each', value: gen, line }];
+      while (this.eatOp(',')) {
+        if (this.isOp(']')) break; // trailing comma
+        items.push(this.parseElement());
+      }
+      this.expectOp(']');
+      return { t: 'vec', items, line };
+    }
+    this.expectOp(']');
+    return gen;
+  }
+
+  /** Clauses + body (+ else) of one comprehension, WITHOUT the closing `]`. */
+  private parseGenerator(line: number): Expr {
     const clauses: LCompClause[] = [];
     while (true) {
       if (this.isIdent('for') && this.peek(1).kind === 'op' && this.peek(1).text === '(') {
@@ -1908,7 +2310,6 @@ class Parser {
       // Element position, exactly like `body` — `if (c) x else each ys` splices.
       elseBody = this.parseElement();
     }
-    this.expectOp(']');
     return { t: 'listcomp', clauses, body, elseBody, line };
   }
 }
@@ -2205,6 +2606,8 @@ class Evaluator {
   private nodes = 0;
   private iterations = 0;
   private depth = 0;
+  /** Built-in statement nesting. See `MAX_NEST_DEPTH`. */
+  private nest = 0;
   private fnDepth = 0;
   private seenRefusal = new Set<string>();
   private rootEnv: Env | null = null;
@@ -2212,6 +2615,8 @@ class Evaluator {
   host: ScadFileHost | undefined;
   /** The path of the root file being parsed. Set by `parseScad`. */
   path: string | undefined;
+  /** `ScadOptions.maxFragments`. Set by `parseScad`. */
+  maxFragments: number | undefined;
 
   /**
    * Which imported file the code being executed came from, innermost last.
@@ -2348,8 +2753,40 @@ class Evaluator {
     this.rootEnv = root;
     this.programHasRoot = containsRootModifier(program);
     const scene: GroupNode = { kind: 'group', label: 'program', children: [], line: 1 };
+    /* 🔴 THE MAIN FILE GETS ITS OWN SCOPE, A CHILD OF THE BUILTINS — NOT THE
+     * BUILTINS' SCOPE ITSELF (2026-10-14).
+     *
+     * This used to run the program directly in `root`, so the main file's
+     * top-level assignments landed in the SAME env that `execUse` parents every
+     * `use`d file to. `execUse`'s header promised "nothing of the caller's" and
+     * the code delivered the opposite for any name the library did not define
+     * itself: the caller's value leaked into the library's module bodies AND
+     * into its default-argument expressions.
+     *
+     * ⚠ MEASURED against openscad 2026.08.07 — `lib.scad` defines
+     * `module m(w = is_undef(W) ? 19 : W)` and `module inner() echo(W)`;
+     * `main.scad` is `W = 18; use <lib.scad>; m(); inner();`:
+     *
+     *     openscad   default_w = 19 · inner_W = undef   (W is NOT visible)
+     *     ours, old  default_w = 18 · inner_W = 18      (W leaked)
+     *
+     * and with `include <lib.scad>` instead both tools give 18, because include
+     * is textual. OpenSCAD evaluates a default argument in the module's
+     * DEFINING scope, and a `use`d file's defining scope is that file plus the
+     * builtins. ⇒ The physical case: `hardware/cad/2bee_hive/
+     * 2bee_hive_panels_4mm_wcnc.scad` sets `W = 18` and `use`s
+     * `nuc_divider(w = is_undef(W) ? 19 : W)` — OpenSCAD cuts the 19 mm
+     * divider, we drew an 18 mm one (oracle tree line 2, `cube(size=[19,4,28])`
+     * vs ours `[18,4,28]`). A 1 mm wrong slot in a part that is never told so.
+     * (The source's own comment, "nest the REAL divider (not the w=19
+     * default)", describes the behaviour we HAD, not OpenSCAD's — that is cad's
+     * to correct, and it is reported to them rather than honoured here.)
+     *
+     * `$`-variables are unaffected: they resolve through the DYNAMIC chain, so a
+     * top-level `$fn = 32` still reaches a `use`d module called from here. */
+    const programEnv = newEnv(root, root);
     try {
-      this.execBlock(program, root, scene);
+      this.execBlock(program, programEnv, scene);
     } catch (e) {
       if (!(e instanceof Halt)) throw e;
     }
@@ -2411,8 +2848,27 @@ class Evaluator {
    * its first assignment and takes the EXPRESSION of its last.** Everything is
    * then evaluated once, in that order. Both probes above are regression tests.
    */
-  private bindScope(body: Placed[], env: Env): void {
-    for (const p of body) {
+  private bindScope(body: Placed[], env: Env, quiet = false): void {
+    /* 🔴 `use`s ARE BOUND FIRST, THEN THE SCOPE'S OWN DEFINITIONS — SO AN OWN
+     * DEFINITION ALWAYS WINS, WHEREVER THE `use` SITS (2026-10-14).
+     *
+     * This was one sweep in source order, so a `use` written BELOW a module
+     * definition overwrote it with the library's same-named one. Measured
+     * against openscad 2026.08.07 (`l1.scad`/`l2.scad` each define `m()` and
+     * `f()`):
+     *
+     *     module m() echo("own"); use <l1.scad>; m();   openscad "own"   ours "from l1"
+     *     use <l1.scad>; use <l2.scad>; m();            openscad "from l2" (last use wins) — unchanged
+     *
+     * ⚠ The hive panels hit exactly this: `inwall_panel_cut.scad` defines its
+     * modules and then, 400 lines down, `use`s the v3 pod, whose cycle back
+     * into `inwall_panel_cut.scad` is a DEFS-ONLY re-read without its imports.
+     * Source order let that crippled copy replace the real one. */
+    const ordered = [
+      ...body.filter((p) => p.s.t === 'use'),
+      ...body.filter((p) => p.s.t === 'moduledef' || p.s.t === 'functiondef'),
+    ];
+    for (const p of ordered) {
       const s = p.s;
       if (s.t !== 'moduledef' && s.t !== 'functiondef' && s.t !== 'use') continue;
       this.origins.push(p.origin);
@@ -2461,9 +2917,35 @@ class Evaluator {
     }
     for (const slot of slots) {
       this.origins.push(slot.origin);
+      /* 🔴 `quiet` IS NOT "IGNORE ERRORS". It is only ever set for the top-level
+       * assignments of a DEFINITIONS-ONLY re-read of a cycled file, which before
+       * 2026-09-17 were not evaluated AT ALL — so nothing that was previously
+       * reported becomes silent here. What changes is that the bindings now
+       * exist; what does not change is the diagnostics.
+       *
+       * ⚠ `seenRefusal` IS SNAPSHOTTED TOO, AND THAT IS DEFENSIVE RATHER THAN A
+       * PROVEN CONTROL — said plainly because the reverse would be a claim I
+       * could not back. The worry was that truncating the arrays alone leaves the
+       * dedupe key set poisoned, so a LATER genuine refusal of the same name and
+       * line is swallowed. **I could not construct a case where it matters:** the
+       * key is built from `this.origin`, and a quiet refusal inside the cycled
+       * re-read and the outer parse's own refusal of the same source line get
+       * DIFFERENT keys. Removing the snapshot changed no test and no measured
+       * output. It is kept because restoring state you truncated is cheap and the
+       * key's composition is not something this code should depend on — but the
+       * next reader should know it guards a hazard nobody has demonstrated. */
+      const mark = quiet
+        ? { e: this.errors.length, u: this.unsupported.length, w: this.warnings.length, seen: new Set(this.seenRefusal) }
+        : null;
       try {
         env.vars.set(slot.name, this.eval(slot.value, env));
       } finally {
+        if (mark) {
+          this.errors.length = mark.e;
+          this.unsupported.length = mark.u;
+          this.warnings.length = mark.w;
+          this.seenRefusal = mark.seen;
+        }
         this.origins.pop();
       }
     }
@@ -2489,14 +2971,41 @@ class Evaluator {
     const fileEnv = newEnv(this.rootEnv, this.rootEnv);
     fileEnv.childCtx = null;
     const origin = nestOrigin(this.origin, s.path, s.line);
+    const placed = flattenIncludes(s.body, origin);
     this.origins.push(origin);
     try {
-      this.bindScope(flattenIncludes(s.body, origin), fileEnv);
+      this.bindScope(placed, fileEnv, s.defsOnly === true);
     } finally {
       this.origins.pop();
     }
-    for (const [k, v] of fileEnv.modules) into.modules.set(k, v);
-    for (const [k, v] of fileEnv.functions) into.functions.set(k, v);
+    /* 🔴 ONLY THE FILE'S OWN DEFINITIONS ARE EXPORTED — `use` IS NOT TRANSITIVE
+     * (2026-10-14). This copied EVERY name in `fileEnv`, including the ones the
+     * file had itself imported with its own `use`. Measured against openscad
+     * 2026.08.07 — `c.scad` defines `mc()`/`fc()`, `b.scad` is `use <c.scad>`
+     * plus `module mb()`, `a.scad` is `use <b.scad>; mb(); mc(); echo(fc());`:
+     *
+     *     openscad   mb() runs; mc() "Ignoring unknown module"; fc() undef
+     *     ours, old  all three resolved
+     *
+     * ⚠ IT WAS HIDING BEHIND THE ROOT-SCOPE LEAK FIXED IN `run()`, AND THE TWO
+     * HAD TO MOVE TOGETHER. With the leak closed alone, three hive panels lost
+     * their serial/QR recesses: `inwall_panel_cut.scad` `use`s the v3 pod, the
+     * pod `use`s `inwall_panel_cut.scad` back (a cycle, re-read defs-only and
+     * WITHOUT its imports), and the transitive copy then OVERWROTE the full
+     * read's `serial_zone_front` with the defs-only one — whose
+     * `serial_qr_provision()` had only ever resolved because the main file's
+     * scope (holding a second transitive copy) was the root every library saw.
+     * Two wrong scoping rules cancelling to a right answer, on those files. A
+     * name defined by an `include`d file IS the file's own (include is
+     * textual), which is why the own-set is taken from the flattened body. */
+    const ownModules = new Set<string>();
+    const ownFunctions = new Set<string>();
+    for (const p of placed) {
+      if (p.s.t === 'moduledef') ownModules.add(p.s.name);
+      else if (p.s.t === 'functiondef') ownFunctions.add(p.s.name);
+    }
+    for (const [k, v] of fileEnv.modules) if (ownModules.has(k)) into.modules.set(k, v);
+    for (const [k, v] of fileEnv.functions) if (ownFunctions.has(k)) into.functions.set(k, v);
   }
 
   /**
@@ -2787,6 +3296,26 @@ class Evaluator {
   private execCall(s: Extract<Stmt, { t: 'call' }>, env: Env, sink: SceneNode[]): void {
     if (s.disabled) return; // `*` modifier: exact, and nothing is emitted
 
+    // 🔴 THE BUILT-IN NESTING GUARD (#163). `exec` ⇄ `execCall` is the recursion
+    // that a chain of nested `translate()`s walks, and nothing counted it: a raw
+    // `RangeError` came out of `parseScad`, which `CadTab` runs synchronously on
+    // the main thread, so the tab went blank with no message. `haltAfter` is the
+    // existing refusal path — an answer the reader can render.
+    if (this.nest >= MAX_NEST_DEPTH) {
+      this.haltAfter(s.line, `stopped: built-in statements nest deeper than ${MAX_NEST_DEPTH} levels.`);
+    }
+    this.nest++;
+    try {
+      this.execCallInner(s, env, sink);
+    } finally {
+      this.nest--;
+    }
+  }
+
+  /** The body of {@link execCall}. Split out ONLY so the nesting guard has one
+   *  exit to decrement on. */
+  private execCallInner(s: Extract<Stmt, { t: 'call' }>, env: Env, sink: SceneNode[]): void {
+
     const name = s.name;
 
     // Before the user-module lookup: `children` is the language's, and a user
@@ -2951,6 +3480,7 @@ class Evaluator {
           fn = null;
         } else if (fnV > 0) fn = fnV;
       }
+      fn = capFn(fn, this.maxFragments, null);
       const node: GroupNode = {
         kind: 'group',
         label: 'linear_extrude',
@@ -2975,20 +3505,119 @@ class Evaluator {
         if (s.child.t === 'block') this.execBlock(s.child.body, inner, children);
         else this.exec(s.child, inner, children);
       }
-      const toNum = (v: Value): number | null =>
-        typeof v === 'number' && Number.isFinite(v) ? v : null;
       const pos = s.args.filter((a) => !a.name);
       const named = new Map(s.args.filter((a) => a.name).map((a) => [a.name!, a.value]));
-      // offset(r=...) or offset(delta=...) or offset(r, delta)
-      const rVal = toNum(this.eval(named.get('r') ?? pos[0]?.value ?? { t: 'num' as const, v: 0, line: s.line }, env));
-      const deltaVal = toNum(this.eval(named.get('delta') ?? { t: 'num' as const, v: 0, line: s.line }, env));
-      const r = rVal ?? deltaVal ?? 0;
+
+      /* 🔴 `offset(delta = …)` WAS SILENTLY DISCARDED UNTIL 2026-09-21 — TODO #169.
+       *
+       * The old chain read `r = rVal ?? deltaVal ?? 0`, with `{v: 0}` standing in
+       * for an absent `r`. **`0` is not nullish**, so `??` never reached `delta`,
+       * and every `offset(delta = k)` in the corpus executed as `offset(r = 0)` —
+       * NO OFFSET AT ALL, with no refusal, no warning, and a part that still
+       * meshed, still posted and still drew a plausible picture. Two files in
+       * `hardware/cad/` use it, both via the fillet idiom
+       * `offset(r = k) offset(delta = -k)`, and one of them
+       * (`2bee_hive/2bee_hive_joinery.scad:69`) is included by the whole hive
+       * family.
+       *
+       * ⚠ EVERY RULE BELOW WAS PUT TO THE BINARY, NOT READ OFF THE MANUAL —
+       * openscad 2026.08.07, 2026-09-21, each on `square([10,10])`, area
+       * integrated from the exported SVG:
+       *
+       *   offset(r=2)                  12 pts  191.243  round
+       *   offset(2)                    12 pts  191.243  1st positional IS r
+       *   offset(delta=2)               4 pts  196.000  miter, exact
+       *   offset(2,-1)                 12 pts  191.243  2nd positional IS delta,
+       *                                                 and r WINS with a warning
+       *   offset(r=2,delta=-1)         12 pts  191.243  `Ignoring "delta" argument
+       *                                                  as "r" is defined too.`
+       *   offset()                     12 pts  142.520  DEFAULT IS r = 1, ROUNDED
+       *   offset(r="x") / (delta="x")  12 pts  142.520  non-numeric → that default
+       *   offset(r=1/0) / (delta=1/0)     —    nothing  "not a 2D object"
+       *   offset(delta=2,chamfer=true)  8 pts  193.255  a THIRD join
+       *   offset(r=2,chamfer=true)     12 pts  191.243  chamfer ignored on r
+       *
+       * ⇒ The default is `r = 1` and NOT `0`: an argument-less `offset()` moves the
+       * outline by a millimetre. Reading it as a no-op is the same error as
+       * dropping `delta`. */
+      const rExpr = named.get('r') ?? pos[0]?.value;
+      const deltaExpr = named.get('delta') ?? pos[1]?.value;
+      const chamferExpr = named.get('chamfer') ?? pos[2]?.value;
+      const rV = rExpr === undefined ? undefined : this.eval(rExpr, env);
+      const deltaV = deltaExpr === undefined ? undefined : this.eval(deltaExpr, env);
+      const chamferV = chamferExpr === undefined ? undefined : this.eval(chamferExpr, env);
+      if (this.guardArgs('offset()', s.line, [rV, deltaV, chamferV].filter((v) => v !== undefined) as Value[])) {
+        return;
+      }
+
+      // OpenSCAD's own defaults, in OpenSCAD's own order: `r` first, `delta`
+      // second, and `r = 1` ROUNDED when neither answers.
+      let r = 1;
+      let join: OffsetJoin = 'round';
+      if (rExpr !== undefined && typeof rV === 'number') {
+        if (deltaExpr !== undefined) {
+          // OpenSCAD's wording, quoted from the binary rather than paraphrased.
+          this.warn(s.line, 'Ignoring "delta" argument as "r" is defined too.');
+        }
+        if (!Number.isFinite(rV)) {
+          this.refuse(
+            'offset()',
+            s.line,
+            `r = ${Number.isNaN(rV) ? 'nan' : 'infinite'}. OpenSCAD produces NO 2D OBJECT here ` +
+              '("Current top level object is not a 2D object"), so nothing is drawn for this node ' +
+              'rather than an outline offset by a made-up amount.',
+          );
+          return;
+        }
+        r = rV;
+      } else if (deltaExpr !== undefined && typeof deltaV === 'number') {
+        if (!Number.isFinite(deltaV)) {
+          this.refuse(
+            'offset()',
+            s.line,
+            `delta = ${Number.isNaN(deltaV) ? 'nan' : 'infinite'}. OpenSCAD produces NO 2D OBJECT here, ` +
+              'so nothing is drawn for this node.',
+          );
+          return;
+        }
+        if (chamferV === true) {
+          /* 🔴 REFUSED, NOT APPROXIMATED. See `OffsetJoin` for the three measured
+           * areas that make the mitre the WRONG answer to this call rather than a
+           * near one. */
+          this.refuse(
+            'offset(chamfer = true)',
+            s.line,
+            "a chamfered offset cuts the corner on Clipper's square join, which is neither the " +
+              'rounded nor the mitred corner this reader can draw. Measured on square([10,10]) at ' +
+              'delta = 2, openscad 2026.08.07: chamfer 193.255 vs miter 196.000 vs round 191.243. ' +
+              'Nothing is drawn for this node; drawing the mitre instead would be a part cut to the ' +
+              'wrong outline with no warning.',
+          );
+          return;
+        }
+        r = deltaV;
+        join = 'miter';
+      }
+      /* Anything else — no arguments at all, or an `r`/`delta` that is not a
+       * number — keeps `r = 1, round`. That is not a tolerance: it is what the
+       * binary does, measured above, and it is silent there too. */
+      /* 🔴 THE TESSELLATION THE SOURCE ASKED FOR, NOT A CONSTANT — TODO #169.
+       * `mesh.ts` called `offsetOutline(outline, r)` and that function's `fn`
+       * parameter defaults to **16**, so every rounded offset used a fixed arc
+       * density no matter what `$fn`/`$fa`/`$fs` said. ⚠ Built from the same
+       * EVALUATED named map the primitives feed `facetsFrom`, so `offset(r=…,
+       * $fn=…)` and `sphere(r=…, $fn=…)` cannot disagree about what `$fn` means. */
+      const f = this.facetsFrom(
+        new Map(s.args.filter((a) => a.name).map((a) => [a.name!, this.eval(a.value, env)])),
+        env,
+        s.line,
+      );
       const node: GroupNode = {
         kind: 'group',
         label: 'offset',
         children,
         line: s.line,
-        offset: { r },
+        offset: { r, f, join },
       };
       this.countNode(s.line);
       sink.push(node);
@@ -3012,12 +3641,25 @@ class Evaluator {
       const pos = s.args.filter((a) => !a.name);
       const named = new Map(s.args.filter((a) => a.name).map((a) => [a.name!, a.value]));
       const angleExpr = named.get('angle') ?? pos[0]?.value;
-      const angle = angleExpr ? (toNum(this.eval(angleExpr, env)) ?? 360) : 360;
-      // `start`: where the arc BEGINS, degrees — OpenSCAD's default is 180
-      // (the 2025 dev line). Silently starting at 0 instead places every
-      // partial arc 180° out, which is a wrong part that posts clean.
+      let angle = angleExpr ? (toNum(this.eval(angleExpr, env)) ?? 360) : 360;
+      // OpenSCAD resets an angle outside (-360, 360] to a full turn.
+      if (angle <= -360 || angle > 360) angle = 360;
+      // `start`: where the arc BEGINS, degrees. 🔴 OpenSCAD's default is 180 ONLY
+      // WHEN NO `angle` IS GIVEN (a full turn, kept where it always was); with an
+      // `angle` it is 0 — every partial arc starts at +X and sweeps CCW. This read
+      // 180 for both, so every partial revolve landed 180° out (the hard-stop
+      // groove in 2bee_autoframe_automation/enclosure.scad on the wrong side of the
+      // lid), trusted, no diagnostic (bughunt 2026-11-15).
       const startExpr = named.get('start');
-      const start = startExpr ? (toNum(this.eval(startExpr, env)) ?? 180) : 180;
+      const startDefault = angleExpr ? 0 : 180;
+      let start = startExpr ? (toNum(this.eval(startExpr, env)) ?? startDefault) : startDefault;
+      // A NEGATIVE angle sweeps clockwise: the same region as |angle| swept CCW
+      // from `start + angle`. It used to fall through `angle > 0` in the mesher and
+      // return the flat 2D profile, volume 0, no issue raised.
+      if (angle < 0) {
+        start += angle;
+        angle = -angle;
+      }
       // `$fn` at the call site or from the dynamic scope — the SAME semantics
       // as the `facets()` helper on the curved primitives (NaN is kept because
       // OpenSCAD reads it as "no answer" = 3; a negative warns and zeroes).
@@ -3032,6 +3674,9 @@ class Evaluator {
           fn = null;
         } else if (fnV > 0) fn = fnV;
       }
+      // `null` here is NOT the `$fa`/`$fs` path: `mesh.ts`'s `rotateExtrudeOutline` revolves a `null` at a fixed
+      // 48 per turn (ROTATE_EXTRUDE_DEFAULT_FN), so the cap has to know that number to bound it.
+      fn = capFn(fn, this.maxFragments, ROTATE_EXTRUDE_DEFAULT_FN);
       const node: GroupNode = {
         kind: 'group',
         label: 'rotate_extrude',
@@ -3181,7 +3826,10 @@ class Evaluator {
       }
       const pos = s.args.filter((a) => !a.name);
       const named = new Map(s.args.filter((a) => a.name).map((a) => [a.name!, a.value]));
-      const rawNewsize = pos[0] ? this.eval(pos[0].value, env) : undefined;
+      // `newsize=` named or first positional: the named form used to be ignored, the
+      // size fell back to 0 ("unchanged") and the part kept its old size, trusted.
+      const sizeExpr = named.get('newsize') ?? pos[0]?.value;
+      const rawNewsize = sizeExpr ? this.eval(sizeExpr, env) : undefined;
       const newsize = this.vec3(rawNewsize ?? 0, 0);
       if (!newsize) {
         this.fail(s.line, 'resize() needs a vector of numbers for the new size');
@@ -3771,6 +4419,86 @@ class Evaluator {
     return null;
   }
 
+
+  /**
+   * `$fn`/`$fa`/`$fs` in force at a call site, as OpenSCAD reads them.
+   *
+   * 🔴 LIFTED OUT OF `primitive()` 2026-09-18 FOR TODO #169. `offset()` never had
+   * access to this — `mesh.ts` called `offsetOutline(outline, r)` and that
+   * function's `fn` defaults to **16**, so every rounded offset tessellated at a
+   * fixed density no matter what the source asked for. **Measured on
+   * `2bee_hive/2bee_hive_panels_18mm_inner_wcnc.scad`, a file this company CUTS:**
+   * at `r = 0.8`, `$fa = 12`, `$fs = 2`, OpenSCAD uses **5 fragments per circle**
+   * (~2 per 90° corner) and we used the equivalent of **32** (8 per corner) —
+   * **4× the points at every convex corner.**
+   *
+   * ⚠ AND THAT IS ALL IT IS — A CORRECTNESS FIX, NOT THE CAUSE OF THE 9%.
+   * TODO #169 called this "the dominant cause" of `inner_wcnc`'s abandoned
+   * `difference()` and **that claim was WRONG, retracted 2026-09-18 by counting
+   * the geometry**: the file instantiates ~920 cylinders (766 of them at
+   * `$fn = 24`), so its polygon count is FASTENER HOLES, not offset arcs. Honouring
+   * the source here moves it 237,056 → 218,864 triangles (−7.7%), the
+   * `difference()` at `:104` is **still refused** for exceeding `MAX_POLYS`, and the
+   * oracle ledger is **unchanged** (`DIVERGES 7 · STRICTER 4`, same four files).
+   * ⇒ ***The inference was "4× at every convex corner" → "therefore the dominant
+   * term", made without ever asking what fraction of the geometry is offset arcs.***
+   *
+   * ⚠ THE BODY IS UNCHANGED — this is a move, not a rewrite. Every `$fn` subtlety
+   * it documents (NaN kept as "no answer" = 3, `fn < 0` warned and zeroed, the
+   * `$fa`/`$fs` clamp at 0.01) is the same code the primitives have always run,
+   * and `primitive()` now delegates to it so the two cannot drift.
+   *
+   * @param named  already-EVALUATED named arguments at the call site.
+   */
+  private facetsFrom(named: Map<string, Value>, env: Env, line: number): Facets {
+    const fnV = named.get('$fn') ?? lookup(env, '$fn');
+    let fn: number | null = null;
+    if (typeof fnV === 'number') {
+      if (Number.isNaN(fnV)) {
+        // Kept, not nulled: `isnan(fn)` is a "no answer" in OpenSCAD, and a
+        // no-answer is 3 — it is NOT the `$fa`/`$fs` path.
+        fn = fnV;
+      } else if (fnV < 0) {
+        // OpenSCAD's own wording, `CurveDiscretizer.cc:37`. It sets fn = 0,
+        // which is our `null`: both then fall to `$fa`/`$fs`. The warning is
+        // the part we were missing — the geometry already agreed.
+        this.warn(line, '$fn negative - setting to 0');
+        fn = null;
+      } else if (fnV > 0) {
+        fn = fnV;
+      }
+    }
+    const special = (key: string, dflt: number): number => {
+      const v = named.get(key) ?? lookup(env, key);
+      if (typeof v !== 'number') return dflt;
+      if (!Number.isFinite(v)) {
+        // 🔴 DELIBERATELY NOT MATCHED, AND SAID OUT LOUD RATHER THAN LEFT
+        // SILENT. OpenSCAD's `fa < F_MINIMUM` and `fs < F_MINIMUM` clamps are
+        // both false for NaN, so the NaN reaches the arithmetic and the
+        // result is `static_cast<int>(NaN)` — undefined behaviour. Measured
+        // 2026-08-11 on openscad 2026.08.07: `circle(r=10,$fa=sqrt(-1))` is
+        // **1** SVG point, `$fs=sqrt(-1)` is 30, and either of `$fa`/`$fs` at
+        // `1e308*10` is 5. A one-point circle is not a shape to port. We use
+        // the default and NAME the substitution, because a silent one is
+        // indistinguishable from having read the source correctly.
+        this.warn(
+          line,
+          `${key} is ${Number.isNaN(v) ? 'nan' : 'infinite'}; OpenSCAD's own answer here is undefined ` +
+            `(its clamp does not fire and the count is cast from a non-finite double), so ${key} = ${dflt} ` +
+            'was used instead. The tessellation is this tool\'s choice, not OpenSCAD\'s.',
+        );
+        return dflt;
+      }
+      if (v < 0.01) {
+        // OpenSCAD's own wording, probed: `$fs too small - clamping to 0.010000`.
+        this.warn(line, `${key} too small - clamping to 0.010000`);
+        return 0.01;
+      }
+      return v;
+    };
+    return capFacets({ fn, fa: special('$fa', 12), fs: special('$fs', 2) }, this.maxFragments);
+  }
+
   private primitive(s: Extract<Stmt, { t: 'call' }>, env: Env): PrimitiveNode | null {
     const line = s.line;
     const pos = s.args.filter((a) => a.name === null).map((a) => this.eval(a.value, env));
@@ -3840,54 +4568,7 @@ class Evaluator {
      * same `isinf || isnan` rule — and only the cases OpenSCAD really zeroes
      * (`fn < 0`, with its warning) or leaves at 0 fall through to `$fa`/`$fs`.
      */
-    const facets = (): Facets => {
-      const fnV = named.get('$fn') ?? lookup(env, '$fn');
-      let fn: number | null = null;
-      if (typeof fnV === 'number') {
-        if (Number.isNaN(fnV)) {
-          // Kept, not nulled: `isnan(fn)` is a "no answer" in OpenSCAD, and a
-          // no-answer is 3 — it is NOT the `$fa`/`$fs` path.
-          fn = fnV;
-        } else if (fnV < 0) {
-          // OpenSCAD's own wording, `CurveDiscretizer.cc:37`. It sets fn = 0,
-          // which is our `null`: both then fall to `$fa`/`$fs`. The warning is
-          // the part we were missing — the geometry already agreed.
-          this.warn(line, '$fn negative - setting to 0');
-          fn = null;
-        } else if (fnV > 0) {
-          fn = fnV;
-        }
-      }
-      const special = (key: string, dflt: number): number => {
-        const v = named.get(key) ?? lookup(env, key);
-        if (typeof v !== 'number') return dflt;
-        if (!Number.isFinite(v)) {
-          // 🔴 DELIBERATELY NOT MATCHED, AND SAID OUT LOUD RATHER THAN LEFT
-          // SILENT. OpenSCAD's `fa < F_MINIMUM` and `fs < F_MINIMUM` clamps are
-          // both false for NaN, so the NaN reaches the arithmetic and the
-          // result is `static_cast<int>(NaN)` — undefined behaviour. Measured
-          // 2026-08-11 on openscad 2026.08.07: `circle(r=10,$fa=sqrt(-1))` is
-          // **1** SVG point, `$fs=sqrt(-1)` is 30, and either of `$fa`/`$fs` at
-          // `1e308*10` is 5. A one-point circle is not a shape to port. We use
-          // the default and NAME the substitution, because a silent one is
-          // indistinguishable from having read the source correctly.
-          this.warn(
-            line,
-            `${key} is ${Number.isNaN(v) ? 'nan' : 'infinite'}; OpenSCAD's own answer here is undefined ` +
-              `(its clamp does not fire and the count is cast from a non-finite double), so ${key} = ${dflt} ` +
-              'was used instead. The tessellation is this tool\'s choice, not OpenSCAD\'s.',
-          );
-          return dflt;
-        }
-        if (v < 0.01) {
-          // OpenSCAD's own wording, probed: `$fs too small - clamping to 0.010000`.
-          this.warn(line, `${key} too small - clamping to 0.010000`);
-          return 0.01;
-        }
-        return v;
-      };
-      return { fn, fa: special('$fa', 12), fs: special('$fs', 2) };
-    };
+    const facets = (): Facets => this.facetsFrom(named, env, line);
 
     const num = (v: Value): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
@@ -3982,12 +4663,65 @@ class Evaluator {
       }
       case 'polygon': {
         accept(['points', 'paths', 'convexity']);
-        arity(1);
+        // OpenSCAD's signature is polygon(points, paths, convexity): `paths` is
+        // legal POSITIONALLY. `arity(1)` warned it away as a surplus argument.
+        arity(3);
         // points = [[x1,y1], [x2,y2], ...] — an array of 2-element arrays.
         const pointsVal = named.get('points') ?? pos[0];
         if (!Array.isArray(pointsVal)) {
           this.fail(line, 'polygon() needs a points array');
           return null;
+        }
+        const pathsVal = named.has('paths') ? named.get('paths') : pos[1];
+        /* 🔴 `paths` IS READ, NOT IGNORED (2026-10-14). An absent, `undef` or
+         * EMPTY `paths` means "the points in order" — openscad answers the same
+         * 55.5 mm² for all three on a two-ring point list. Anything else is
+         * either taken exactly or REFUSED by name; openscad's own handling of
+         * the rest (a non-list, a fractional or out-of-range index) is a
+         * WARNING and a silently different shape — `paths=[[0,-1,2,3]]` draws a
+         * triangle, `[[0,1.5,2,3]]` truncates to index 1 — and a reader that
+         * guessed along would cut one of those without a word. */
+        let paths: number[][] | undefined;
+        if (pathsVal !== undefined && pathsVal !== null && !(Array.isArray(pathsVal) && pathsVal.length === 0)) {
+          const bad = (why: string): null => {
+            this.refuse(
+              'polygon(paths=)',
+              line,
+              `${why}. openscad warns and draws a DIFFERENT shape from the one written (it skips or truncates ` +
+                'the index); nothing is drawn for this node rather than guessing which.',
+            );
+            return null;
+          };
+          if (!Array.isArray(pathsVal)) return bad('paths is not a list of index lists');
+          paths = [];
+          for (let k = 0; k < pathsVal.length; k++) {
+            const path = pathsVal[k];
+            if (!Array.isArray(path)) return bad(`paths[${k}] is not a list of point indices`);
+            const loop: number[] = [];
+            for (let m = 0; m < path.length; m++) {
+              const ix = path[m];
+              if (typeof ix !== 'number' || !Number.isInteger(ix)) return bad(`paths[${k}][${m}] is not an integer point index`);
+              if (ix < 0 || ix >= pointsVal.length) {
+                return bad(`paths[${k}][${m}] = ${ix} is outside the ${pointsVal.length} points`);
+              }
+              const pt = pointsVal[ix];
+              if (!Array.isArray(pt) || pt.length < 2 || num(pt[0]) === null || num(pt[1]) === null) {
+                return bad(`paths[${k}][${m}] names point ${ix}, which is not a numeric [x, y]`);
+              }
+              loop.push(ix);
+            }
+            paths.push(loop);
+          }
+        }
+        if (paths) {
+          // Indices address the ORIGINAL list, so it is kept whole: every point
+          // a path names was checked above, and unnamed ones are never read.
+          const all = pointsVal.map((pt) =>
+            Array.isArray(pt) && pt.length >= 2 && num(pt[0]) !== null && num(pt[1]) !== null
+              ? ([num(pt[0])!, num(pt[1])!] as [number, number])
+              : ([NaN, NaN] as [number, number]),
+          );
+          return { kind: 'primitive', params: { kind: 'polygon', points: all, paths }, line };
         }
         const pts: [number, number][] = [];
         for (const pt of pointsVal) {
@@ -4000,8 +4734,6 @@ class Evaluator {
           this.fail(line, `polygon() needs at least 3 points, got ${pts.length}`);
           return null;
         }
-        // paths is optional — when omitted, all points form one polygon.
-        // For now, ignore paths and use all points in order.
         return { kind: 'primitive', params: { kind: 'polygon', points: pts }, line };
       }
       case 'text': {
@@ -4129,6 +4861,15 @@ class Evaluator {
         if (typeof start !== 'number' || typeof end !== 'number' || typeof step !== 'number') {
           this.fail(e.line, 'a range needs numeric start, step and end');
           return FAILED;
+        }
+        // 🔴 `[b:e]` with b > e and NO step: OpenSCAD SWAPS the ends (with a
+        // "deprecated" warning) and iterates. This returned an empty range, so
+        // `for (i = [0 : n-1])` with n = 0 and `[3:1]` dropped every part the author
+        // saw in OpenSCAD's preview, with no word (bughunt 2026-11-15). With an
+        // explicit step the wrong direction is still empty, as in OpenSCAD.
+        if (!e.step && start > end) {
+          this.warn(e.line, `DEPRECATED: Using ranges of the form [begin:end] with begin value greater than the end value is deprecated. [${start}:${end}] is read as [${end}:${start}], as OpenSCAD does`);
+          return { __range: true, start: end, step, end: start };
         }
         return { __range: true, start, step, end };
       }
@@ -4910,11 +5651,23 @@ function iterableOf(v: Value): Value[] | null {
  *  language builtin was missing. That lands on the wrong side of the very
  *  distinction this file's header draws between a NAMED refusal and an unknown
  *  name. Probed: OpenSCAD gives `cube(size = [3.14159, 1, 1])`. */
-function rootEnv(): Env {
+function rootEnv(t = 0, render = false, faFs: { fa: number; fs: number } = { fa: PRINT_FA, fs: PRINT_FS }): Env {
   const env = newEnv(null, null);
   env.vars.set('PI', Math.PI);
   // `$t` is the animation step and is 0 at every non-animated invocation (probed).
-  env.vars.set('$t', 0);
+  //
+  // 🔴 IT IS A PARAMETER RATHER THAN A CONSTANT SINCE 2026-09-09, AND THE
+  // DEFAULT IS UNCHANGED. Every existing caller passes nothing and gets 0, so no
+  // geometry this lane already produces moves. What it buys is that a source
+  // which animates can be evaluated at more than one step — which is the only
+  // way to tell an animated design from one that merely MENTIONS `$t`, and the
+  // difference matters here: a card claiming an animation that does not move is
+  // the same class of defect as a thumbnail of a part the app will not produce.
+  //
+  // ⚠ IT DOES NOT MAKE THIS AN ANIMATION PLAYER. Nothing in the UI scrubs `$t`;
+  // the frames are driven by the external-design verifier, one evaluation per
+  // step. Wiring a scrubber is a separate decision and is not implied by this.
+  env.vars.set('$t', t);
   // 🔴 `$preview` IS A CHOICE, AND IT IS THE LANE'S EXISTING ONE WRITTEN DOWN.
   // OpenSCAD sets it TRUE in preview (F5, and in `-o csg`) and FALSE in a full
   // render (F6, and in `-o stl`) — probed both ways on 2026.08.07, and the same
@@ -4929,13 +5682,43 @@ function rootEnv(): Env {
   // — resolution, not shape — but that is a fact about today's corpus, not a
   // property of the language. One line to reverse, and the reversal must move
   // the sibling-union rule with it.
-  env.vars.set('$preview', true);
+  env.vars.set('$preview', !render);
+  if (render) {
+    env.vars.set('$fa', faFs.fa);
+    env.vars.set('$fs', faFs.fs);
+  }
   // ⚠ `$vpr`/`$vpt`/`$vpd`/`$vpf`/`$children` are deliberately NOT defined.
   // They describe a camera and a call site this file does not have, and
   // inventing plausible values would silently change any geometry derived from
   // them. Left undefined, they raise an error and draw nothing, which is the
   // direction that cannot cut the wrong part.
   return env;
+}
+
+/** What `mesh.ts`'s `rotateExtrudeOutline` revolves a `rotate_extrude` with no `$fn` at (fixed, per full turn). */
+export const ROTATE_EXTRUDE_DEFAULT_FN = 48;
+
+/**
+ * A `$fn` under `ScadOptions.maxFragments`: lowered to the cap when it asks for more, NEVER raised. A non-finite
+ * `$fn` (OpenSCAD's "no answer" = 3) and a `$fn` below the cap pass unchanged. `nullMeans` is what the consumer draws
+ * for `null`: `null` for a `$fa`/`$fs` call site (bounded through `$fa` instead, see `capFacets`), or a fixed count.
+ */
+export function capFn(fn: number | null, cap: number | undefined, nullMeans: number | null): number | null {
+  if (cap === undefined) return fn;
+  if (fn === null) return nullMeans !== null && nullMeans > cap ? cap : null;
+  if (Number.isFinite(fn) && fn > cap) return cap;
+  return fn;
+}
+
+/**
+ * `Facets` under `ScadOptions.maxFragments`. `$fn` is lowered by `capFn`; the `$fa`/`$fs` path
+ * (`max(5, ceil(min(360/$fa, 2πr/$fs)))`) is bounded by RAISING `$fa` to just over `360/cap`, which caps the angle
+ * term at every radius and only ever removes fragments. The `(1 + 1e-12)` keeps `ceil(360/$fa)` at the cap where
+ * `360/cap` is not exact in binary (it is exact for 64 and 32).
+ */
+export function capFacets(f: Facets, cap: number | undefined): Facets {
+  if (cap === undefined) return f;
+  return { fn: capFn(f.fn, cap, null), fa: Math.max(f.fa, (360 / cap) * (1 + 1e-12)), fs: f.fs };
 }
 
 export function parseScad(src: string, opts: ScadOptions = {}): ScadResult {
@@ -4948,13 +5731,18 @@ export function parseScad(src: string, opts: ScadOptions = {}): ScadResult {
   const lexWarnings: ScadWarning[] = [];
   const toks = tokenize(src, errors, undefined, lexWarnings);
   const selfPath = opts.path ?? '';
-  const parser = new Parser(toks, errors, src, { host: opts.host, count: 0 }, selfPath, [selfPath], lexWarnings);
+  const parser = new Parser(toks, errors, src, { host: opts.host, count: 0, charged: new Set(), defsMemo: new Map(), defsOpen: new Set() }, selfPath, [selfPath], lexWarnings);
   const program = parser.parseProgram();
 
-  const root = rootEnv();
+  if (opts.maxFragments !== undefined && !(Number.isInteger(opts.maxFragments) && opts.maxFragments >= 5)) {
+    // Refused, not rounded: a cap the evaluator cannot honour would be a resolution reported but not drawn.
+    throw new RangeError(`maxFragments must be an integer >= 5, got ${opts.maxFragments}`);
+  }
+  const root = rootEnv(opts.t ?? 0, opts.render ?? false, opts.renderFaFs);
   const ev = new Evaluator();
   ev.host = opts?.host;
   ev.path = opts?.path;
+  ev.maxFragments = opts.maxFragments;
   const scene = ev.run(program, root);
 
   const all = [...errors, ...ev.errors].sort((a, b) => a.line - b.line);

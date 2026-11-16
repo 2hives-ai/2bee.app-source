@@ -879,7 +879,18 @@ export function sceneToCanon(node, opts = {}) {
           // evaluator refuses those calls.
           return other('linear_extrude', [...e, ['$fn', n.extrude.fn ?? 0], ['$fa', opts.fa ?? OUR_FA], ['$fs', opts.fs ?? OUR_FS]], ch);
         }
-        if (n.offset) return other('offset', [['r', n.offset.r], ...fafss()], ch);
+        /* 🔴 PRINT WHAT THE NODE CARRIES (2026-10-14). This printed every offset as
+         * `r=` with `$fn=0`, so a correct `delta=-0.8,chamfer=false` (join 'miter')
+         * and a correct `$fn=32` read as tree DIVERGES on three cut files — the
+         * diff blamed our reader for the oracle's own printer. OpenSCAD's .csg
+         * spells them `offset(delta=…,chamfer=false,$fn=…,$fa=…,$fs=…)` and
+         * `offset(r=…,$fn=…,$fa=…,$fs=…)`. `chamfer=true` never reaches here: the
+         * evaluator refuses it. */
+        if (n.offset) {
+          const o = n.offset;
+          const facets = [['$fn', o.f?.fn ?? 0], ['$fa', o.f?.fa ?? opts.fa ?? OUR_FA], ['$fs', o.f?.fs ?? opts.fs ?? OUR_FS]];
+          return other('offset', o.join === 'miter' ? [['delta', o.r], ['chamfer', false], ...facets] : [['r', o.r], ...facets], ch);
+        }
         if (n.rotateExtrude) {
           return other(
             'rotate_extrude',
@@ -958,16 +969,16 @@ export function sceneToCanon(node, opts = {}) {
             return { k: 'prim', m: IDENT4, text: primCircle(p.r, p.fn ?? 0, faOf(p), fsOf(p)) };
           // The three primitives that ARE leaves in OpenSCAD's vocabulary too:
           // the .csg prints them as module calls, so both sides land on the
-          // same `other` node. Our parser drops `paths` (polygon) and resolves
-          // `convexity` away; the markers print OpenSCAD's defaults for those
-          // fields, so a source that WRITES paths= diverges — true red, we
-          // really do ignore it.
+          // same `other` node. `convexity` is resolved away (markers print
+          // OpenSCAD's default). `paths` is READ since 2026-10-14 (even-odd
+          // fill, as openscad) and printed as carried — it used to print undef
+          // always, which was true only while the parser ignored it.
           case 'polygon':
             return other(
               'polygon',
               [
                 ['points', p.points.map((pt) => [...pt])],
-                ['paths', undefined],
+                ['paths', p.paths ? p.paths.map((q) => [...q]) : undefined],
                 ['convexity', 1],
               ],
               [],

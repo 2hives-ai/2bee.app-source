@@ -699,6 +699,7 @@ function decide(c, oracle, plantName) {
     ...ours.meshRefusals.map((i) => `${i.name} [kernel]`),
   ];
   row.numbers.ourTriangles = ours.inv.triangles;
+  row.numbers.ourWork = ours.work;
   row.numbers.ourSolids = ours.solidParts;
   row.numbers.ourFlats = ours.flatParts;
   row.numbers.refusals = refusalNames.length;

@@ -95,7 +95,13 @@ export async function loadCam(): Promise<void> {
   await call('version', []);
 }
 
-export type RenderKind = 'rapid' | 'cut' | 'tab' | 'drill' | 'change' | 'probe';
+/** `change` = the program stops for a CUTTER change; `clamp` = it stops for the
+ *  operator to MOVE CLAMPS (`text` is the instruction). A stop that does both
+ *  is a `clamp` move immediately followed by a `change` move — one `M0`.
+ *  `zero` = on a machine with NO Z probe, the program stops a SECOND time right
+ *  after a cutter change for the person to set Z zero by hand (`text` is the
+ *  instruction); it belongs to the `change` before it — one intervention. */
+export type RenderKind = 'rapid' | 'cut' | 'tab' | 'drill' | 'change' | 'probe' | 'clamp' | 'zero';
 
 /**
  * One point of the drawn toolpath — the **cutter centre**, with the per-move
@@ -778,6 +784,16 @@ export interface Report {
    */
   spoilboard_bare_reach?: [number, number, number, number] | null;
   clamps: ClampCfg[];
+  /** Clamp set per phase when the clamps move mid-job; empty/absent = one phase. */
+  clamp_phases?: ClampCfg[][];
+  /** What the operator moves at the stop (footprint centres, machine mm). */
+  clamp_moves?: ClampMove[];
+  /** `( CLAMP CHANGE -> … )` stops in the emitted program. Also counted in `tool_changes` (every M0). */
+  clamp_changes?: number;
+  /** Every operator stop in the EMITTED program, in order (core `setup::interventions_of`). */
+  interventions?: Intervention[];
+  /** The planner's count of stops when clamps move, and what merging saved. */
+  intervention_plan?: { cutter: number; clamps: number; merged: number; stops: number; stops_unmerged: number } | null;
   /**
    * The transform that takes {@link Report.drawing} and {@link Report.loaded_mesh}
    * into the frame {@link Report.render} and {@link Report.gcode} are already in.
@@ -919,6 +935,15 @@ export interface JobConfig {
   material?: string;
   op?: Record<string, unknown>;
   probe_after_toolchange?: boolean;
+  /** Re-reference Z after a clamp move. Absent = the core's default (true). */
+  probe_after_clamp_change?: boolean;
+  /**
+   * When a cut crosses a clamp, split the job into clamping phases with a stop
+   * to move the clamps (core `reclamp.rs`) instead of leaving it refused. It
+   * never lets a cut pass through a clamp: every phase is checked against the
+   * clamps in force during it.
+   */
+  auto_reclamp?: boolean;
   /**
    * Where the operator has dragged the geometry ON THE SHEET, `[x, y]` in sheet
    * millimetres.
@@ -2079,4 +2104,103 @@ export function fmtDuration(sec: number): string {
   if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+/** The physical setup read off an emitted program (`core/src/setup.rs`). Only
+ *  the fields the browser reads are typed; the rest travel untouched. */
+export interface SetupFacts {
+  ok: boolean;
+  mismatches: string[];
+  pending: string[];
+  tools: { index: number; name: string; diameter_mm: number | null; in_job_tool_list: boolean }[];
+  tool_changes: number;
+  z_datum: { declared: string; source: string };
+  xy_zero: { convention: string; source: string };
+  workpiece: { size_x_mm: number; size_y_mm: number; thickness_mm: number };
+  depth: { deepest_emitted_z_mm: number | null; cuts_through: boolean; into_spoilboard_mm: number };
+  spindle: { rpm: number[] };
+}
+
+export interface SetupAnswer {
+  ok: boolean;
+  refused: string[];
+  facts: SetupFacts | null;
+  /** SHA-256 of the exact G-code the facts were read from. */
+  gcode_sha256: string | null;
+}
+
+/**
+ * Setup facts for an imported design, planned through the SAME core call as
+ * {@link planImportBytes} (same first five arguments). Compare `gcode_sha256`
+ * with the hash of the program you hold before trusting the facts for it.
+ */
+/**
+ * Setup facts for N PLACED drawings — the same inputs as {@link planImportMany}
+ * (offsets, rotations, sections), through the core's
+ * `setup_facts_for_import_many_json`, which parses them with the same helper and
+ * plans them with the same `plan_report_import_many`. Pair it with a plan made by
+ * `planImportMany`; compare `gcode_sha256` before trusting it.
+ */
+export async function setupFactsForImportMany(
+  drawings: ImportDrawing[],
+  config: JobConfig,
+  simCell = 0.6
+): Promise<SetupAnswer> {
+  const total = drawings.reduce((n, d) => n + d.bytes.length, 0);
+  const blob = new Uint8Array(total);
+  let at = 0;
+  for (const d of drawings) {
+    blob.set(d.bytes, at);
+    at += d.bytes.length;
+  }
+  const described = drawings.map((d) => ({
+    id: d.id,
+    format: d.format,
+    byte_len: d.bytes.length,
+    z_section_mm:
+      d.z_section_mm !== undefined && Number.isFinite(d.z_section_mm) ? d.z_section_mm : undefined,
+    offset_mm: d.offset_mm,
+    rotation_deg: d.rotation_deg,
+  }));
+  return callJson('setup_facts_for_import_many_json', [JSON.stringify(described), blob, JSON.stringify(config), simCell]);
+}
+
+export async function setupFactsForImport(
+  data: Uint8Array,
+  format: 'dxf' | 'svg' | 'stl' | 'auto',
+  config: JobConfig,
+  zSectionMm?: number,
+  simCell = 0.6
+): Promise<SetupAnswer> {
+  return callJson('setup_facts_for_import_json', [
+    data,
+    format,
+    zSectionMm !== undefined && Number.isFinite(zSectionMm) ? zSectionMm : undefined,
+    JSON.stringify(config),
+    simCell,
+  ]);
+}
+
+/** One clamp moved at a mid-job stop. */
+export interface ClampMove {
+  clamp: string;
+  from: [number, number];
+  to: [number, number];
+}
+
+/** One operator stop (an `M0`) and what must be done at it. */
+export interface Intervention {
+  /** 1-based line of the `M0`. */
+  pause_line: number;
+  /** Empty = an `M0` the program does not explain. */
+  items: { kind: 'cutter' | 'clamps' | 'plate' | 'zero'; text: string; named_at_line: number }[];
+  /** The program re-references Z after this stop. */
+  reprobe: boolean;
+  /** No Z probe: the second `M0` (1-based line) where the person sets Z zero by hand. */
+  zero_pause_line?: number;
+  /** What that second stop tells the person. */
+  zero_instruction?: string;
+  /** A stated risk with no check behind it — today the clamp-only stop after
+   *  which nothing re-measures Z (core `setup::CLAMP_NO_ZCHECK`). */
+  warning?: string;
 }

@@ -72,6 +72,7 @@ import {
   chargedCharacters,
   consoleAction,
   consoleRefusals,
+  controlRefusals,
   droFreshness,
   droRendering,
   realtimeEcho,
@@ -613,7 +614,14 @@ test('🔴 PLANT — a realtime byte sent as a line desynchronises the sender at
     // The operator asks for status, mid-stream, from the console.
     const outcome = consoleAction('?', connected({ tab: 'Streaming', controllerState: 'Run' }), {},
       planted ? 'realtime-as-line' : undefined);
-    if (outcome.kind === 'line') await fake.write(encodeLine(outcome.line));
+    if (outcome.kind === 'line') {
+      /* `encodeLine` now refuses a realtime byte inside a line (2026-11-14), so
+       * the plant is stopped one layer earlier than it used to be. Assert that,
+       * then put the raw bytes on the wire past it — what the controller does
+       * with `?\n` is still the reason the console must send one byte. */
+      assert.throws(() => encodeLine(outcome.line), /realtime or control byte/);
+      await fake.write(new Uint8Array([...outcome.line].map((c) => c.charCodeAt(0)).concat(0x0a)));
+    }
     else if (outcome.kind === 'realtime') await fake.write(realtimeBytes(outcome.name));
     else assert.fail(`unexpected console outcome ${outcome.kind}`);
     await settle();
@@ -876,4 +884,20 @@ test('the console offers an input, and it is disabled with the reason when it ca
   assert.match(rules, /Realtime bytes are not lines/);
   assert.match(rules, /Abort by another route/);
   assert.match(rules, /not echoed here/);
+});
+
+test('🔴 `~` and `/resume` in the console answer to the Resume button’s refusals', () => {
+  /* `cycleStart` has no state table of its own, so the console sent it after
+   * an abort and in Alarm. After Stop that resumed the rest of the program
+   * still in the RX buffer and planner, with no sender behind it. */
+  const aborted = connected({ tab: 'Aborted', controllerState: 'Hold', controllerSubstate: 0 });
+  for (const typed of ['~', '/resume']) {
+    assert.equal(consoleAction(typed, aborted).kind, 'refused', `${typed} after an abort`);
+  }
+  assert.equal(consoleAction('~', connected({ tab: 'Aborted', controllerState: 'Alarm' })).kind, 'refused');
+  // Positive control: where the button may resume, so may the console — a
+  // gate that refuses everything would pass the three lines above.
+  const held = connected({ tab: 'Held', controllerState: 'Hold', controllerSubstate: 0 });
+  assert.deepEqual(controlRefusals('resume', held).map((r) => r.id), [], 'the button cannot resume a hold');
+  assert.equal(consoleAction('~', held).kind, 'realtime', 'a hold the button may resume, the console refused');
 });

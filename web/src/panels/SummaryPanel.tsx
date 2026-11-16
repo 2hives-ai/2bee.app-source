@@ -9,6 +9,7 @@ import { Section } from './SectionPanel';
 import type { Report } from '../cam';
 import { formatLength } from '../units';
 import { useCncStore } from '../store/cncStore';
+import { stopCounts } from '../cnc/interventions';
 
 /** Format a distance in the operator's unit, with the unit on it. Millimetres in. */
 function L(mm: number, unit: Parameters<typeof formatLength>[1]): string {
@@ -317,7 +318,16 @@ export function SummaryPanel({ report, busy = false }: SummaryPanelProps) {
         <span>Tools</span>
         <b>{report.tools_used.length}</b>
         <span>Tool changes</span>
-        <b data-testid="tool-changes">{report.tool_changes}</b>
+        {/* `tool_changes` counts every M0; once clamps can move mid-job some of
+            those stops are clamp moves, so the cutter count is read off the
+            stops instead (a shared stop counts once for each). */}
+        <b data-testid="tool-changes">{report.clamp_changes ? stopCounts(report.render ?? []).cutter : report.tool_changes}</b>
+        {report.clamp_changes ? (
+          <>
+            <span>Clamp moves</span>
+            <b data-testid="clamp-moves">{stopCounts(report.render ?? []).clamps}</b>
+          </>
+        ) : null}
         <span>Cutting</span>
         <b>{L(report.cutting_distance_mm, unit)}</b>
         <span>Rapids</span>

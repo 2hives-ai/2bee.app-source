@@ -2077,6 +2077,18 @@ export function identify(lines: string[], plant?: ProtocolPlant): Identification
       };
     }
   }
+  /* `$I` on grblHAL ends its build info with `[FIRMWARE:grblHAL]`
+   * (report.c:1056); grbl 1.1 has no such line. */
+  if (lower.some((l) => l.trim() === '[firmware:grblhal]')) {
+    return {
+      verdict: 'grblHAL',
+      evidence: '[FIRMWARE:grblHAL] in the $I build info',
+      permits: 'everything',
+      why: 'The controller named itself grblHAL in its build info, a line grbl 1.1 does not print.',
+      heard,
+      received,
+    };
+  }
   if (lower.some((l) => /^grblhal\s/.test(l.trim()))) {
     return {
       verdict: 'grblHAL',
@@ -2433,6 +2445,13 @@ export class Streamer {
    * @param plant `'keep-going-past-error'`.
    */
   onReply(inbound: Inbound): void {
+    /* 🔴 A FINISHED STREAM IS FINISHED. The pump stays attached after `done`
+     * until the next load, so the first `ok` to a console `$$`, a jog or `$H`
+     * arrived here with nothing outstanding and was read as a SECOND PROGRAM on
+     * the port: the completed job flipped to `aborted:desync` and the tab sent
+     * a feed hold, cancelling the jog. A stream that is over owns no replies;
+     * the tab still sees every line on its own channel (alarms included). */
+    if (this._state === 'done' || this._state === 'aborted') return;
     if (inbound.kind === 'alarm') {
       this._state = 'aborted';
       this._abort = {
@@ -2489,6 +2508,18 @@ export class Streamer {
   }
 
   /** Operator pressed Stop, or a watchdog fired. */
+  /**
+   * Give back the last `n` lines {@link nextLines} handed out and the transport
+   * never wrote, after the stream stopped mid-batch. Only legal once aborted:
+   * a running stream that un-sends lines would desynchronise its own count.
+   */
+  withdraw(n: number): void {
+    if (this._state !== 'aborted' || n <= 0) return;
+    const k = Math.min(n, this.outstanding.length);
+    this.outstanding.splice(this.outstanding.length - k, k);
+    this.cursor -= k;
+  }
+
   stop(message: string): void {
     if (this._state === 'done' || this._state === 'aborted') return;
     this._state = 'aborted';

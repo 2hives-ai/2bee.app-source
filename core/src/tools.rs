@@ -240,6 +240,28 @@ fn mk(
     }
 }
 
+/// A GENERIC end mill of a stated size: not a product in the library, but the
+/// spec a cutter must meet (founder 2026-10-16: "create a generic tool what can do
+/// the work if this is happening"). Its id starts `GENERIC`, so nothing can mistake
+/// it for a cutter the shop owns: it has to be bought to this spec and registered
+/// (and measured) in cnc.tools before the cutters gate passes.
+///
+/// Chipload window scaled from the library's end mills (6mm: 0.05/0.10/0.20mm,
+/// i.e. d/120, d/60, d/30). Up-cut 2-flute, 8 000–24 000 rpm like the library.
+pub fn generic_end_mill(diameter_mm: f64, cutting_length_mm: f64, shank_mm: f64) -> ToolSpec {
+    let d = diameter_mm;
+    mk(
+        &format!("GENERIC End Mill {d}mm x {cutting_length_mm}mm cut, {shank_mm}mm shank, 2F up-cut"),
+        ToolCategory::EndMill,
+        d,
+        2,
+        shank_mm,
+        cutting_length_mm,
+        (d / 120.0, d / 60.0, d / 30.0),
+        Flute::UpCut,
+    )
+}
+
 /// The built-in library. Chiploads are the published windows for hardwood/ply in
 /// the diameter class; they are the INPUT to `feed = rpm x flutes x chipload`
 /// and are never a feed themselves.

@@ -372,6 +372,19 @@ class Controller:
         self.timeout = timeout
 
     def close(self) -> None:
+        # 🔴 SOFT RESET ON EVERY EXIT, NOT ONLY ON THE UNLOCK-FAILURE PATH. An
+        # `ok` means "parsed into the planner", so when this loop ends the board
+        # can still hold queued moves — or sit in Hold at an `M0` with the rest
+        # of the program buffered behind it, waiting for any cycle start (a
+        # pendant, a sender) to run it, `M3` included, after this tool has
+        # reported the run over. 0x18 empties the planner and the line buffer.
+        # Stopping a moving axis this way can raise ALARM:3; that is the safe
+        # direction, and nothing should keep moving unwatched.
+        try:
+            self.ser.write(bytes([0x18]))
+            self.ser.flush()
+        except Exception:  # the port may already be gone; closing still matters
+            pass
         self.ser.close()
 
     def drain(self, seconds: float) -> list[str]:
@@ -398,8 +411,27 @@ class Controller:
         replies: list[str] = []
         verdict = None
         deadline = time.time() + self.timeout
-        while wait_ok and time.time() < deadline:
-            reply = self.ser.readline().decode("utf-8", "replace").strip()
+        # 🔴 A SLOW `ok` IS NOT A MISSING ONE. `M5`, `M30`, `G4`, `G10` and
+        # friends make grblHAL empty the planner before it answers, so their
+        # `ok` arrives only when every queued move has run — 16.8 s for the
+        # moves queued ahead of `M5` in `fixture rect-profile`, against a 10 s
+        # window. Scored as UNANSWERED, the `$I` sent next then read that late
+        # `ok` as its own, and every later verdict was one line out. So when
+        # the window ends with nothing, ask for a status report (`?`, realtime,
+        # never answered with `ok`): a board that reports `<Run` / `<Hold` /
+        # `<Jog` is alive and busy, and the window opens again — up to
+        # `busy_limit` seconds in all, so a board held forever still ends.
+        started = time.time()
+        held: list[str] = []
+        while wait_ok:
+            if not held and time.time() >= deadline:
+                if time.time() - started >= self.busy_limit:
+                    break
+                busy, held = self._busy()
+                if not busy and not held:
+                    break
+                deadline = time.time() + self.timeout
+            reply = held.pop(0) if held else self.ser.readline().decode("utf-8", "replace").strip()
             if not reply:
                 continue
             replies.append(reply)
@@ -408,6 +440,27 @@ class Controller:
                 verdict = reply
                 break
         return {"sent": line, "replies": replies, "verdict": verdict}
+
+    #: Longest a single line may keep the window open while the board says it
+    #: is busy. Set per run from `--busy-limit`.
+    busy_limit: float = 300.0
+
+    def _busy(self) -> tuple[bool, list[str]]:
+        """One `?`: (the status report says the board is executing, every
+        other line read while waiting for it). The late `ok` this exists for
+        can land here, ahead of the report, so nothing read is dropped."""
+        self.ser.write(b"?")
+        self.ser.flush()
+        other: list[str] = []
+        end = time.time() + 2.0
+        while time.time() < end:
+            r = self.ser.readline().decode("utf-8", "replace").strip()
+            if r.startswith("<"):
+                state = r[1:].split("|", 1)[0].split(":", 1)[0]
+                return state in ("Run", "Hold", "Jog", "Home"), other + [r]
+            if r:
+                other.append(r)
+        return False, other
 
     def send_realtime(self, byte: int, listen: float = 1.0) -> list[str]:
         """
@@ -421,6 +474,19 @@ class Controller:
         self.ser.write(bytes([byte]))
         self.ser.flush()
         return self.drain(listen)
+
+
+def operator_stops(lines: list[str]) -> list[str]:
+    """The program-stop lines (`M0`, `M1`) among code lines.
+
+    This tool never sends cycle start, so it cannot carry a program past a stop.
+    """
+    out = []
+    for line in lines:
+        code = re.sub(r"\([^)]*\)|;.*$", "", line).upper().replace(" ", "")
+        if re.search(r"M0*[01](?![0-9.])", code):
+            out.append(line)
+    return out
 
 
 def code_lines(text: str) -> list[str]:
@@ -527,6 +593,80 @@ LADDER_CASES: tuple[tuple[str, list[str], str, str, str], ...] = (
 )
 
 
+class _FakeSerial:
+    """A board for the self-test: scripted replies, every byte written kept.
+
+    `script` is consumed one `readline()` at a time; `None` is a silent read
+    (the real port's timeout). Writing `?` puts `on_status` (a list of lines)
+    at the front of what is read next — a realtime request answered out of
+    band, possibly behind a reply that was already on its way.
+    """
+
+    def __init__(self, script: list[str | None], on_status: list[str] | None = None):
+        self.script = list(script)
+        self.on_status = on_status or []
+        self.written = bytearray()
+
+    def write(self, b: bytes) -> None:
+        self.written += b
+        if b == b"?":
+            self.script[:0] = list(self.on_status)
+
+    def flush(self) -> None:
+        pass
+
+    def readline(self) -> bytes:
+        r = self.script.pop(0) if self.script else None
+        if r is None:
+            time.sleep(0.002)
+            return b""
+        return (r + "\n").encode()
+
+    def close(self) -> None:
+        pass
+
+
+def _fake_controller(ser: _FakeSerial, timeout: float) -> "Controller":
+    c = Controller.__new__(Controller)
+    c.ser = ser
+    c.timeout = timeout
+    c.busy_limit = 5.0
+    return c
+
+
+def stream_self_test() -> list[str]:
+    """The streaming properties a box with no controller can still check."""
+    failures: list[str] = []
+
+    got = operator_stops(["G0 X1", "M0", "M30", "M01", "M3 S1", "G1 X2 (M0 in a comment)", "M00"])
+    if got != ["M0", "M01", "M00"]:
+        failures.append(f"operator_stops: wanted ['M0', 'M01', 'M00'], got {got}")
+
+    # A sync command (`M5` waits for the planner) whose `ok` comes after the
+    # window, from a board that reports it is running.
+    slow = _FakeSerial([None] * 40 + ["ok"], on_status=["<Run|MPos:0,0,0>"])
+    r = _fake_controller(slow, 0.02).send("M5")
+    if r["verdict"] != "ok":
+        failures.append(f"a slow `ok` from a busy board was scored {r['verdict']!r}, not 'ok'")
+    # The late `ok` arriving AHEAD of the status report must not be swallowed.
+    early = _FakeSerial([None] * 20, on_status=["ok", "<Idle|MPos:0,0,0>"])
+    r = _fake_controller(early, 0.02).send("M5")
+    if r["verdict"] != "ok":
+        failures.append(f"an `ok` read while waiting for the status report was dropped: {r}")
+    # A silent, idle board still ends unanswered — no endless wait.
+    idle = _FakeSerial([], on_status=["<Idle|MPos:0,0,0>"])
+    r = _fake_controller(idle, 0.02).send("M5")
+    if r["verdict"] is not None:
+        failures.append(f"an idle board with no reply produced a verdict: {r}")
+
+    # Every exit soft-resets.
+    ser = _FakeSerial([])
+    _fake_controller(ser, 0.02).close()
+    if 0x18 not in ser.written:
+        failures.append("close() did not send the 0x18 soft reset")
+    return failures
+
+
 def self_test(plant: str | None = None) -> int:
     """Run the ladder and the wire-silence property. 0 = green, 1 = red."""
     failures: list[str] = []
@@ -575,13 +715,15 @@ def self_test(plant: str | None = None) -> int:
                     f"step sends {kind} {payload!r} and the operator is shown {step.bytes_!r}"
                 )
 
+    failures.extend(stream_self_test())
+
     label = f" (plant={plant})" if plant else ""
     if failures:
         print(f"VERDICT: RED — {len(failures)} failure(s){label}", file=sys.stderr)
         for f in failures:
             print(f"  · {f}", file=sys.stderr)
         return 1
-    print(f"VERDICT: GREEN — {len(LADDER_CASES)} ladder case(s) + 3 properties{label}")
+    print(f"VERDICT: GREEN — {len(LADDER_CASES)} ladder case(s) + 3 properties + 4 streaming properties{label}")
     return 0
 
 
@@ -596,6 +738,12 @@ def main() -> int:
     ap.add_argument("--port", default="/dev/ttyACM0", help="serial device (default /dev/ttyACM0)")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--timeout", type=float, default=10.0, help="seconds to wait for a reply per line")
+    ap.add_argument(
+        "--busy-limit",
+        type=float,
+        default=300.0,
+        help="seconds one line may keep waiting while the board reports it is busy (Run/Hold/Jog)",
+    )
     ap.add_argument(
         "--rig",
         choices=("bare", "motors", "spindle"),
@@ -732,8 +880,24 @@ def main() -> int:
     program_bytes = args.program.read_bytes()
     program_hash = sha256(program_bytes)
     lines = code_lines(program_bytes.decode("utf-8", "replace"))
+    # 🔴 A PROGRAM STOP ON A RIG THAT MOVES IS REFUSED. This tool never sends
+    # cycle start: the board sits in Hold at the `M0` while the lines after it
+    # are buffered, and the first cycle start from anywhere runs them. Every
+    # program the post writes for a probing machine now has one (the touch
+    # plate stop), as does every cutter change. On a bare rig nothing moves and
+    # the reset on exit empties what was buffered.
+    stops = operator_stops(lines)
+    if stops and args.rig != "bare":
+        print(
+            f"REFUSED: the program has {len(stops)} program stop(s) ({stops[0]!r} first) and "
+            f"--rig {args.rig} can move the machine. This tool cannot resume past a stop; "
+            "run the program from a sender with an operator at the machine.",
+            file=sys.stderr,
+        )
+        return 2
 
     ctl = Controller(args.port, args.baud, args.timeout)
+    ctl.busy_limit = args.busy_limit
     try:
         # ── STEP 1 OF §11 AND NOTHING ELSE: LISTEN. ────────────────────────
         # `connect_writes()` is empty and that emptiness is the point. The

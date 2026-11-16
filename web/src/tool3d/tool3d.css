@@ -1,0 +1,41 @@
+/* 3D previews of cutters, touch plates and work holding (src/tool3d/).
+   Colours come from the brand tokens through CSS custom properties; the solids
+   themselves read the same properties at runtime (Scene3D.tsx). No hex here. */
+.t3d {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  min-width: 140px;
+}
+/* The picker bounds its shape slot's child to 210px tall, which suits a
+   self-sizing SVG. This view is a fixed-height canvas plus caption lines, so
+   it takes its own height instead of being clipped mid-caption. */
+.op-props-shape > .t3d { max-height: none; }
+.t3d-canvas {
+  display: block;
+  width: 100%;
+  height: 180px;
+  background: transparent;
+  cursor: grab;
+  touch-action: none;
+}
+.t3d-canvas:active { cursor: grabbing; }
+.t3d--wide .t3d-canvas { height: 170px; }
+.t3d-cap {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.68rem;
+  line-height: 1.3;
+  color: var(--muted);
+}
+.t3d-cap li + li { margin-top: 1px; }
+.t3d-cap .t3d-warn { color: var(--warn); }
+.t3d-cap .t3d-accent { color: var(--accent); }
+.t3d-hint {
+  margin: 2px 0 0;
+  font-size: 0.64rem;
+  color: var(--muted);
+  opacity: 0.8;
+}

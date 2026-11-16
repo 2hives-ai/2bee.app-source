@@ -33,9 +33,11 @@ pub mod optimise;
 pub mod placement;
 pub mod pocket;
 pub mod post;
+pub mod reclamp;
 pub mod post_grblhal;
 pub mod recommend;
 pub mod rect_profile;
+pub mod setup;
 pub mod sim;
 pub mod spoilboards;
 pub mod tech;
@@ -49,6 +51,10 @@ pub use feeds::{
 };
 pub use post_grblhal::{
     check_emitted_z_ceiling, check_machine_limits, post_grblhal, PostOptions, PostResult,
+};
+pub use setup::{
+    setup_facts, setup_for_import, setup_for_import_many, setup_for_reference_job, SetupAnswer,
+    SetupDeclared, SetupFacts,
 };
 pub use types::*;
 

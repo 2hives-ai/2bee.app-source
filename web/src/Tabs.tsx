@@ -57,7 +57,17 @@
 
 import { useRef, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 
-export type TabId = 'shop' | 'cad' | 'cnc' | 'run';
+/**
+ * `make` is the three-step first screen (founder 2026-10-14, AGENTS.md § Scope:
+ * Design → Change → Make, "3 steps, keep expert tabs"). It is a VIEW, not a tab:
+ * it is not in {@link TABS}, so the tab bar, its ARIA pairing and its roving
+ * tabindex are exactly the five expert tabs they were.
+ */
+// `cncjob` (the new 2bee.cnc page) and `jobs` (the operator's Jobs page) are
+// views like `make`: reached by a link, not tabs in `TABS`, so the tab bar and
+// every test that drives the old `cnc` tab are unchanged (2026-10-15).
+// `home` (founder 2026-10-16) is the page the "2bee.app" name opens: a view, at `#home`.
+export type TabId = 'home' | 'make' | 'cncjob' | 'jobs' | 'shop' | 'cad' | 'cnc' | 'machines' | 'run' | 'pcb' | 'pnp' | 'tools' | 'print3d';
 
 export interface TabSpec {
   id: TabId;
@@ -76,28 +86,62 @@ export interface TabSpec {
 export const TABS: readonly TabSpec[] = [
   {
     id: 'shop',
-    label: 'Designs',
+    label: 'design',
     hint: "Browse cad's designs and open one in 2bee.cad. A catalogue, not a store — nothing here is priced or for sale.",
   },
   {
     id: 'cad',
-    label: '2bee.cad',
+    label: 'cad',
     hint: 'Design a part. A subset of the OpenSCAD language, evaluated and audited here — the tab says what it is not.',
   },
   {
     id: 'cnc',
-    label: '2bee.cnc',
+    label: 'cnc',
     hint: 'Plan a job and emit G-code. Everything this app can do today.',
   },
   {
     id: 'run',
-    label: 'Run',
+    label: 'cnc.run',
     /* ⚠ RE-AUDITED 2026-08-11. This said "NOT BUILT", which stopped being true
      * without anything going red: the tab connects, identifies the controller,
      * renders the DROs and streams a program. What has never happened is the
      * only thing that matters — no byte it has ever produced has reached a
      * machine. A stale red lies exactly like a stale green. */
     hint: 'Execute and monitor the machine. NEVER RUN AGAINST A CONTROLLER — the tab says so, and says what it needs first.',
+  },
+  {
+    /* Founder 2026-10-16: "create a new pcb tab (left is ai assistant, have the 3d
+     * pcb view, right all gates (migrate all gates from local disk)". Before pnp:
+     * the board, then its assembly. It reads pcb's records; it changes no board. */
+    id: 'pcb',
+    label: 'pcb',
+    hint: "A board in 3D with pcb's gates, read from pcb's own records. Nothing here changes a board.",
+  },
+  {
+    /* Founder approval relayed by `ceo` 2026-10-11. LAST, after `run`: the
+     * cad → cnc → run order is the founder's verbatim and this does not reorder
+     * it. Declared, not implemented — see `pnp/PnpTab.tsx`. */
+    id: 'pnp',
+    label: 'pnp',
+    hint: 'Pick-and-place application. NOT BUILT — the tab says what it is waiting for.',
+  },
+  {
+    /* Founder 2026-10-14: *"have a tools page and I will add / remove, make a
+     * photo of all tools what will be registered to the system"*. Appended
+     * LAST, so the founder's order in front of it is unchanged. */
+    id: 'tools',
+    label: 'cnc.tools',
+    hint: 'The cutters this shop owns, each with a photo. The planner may only choose from these.',
+  },
+  {
+    id: 'print3d',
+    label: '3d',
+    hint: '3D printing for the X2D: sliced by 2bee.fdm (this app’s own engine), upload only, nothing has printed.',
+  },
+  {
+    id: 'machines',
+    label: 'machines',
+    hint: 'Your router: travel, collet, spindle, described in a chat and shown in 3D. cnc plans with exactly these values.',
   },
 ];
 
@@ -130,12 +174,15 @@ export const TABS: readonly TabSpec[] = [
  * It remains only the FIRST visit: a stored choice always wins, so a user who
  * works in `2bee.cnc` gets it back on the next load.
  */
-export const DEFAULT_TAB: TabId = 'shop';
+// 🔴 SUPERSEDED 2026-10-14 by the founder's product scope: the three steps open
+// first and the expert tabs sit behind one link. The 'shop' reasoning above is
+// kept as history. The catalogue is still step 1, inside `make`.
+export const DEFAULT_TAB: TabId = 'make';
 
 /** Its own key, next to `2bee.app.panels.open`. */
 export const TAB_KEY = '2bee.app.tab';
 
-const IDS: readonly string[] = TABS.map((t) => t.id);
+const IDS: readonly string[] = ['home', 'make', 'cncjob', 'jobs', ...TABS.map((t) => t.id)];
 
 /**
  * Read a stored value into a tab id.
@@ -154,6 +201,8 @@ export function parseTab(raw: string | null | undefined): TabId {
 /** The stored tab, or {@link DEFAULT_TAB}. Never throws. */
 export function readStoredTab(): TabId {
   try {
+    /* A link to `#home` opens the home page whatever was stored. */
+    if (globalThis.location?.hash === '#home') return 'home';
     return parseTab(localStorage.getItem(TAB_KEY));
   } catch {
     /* Storage disabled or unavailable. The app opens on the default; a tab bar
@@ -201,9 +250,12 @@ export function panelDomId(id: TabId): string {
 export function TabBar({
   tab,
   onTab,
+  enabled = () => true,
 }: {
   tab: TabId;
   onTab: (id: TabId) => void;
+  /** Founder 2026-10-16: a work tab with nothing loaded is disabled (see loaded.ts). */
+  enabled?: (id: TabId) => boolean;
 }) {
   /* Refs so an arrow key can MOVE FOCUS, not merely change the selection. With
    * roving tabindex the newly selected tab is the only one in the tab order, and
@@ -216,12 +268,21 @@ export function TabBar({
   };
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>, i: number) => {
-    const last = TABS.length - 1;
+    /* Arrow keys skip disabled tabs, as the APG asks of a disabled tab. */
+    const on = TABS.map((t) => enabled(t.id));
+    const n = TABS.length;
+    const step = (from: number, d: number) => {
+      for (let k = 1; k <= n; k++) {
+        const j = (((from + d * k) % n) + n) % n;
+        if (on[j]) return j;
+      }
+      return null;
+    };
     let next: number | null = null;
-    if (e.key === 'ArrowRight') next = i === last ? 0 : i + 1;
-    else if (e.key === 'ArrowLeft') next = i === 0 ? last : i - 1;
-    else if (e.key === 'Home') next = 0;
-    else if (e.key === 'End') next = last;
+    if (e.key === 'ArrowRight') next = step(i, 1);
+    else if (e.key === 'ArrowLeft') next = step(i, -1);
+    else if (e.key === 'Home') next = step(-1, 1);
+    else if (e.key === 'End') next = step(n, -1);
     if (next === null) return;
     e.preventDefault();
     go(TABS[next].id);
@@ -231,6 +292,7 @@ export function TabBar({
     <div className="tabbar" role="tablist" aria-label="2bee.app sections" data-testid="tabbar">
       {TABS.map((t, i) => {
         const selected = t.id === tab;
+        const off = !selected && !enabled(t.id);
         return (
           <button
             key={t.id}
@@ -244,7 +306,9 @@ export function TabBar({
             aria-selected={selected}
             aria-controls={panelDomId(t.id)}
             tabIndex={selected ? 0 : -1}
-            title={t.hint}
+            title={off ? `Nothing is loaded into ${t.label} yet. Open a design from the design tab.` : t.hint}
+            disabled={off}
+            aria-disabled={off || undefined}
             data-testid={`tab-${t.id}`}
             onClick={() => go(t.id)}
             onKeyDown={(e) => onKeyDown(e, i)}
@@ -306,7 +370,12 @@ export function TabPanel({
       data-testid={`tabpanel-${id}`}
       style={
         active
-          ? { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 }
+          ? /* `overflow: auto`: a panel taller than the screen (Designs, CNC jobs, 2bee.pnp on a phone)
+             * overflowed `.app`, which is exactly the viewport tall, and its content scrolled up OVER
+             * the footer, AGPL source link included, which sat mid-page (journey test, 2026-10-15).
+             * The panel now scrolls inside itself and the footer stays below it. Panels built to
+             * fit the screen (2bee.cnc, 2bee.cad) do not overflow, so nothing changes for them. */
+            { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0, overflow: 'auto' }
           : { display: 'none' }
       }
     >

@@ -83,6 +83,21 @@ impl Clamp {
         Self { name: name.into(), x, y, w, h, height_mm, rotation_deg: 0.0 }
     }
 
+    /// The footprint's extent along its own X and Y, lowest first.
+    ///
+    /// 🔴 `0..w` was tested as written, and with a NEGATIVE `w` (or `h`) that
+    /// range is EMPTY: the keepout vanished while `corners()` still drew the real
+    /// rectangle, so the program cut through a clamp shown on screen (bughunt
+    /// 2026-11-15: `x110 y130 w-60 h-60` gave 0 findings, the same footprint as
+    /// `x50 y70 w60 h60` gave 65). A NaN extent keeps its old `(0, NaN)` range — written
+    /// as a branch, not `min`/`max`, which would quietly drop the NaN.
+    fn local_x(&self) -> (f64, f64) {
+        if self.w < 0.0 { (self.w, 0.0) } else { (0.0, self.w) }
+    }
+    fn local_y(&self) -> (f64, f64) {
+        if self.h < 0.0 { (self.h, 0.0) } else { (0.0, self.h) }
+    }
+
     /// The same clamp, turned about its own anchor.
     pub fn rotated(mut self, deg: f64) -> Self {
         self.rotation_deg = deg;
@@ -166,7 +181,8 @@ impl Clamp {
     /// cutter through a 40mm clamp at full depth with every check green.
     pub fn contains(&self, px: f64, py: f64, margin: f64) -> bool {
         let (lx, ly) = self.to_local(px, py);
-        lx >= -margin && lx <= self.w + margin && ly >= -margin && ly <= self.h + margin
+        let ((x0, x1), (y0, y1)) = (self.local_x(), self.local_y());
+        lx >= x0 - margin && lx <= x1 + margin && ly >= y0 - margin && ly <= y1 + margin
     }
 
     /// The part of the straight move `from -> to` that lies inside the
@@ -198,8 +214,8 @@ impl Clamp {
         let b = self.to_local(to.0, to.1);
         let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
         for (a1, b1, lo, hi) in [
-            (a.0, b.0, -margin, self.w + margin),
-            (a.1, b.1, -margin, self.h + margin),
+            (a.0, b.0, self.local_x().0 - margin, self.local_x().1 + margin),
+            (a.1, b.1, self.local_y().0 - margin, self.local_y().1 + margin),
         ] {
             let d = b1 - a1;
             if d.abs() < 1e-12 {
@@ -241,9 +257,8 @@ impl Clamp {
     ///
     /// ⚠ A move whose two ends coincide is treated as a FULL circle, which is
     /// what `G2`/`G3` with `I`/`J` and no endpoint change means to grblHAL.
-    /// [`crate::sim::simulate`] normalises the same degenerate case to a zero
-    /// sweep and stamps a single point; the two disagree deliberately and in
-    /// opposite directions, and a keepout is the one that must over-report.
+    /// [`crate::sim::simulate`] read it as a zero sweep until 2026-11-15; it now
+    /// follows the same full-circle rule as this and the post.
     pub fn arc_hit(
         &self,
         from: (f64, f64),
@@ -285,8 +300,8 @@ impl Clamp {
             d <= span + 1e-12
         };
 
-        let (lo_x, hi_x) = (-margin, self.w + margin);
-        let (lo_y, hi_y) = (-margin, self.h + margin);
+        let (lo_x, hi_x) = (self.local_x().0 - margin, self.local_x().1 + margin);
+        let (lo_y, hi_y) = (self.local_y().0 - margin, self.local_y().1 + margin);
         let corners =
             [(lo_x, lo_y), (hi_x, lo_y), (hi_x, hi_y), (lo_x, hi_y)];
         for i in 0..4 {
@@ -498,6 +513,23 @@ impl Fixturing {
         stock_thickness: f64,
         machine: &Machine,
     ) -> Vec<FixtureFinding> {
+        self.check_from(path, tool_r, stock_thickness, machine, None)
+    }
+
+    /// [`Fixturing::check`] for a path that does not start the program: `start`
+    /// is where the tool already is, so the first move is tested as the LINE it
+    /// travels. 🔴 A clamp phase's slice starts after a `ClampChange`, and with
+    /// no origin its first rapid was tested only at its end: a `G0` at Z5 from
+    /// the last cut of phase 1 across a 40mm clamp of phase 2 gave 0 findings
+    /// (bughunt 2026-11-15).
+    pub fn check_from(
+        &self,
+        path: &Toolpath,
+        tool_r: f64,
+        stock_thickness: f64,
+        machine: &Machine,
+        start: Option<crate::types::Vec3>,
+    ) -> Vec<FixtureFinding> {
         let mut out = Vec::new();
 
         if self.clamps.is_empty() && !self.confirmed_clear {
@@ -517,7 +549,7 @@ impl Fixturing {
 
         // Where the tool is now. `None` until something positions it — see the
         // caveat in this method's doc.
-        let mut cur: Option<crate::types::Vec3> = None;
+        let mut cur: Option<crate::types::Vec3> = start;
 
         for m in &path.moves {
             // A move with no known origin degenerates to its destination, which
@@ -1865,6 +1897,9 @@ struct ProgMove {
     kind: ProgKind,
     /// Index into `ProgramRead::sections`.
     section: usize,
+    /// Which clamp set is in force: the number of `( CLAMP CHANGE -> … )`
+    /// pauses the program has passed before this move.
+    phase: usize,
     from: (f64, f64, f64),
     to: (f64, f64, f64),
     /// Arc centre, machine coordinates. Meaningless unless `kind` is an arc.
@@ -1890,6 +1925,8 @@ struct ProgramRead {
     /// severance.
     unresolved_tools: Vec<String>,
     smallest_tool_r: f64,
+    /// `( CLAMP CHANGE -> … )` comments read — the work-holding pauses.
+    clamp_changes: usize,
 }
 
 impl ProgramRead {
@@ -1988,6 +2025,7 @@ fn read_program(gcode: &str, tools: &[(String, f64)]) -> ProgramRead {
         unread: Vec::new(),
         unresolved_tools: Vec::new(),
         smallest_tool_r: f64::INFINITY,
+        clamp_changes: 0,
     };
 
     // The tool the spindle is holding, by the NAME the program prints. `None`
@@ -2025,6 +2063,11 @@ fn read_program(gcode: &str, tools: &[(String, f64)]) -> ProgramRead {
                     if !tool.is_empty() {
                         tool_name = Some(tool.to_string());
                     }
+                } else if inner.starts_with(crate::setup::CLAMP_CHANGE_PREFIX.trim_end()) {
+                    // The work-holding pause. Everything after it is held by
+                    // the NEXT clamp set — `check_hold_down_phased`.
+                    r.clamp_changes += 1;
+                    section = None;
                 } else if let Some(rest) = inner.strip_prefix("TOOL CHANGE -> ") {
                     // ⚠ Names the cutter and NOT its width — see
                     // `HoldDownBasis::tool_widths_from_program`.
@@ -2215,6 +2258,7 @@ fn read_program(gcode: &str, tools: &[(String, f64)]) -> ProgramRead {
                         r.moves.push(ProgMove {
                             kind: ProgKind::Drill,
                             section: sec,
+                            phase: r.clamp_changes,
                             from: (px, py, z.unwrap_or(hz)),
                             to: (px, py, hz),
                             centre: (0.0, 0.0),
@@ -2238,6 +2282,7 @@ fn read_program(gcode: &str, tools: &[(String, f64)]) -> ProgramRead {
                         r.moves.push(ProgMove {
                             kind,
                             section: sec,
+                            phase: r.clamp_changes,
                             from: (ax, ay, az),
                             to: (bx, by, bz),
                             centre: (0.0, 0.0),
@@ -2267,6 +2312,7 @@ fn read_program(gcode: &str, tools: &[(String, f64)]) -> ProgramRead {
                         r.moves.push(ProgMove {
                             kind: ProgKind::Arc { cw: mode == 20 },
                             section: sec,
+                            phase: r.clamp_changes,
                             from: (ax, ay, az),
                             to: (bx, by, bz),
                             centre: (ax + i.unwrap_or(0.0), ay + j.unwrap_or(0.0)),
@@ -2601,6 +2647,35 @@ pub fn check_hold_down(
     tools: &[(String, f64)],
     cell_mm: f64,
 ) -> HoldDownReport {
+    check_hold_down_phased(gcode, std::slice::from_ref(fixturing), stock, tools, cell_mm)
+}
+
+/// [`check_hold_down`] for a program whose clamps MOVE mid-job.
+///
+/// `sets[p]` is the clamp set in force after the program's `p`-th
+/// `( CLAMP CHANGE -> … )` pause (`sets[0]` before any). Every question is
+/// asked against the set in force AT THE MOVE: the reverse walk swaps the
+/// clamp-contact counts of the live components at each pause, which is exact
+/// because a component's count is a plain sum over its cells — the
+/// connectivity (what is still joined to what) never depends on the clamps.
+///
+/// 🔴 A program whose pause count disagrees with the sets declared is
+/// PENDING, never judged against a guess about which set is where.
+///
+/// ⚠ Per-phase scope, stated: clamp-on-no-workpiece, collinear contacts and
+/// cut-away bearing are reported for EVERY set; the four edge spans are
+/// reported for the FIRST set only (they are notes describing the initial
+/// setup), and the centroid-outside-hull note uses the LAST set, because the
+/// pieces it tests are the pieces left at the end of the program.
+pub fn check_hold_down_phased(
+    gcode: &str,
+    sets: &[Fixturing],
+    stock: &crate::types::Stock,
+    tools: &[(String, f64)],
+    cell_mm: f64,
+) -> HoldDownReport {
+    let empty = Fixturing::default();
+    let fixturing = sets.first().unwrap_or(&empty);
     let quad = [
         stock.place(0.0, 0.0),
         stock.place(stock.size_x_mm, 0.0),
@@ -2633,7 +2708,7 @@ pub fn check_hold_down(
     // "no clamp stands on removed material" is TRUE when there are no clamps —
     // and that is the single most likely way this feature could ship a false
     // green.
-    if fixturing.clamps.is_empty() {
+    if fixturing.clamps.is_empty() || sets.iter().any(|f| f.clamps.is_empty()) {
         basis.pending.push(if fixturing.confirmed_clear {
             "NO WORK HOLDING IS DECLARED. The machine is marked confirmed-clear, which says the cutter \
              will not HIT anything; it says nothing about what HOLDS the workpiece. A vacuum table, \
@@ -2672,6 +2747,15 @@ pub fn check_hold_down(
             "the emitted program contains something this reader does not model, and unmodelled \
              motion makes material read as STILL STANDING — which reads as HELD, the unsafe \
              direction: {u}"
+        ));
+    }
+    if prog.clamp_changes + 1 != sets.len().max(1) {
+        basis.pending.push(format!(
+            "the program stops for a clamp change {} time(s) and {} clamp set(s) were declared \
+             for it — which clamps hold the work after each stop cannot be read, so restraint is \
+             not judged at all rather than judged against the wrong set",
+            prog.clamp_changes,
+            sets.len()
         ));
     }
     for t in &prog.unresolved_tools {
@@ -2742,28 +2826,42 @@ pub fn check_hold_down(
     // margin nobody sourced is exactly the invented number this module refuses
     // to write, so the assumption is declared in
     // [`HoldDownBasis::contact_area_measured`] and left visible instead.
-    let mut contact_of: Vec<Vec<usize>> = Vec::with_capacity(fixturing.clamps.len());
-    let mut is_contact = vec![false; n];
-    for c in &fixturing.clamps {
-        let mut cells = Vec::new();
-        for j in 0..rows {
-            for i in 0..cols {
-                let k = sev.idx(i, j);
-                if !sev.in_sheet[k] {
-                    continue;
-                }
-                let (px, py) = sev.world(i, j);
-                if c.contains(px, py, 0.0) {
-                    cells.push(k);
-                    is_contact[k] = true;
+    // Indexed [phase][clamp] and [phase][cell]. One phase on every program
+    // that does not move its clamps, which is the single-set check unchanged.
+    let after = |ph: usize| -> String {
+        if ph == 0 { String::new() } else { format!(" (after clamp move {ph})") }
+    };
+    let mut contact_by: Vec<Vec<Vec<usize>>> = Vec::with_capacity(sets.len());
+    let mut is_contact_by: Vec<Vec<bool>> = Vec::with_capacity(sets.len());
+    for (ph, set) in sets.iter().enumerate() {
+        let mut contact_of: Vec<Vec<usize>> = Vec::with_capacity(set.clamps.len());
+        let mut is_contact = vec![false; n];
+        for c in &set.clamps {
+            let mut cells = Vec::new();
+            for j in 0..rows {
+                for i in 0..cols {
+                    let k = sev.idx(i, j);
+                    if !sev.in_sheet[k] {
+                        continue;
+                    }
+                    let (px, py) = sev.world(i, j);
+                    if c.contains(px, py, 0.0) {
+                        cells.push(k);
+                        is_contact[k] = true;
+                    }
                 }
             }
+            if cells.is_empty() {
+                findings.push(HoldDownFinding::ClampBearsOnNoSheet {
+                    clamp: format!("{}{}", c.name, after(ph)),
+                });
+            }
+            contact_of.push(cells);
         }
-        if cells.is_empty() {
-            findings.push(HoldDownFinding::ClampBearsOnNoSheet { clamp: c.name.clone() });
-        }
-        contact_of.push(cells);
+        contact_by.push(contact_of);
+        is_contact_by.push(is_contact);
     }
+    let last_phase = contact_by.len().saturating_sub(1);
 
     // ---- the clamps against the workpiece, which needs no program -------------
     //
@@ -2780,64 +2878,72 @@ pub fn check_hold_down(
     // Sampling extremes can only SHRINK the hull, never grow it, so the cost
     // of the shortcut is a slightly more suspicious answer rather than a
     // slightly more generous one.
-    let mut hull_pts: Vec<(f64, f64)> = Vec::new();
-    for cells in contact_of.iter() {
-        if cells.is_empty() {
-            continue;
-        }
-        for (ax, ay) in [
-            (1.0, 0.0),
-            (-1.0, 0.0),
-            (0.0, 1.0),
-            (0.0, -1.0),
-            (1.0, 1.0),
-            (1.0, -1.0),
-            (-1.0, 1.0),
-            (-1.0, -1.0),
-        ] {
-            let mut best = f64::NEG_INFINITY;
-            let mut at = (0.0, 0.0);
-            for &k in cells {
-                let p = sev.world(k % cols, k / cols);
-                let v = p.0 * ax + p.1 * ay;
-                if v > best {
-                    best = v;
-                    at = p;
-                }
+    // The support polygon of the LAST set is the one kept: the centroid test
+    // at the end judges the pieces left when the program ends.
+    let mut hull: Vec<(f64, f64)> = Vec::new();
+    for ph in 0..contact_by.len() {
+        let mut hull_pts: Vec<(f64, f64)> = Vec::new();
+        for cells in contact_by[ph].iter() {
+            if cells.is_empty() {
+                continue;
             }
-            hull_pts.push(at);
-        }
-    }
-    let hull = hull_of(hull_pts.clone());
-    if !hull_pts.is_empty() {
-        let area = poly_area(&hull);
-        let mut perim = 0.0;
-        for i in 0..hull.len() {
-            let a = hull[i];
-            let b = hull[(i + 1) % hull.len()];
-            perim += ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
-        }
-        let mut span = 0.0;
-        let (mut dx, mut dy) = (0.0, 0.0);
-        for a in &hull_pts {
-            for b in &hull_pts {
-                let d = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
-                if d > span {
-                    span = d;
-                    dx = (b.0 - a.0).abs();
-                    dy = (b.1 - a.1).abs();
+            for (ax, ay) in [
+                (1.0, 0.0),
+                (-1.0, 0.0),
+                (0.0, 1.0),
+                (0.0, -1.0),
+                (1.0, 1.0),
+                (1.0, -1.0),
+                (-1.0, 1.0),
+                (-1.0, -1.0),
+            ] {
+                let mut best = f64::NEG_INFINITY;
+                let mut at = (0.0, 0.0);
+                for &k in cells {
+                    let p = sev.world(k % cols, k / cols);
+                    let v = p.0 * ax + p.1 * ay;
+                    if v > best {
+                        best = v;
+                        at = p;
+                    }
                 }
+                hull_pts.push(at);
             }
         }
-        // 🔴 No percentage, no "clamps within 20% of an edge", no rule of thumb.
-        // The moment a threshold appears it is an invented number wearing an
-        // engineering face. This is a degeneracy test at the grid's own
-        // resolution and nothing more.
-        if hull.len() < 3 || area < perim * cell {
-            findings.push(HoldDownFinding::ClampContactsCollinear {
-                axis: if dx >= dy { "along X".into() } else { "along Y".into() },
-                span_mm: span,
-            });
+        let hull_ph = hull_of(hull_pts.clone());
+        if !hull_pts.is_empty() {
+            let area = poly_area(&hull_ph);
+            let mut perim = 0.0;
+            for i in 0..hull_ph.len() {
+                let a = hull_ph[i];
+                let b = hull_ph[(i + 1) % hull_ph.len()];
+                perim += ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+            }
+            let mut span = 0.0;
+            let (mut dx, mut dy) = (0.0, 0.0);
+            for a in &hull_pts {
+                for b in &hull_pts {
+                    let d = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+                    if d > span {
+                        span = d;
+                        dx = (b.0 - a.0).abs();
+                        dy = (b.1 - a.1).abs();
+                    }
+                }
+            }
+            // 🔴 No percentage, no "clamps within 20% of an edge", no rule of thumb.
+            // The moment a threshold appears it is an invented number wearing an
+            // engineering face. This is a degeneracy test at the grid's own
+            // resolution and nothing more.
+            if hull_ph.len() < 3 || area < perim * cell {
+                findings.push(HoldDownFinding::ClampContactsCollinear {
+                    axis: format!("{}{}", if dx >= dy { "along X" } else { "along Y" }, after(ph)),
+                    span_mm: span,
+                });
+            }
+        }
+        if ph == last_phase {
+            hull = hull_ph;
         }
     }
     for (name, a, b) in [
@@ -2928,8 +3034,25 @@ pub fn check_hold_down(
     };
 
     // ---- clamps whose bearing area the program cuts away -------------------
-    let mut clamp_live_until: Vec<u32> = Vec::with_capacity(fixturing.clamps.len());
-    for (ci, c) in fixturing.clamps.iter().enumerate() {
+    //
+    // Per clamp SET: a set only bears while it is fitted, so the cells cut
+    // after its phase ends (`phase_end`) are cut where that clamp no longer
+    // stands, and do not count against it.
+    let mut phase_end: Vec<u32> = vec![HD_NEVER; sets.len().max(1)];
+    for (i, m) in prog.moves.iter().enumerate() {
+        for p in 0..m.phase.min(phase_end.len()) {
+            if phase_end[p] == HD_NEVER {
+                phase_end[p] = i as u32;
+            }
+        }
+    }
+    let phase_of_move = |mi: usize| -> usize { prog.moves[mi].phase.min(last_phase) };
+    let mut live_by: Vec<Vec<u32>> = Vec::with_capacity(sets.len());
+    for (ph, set) in sets.iter().enumerate() {
+    let contact_of = &contact_by[ph];
+    let end = phase_end[ph];
+    let mut clamp_live_until: Vec<u32> = Vec::with_capacity(set.clamps.len());
+    for (ci, c) in set.clamps.iter().enumerate() {
         let cells = &contact_of[ci];
         if cells.is_empty() {
             clamp_live_until.push(0);
@@ -2940,7 +3063,7 @@ pub fn check_hold_down(
         let mut first_cut: Option<u32> = None;
         for &k in cells {
             let s = sev.severed_at[k];
-            if s == HD_NEVER {
+            if s == HD_NEVER || s >= end {
                 standing += 1;
             } else {
                 last = last.max(s);
@@ -2962,16 +3085,18 @@ pub fn check_hold_down(
         // grows.
         if standing == 0 {
             findings.push(HoldDownFinding::ClampContactLost {
-                clamp: c.name.clone(),
+                clamp: format!("{}{}", c.name, after(ph)),
                 at: at_of(last as usize),
             });
         } else if let Some(f) = first_cut {
             findings.push(HoldDownFinding::ClampContactReduced {
-                clamp: c.name.clone(),
+                clamp: format!("{}{}", c.name, after(ph)),
                 at: at_of(f as usize),
                 fraction_remaining: standing as f64 / cells.len() as f64,
             });
         }
+    }
+    live_by.push(clamp_live_until);
     }
 
     // ---- the final state, and the pieces it leaves -------------------------
@@ -2982,7 +3107,7 @@ pub fn check_hold_down(
         dsu.parent[k] = k as u32;
         if alive[k] {
             dsu.size[k] = 1;
-            dsu.clamped[k] = is_contact[k] as u32;
+            dsu.clamped[k] = is_contact_by[last_phase][k] as u32;
         }
     }
     for k in 0..n {
@@ -3088,7 +3213,30 @@ pub fn check_hold_down(
 
     // ---- the reverse walk --------------------------------------------------
     let mut events: Vec<(usize, f64, f64, f64)> = Vec::new();
+    let mut walk_phase = last_phase;
     for i in (0..prog.moves.len()).rev() {
+        // ---- crossing a clamp change, backwards ------------------------------
+        // The clamps in force change; the material does not. A component's
+        // clamp count is a sum over its cells, so taking the old set's cells
+        // out and putting the new set's in is exact, with no re-link.
+        let ph = phase_of_move(i);
+        if ph != walk_phase {
+            for k in 0..n {
+                if !alive[k] {
+                    continue;
+                }
+                let (was, now) = (is_contact_by[walk_phase][k], is_contact_by[ph][k]);
+                if was != now {
+                    let r = dsu.find(k);
+                    if was {
+                        dsu.clamped[r] -= 1;
+                    } else {
+                        dsu.clamped[r] += 1;
+                    }
+                }
+            }
+            walk_phase = ph;
+        }
         // state(i) = state(i+1) + everything this move removed. Adding it back
         // BEFORE judging move i is what makes the judgement about the material
         // as it stood when the cutter arrived.
@@ -3097,7 +3245,7 @@ pub fn check_hold_down(
             alive[k] = true;
             dsu.parent[k] = k as u32;
             dsu.size[k] = 1;
-            dsu.clamped[k] = is_contact[k] as u32;
+            dsu.clamped[k] = is_contact_by[walk_phase][k] as u32;
         }
         for &kk in &by_move[i] {
             hd_link(&mut dsu, &alive, kk as usize, cols, n);
@@ -3162,11 +3310,12 @@ pub fn check_hold_down(
         });
     }
     for e in events.iter().take(3) {
-        let live: Vec<String> = fixturing
+        let ph = phase_of_move(e.0);
+        let live: Vec<String> = sets[ph]
             .clamps
             .iter()
             .enumerate()
-            .filter(|(ci, _)| !contact_of[*ci].is_empty() && clamp_live_until[*ci] >= e.0 as u32)
+            .filter(|(ci, _)| !contact_by[ph][*ci].is_empty() && live_by[ph][*ci] >= e.0 as u32)
             .map(|(_, c)| c.name.clone())
             .collect();
         findings.push(HoldDownFinding::UnrestrainedMaterialMachined {

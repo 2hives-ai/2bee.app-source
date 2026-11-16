@@ -308,6 +308,8 @@ export class FakeController implements Link {
   private now = 0;
   private timers: { at: number; run: () => void }[] = [];
   private executedCount = 0;
+  /** Held on an M0 whose `ok` is owed: the parser reads nothing until cycle start (grblHAL's order). */
+  private m0Blocked = false;
   private closed = false;
   private bannerSent = false;
 
@@ -441,7 +443,7 @@ export class FakeController implements Link {
      * controller that never clears it. */
     while (this.rx.startsWith(CANCEL_ARTEFACT)) this.rx = this.rx.slice(1);
     let ran = 0;
-    while (ran < n) {
+    while (ran < n && !this.m0Blocked) {
       const nl = this.rx.indexOf('\n');
       if (nl < 0) break;
       const line = this.rx.slice(0, nl).replace(/\r$/, '');
@@ -550,6 +552,11 @@ export class FakeController implements Link {
       case 0x81:
         if (this.state === 'Hold' && this.holdSubstate === 0) {
           this.state = 'Idle';
+          if (this.m0Blocked) {
+            this.m0Blocked = false;
+            this.emit('ok');
+            if (this.options.autoExecute) this.execute();
+          }
         }
         return;
       case 0x18: {
@@ -558,6 +565,7 @@ export class FakeController implements Link {
         this.rx = '';
         this.lastError = 0;
         this.jammed = false;
+        this.m0Blocked = false; // the M0's owed `ok` is gone with the buffer
         if (wasMoving) {
           this.state = 'Alarm';
           this.alarmCode = 3;
@@ -734,9 +742,14 @@ export class FakeController implements Link {
       return;
     }
     if (/(^|\s)M0(\s|$)/i.test(trimmed)) {
+      /* 🔴 grblHAL's ORDER (bughunt 2026-11-15): gcode.c sets the hold and protocol_exec_rt_suspend blocks in
+       * `while(sys.suspend)` BEFORE the M0 is answered, so the parser reads no further line until cycle start, and
+       * the `ok` comes after Resume. This fake used to answer at once and keep executing the buffered lines while
+       * held: two M0s a comment apart (a tool change, then "set Z zero by hand" on a machine without a probe) were
+       * BOTH consumed by one hold, and one Resume skipped the second stop. E2E J9 hung on that takeover. */
       this.state = 'Hold';
       this.holdSubstate = 0;
-      this.emit('ok');
+      this.m0Blocked = true;
       return;
     }
     if (/(^|\s)M3(\s|$)/i.test(trimmed)) this.spindleOn = true;
@@ -789,6 +802,13 @@ export class FakeController implements Link {
     if (c.startsWith('$J=')) {
       if (this.state === 'Alarm') {
         this.emit('error:9');
+        return;
+      }
+      /* A jog with no F word is refused, as grblHAL refuses it (gcode.c:2328: "check for required
+       * F word"; status 22, feed rate undefined). This fake accepted it until 2026-10-15, which is
+       * why every jog the Run tab sent had no F and nothing caught it. */
+      if (!/F\s*\d/i.test(c)) {
+        this.emit('error:22');
         return;
       }
       const limit = this.options.jogSoftLimitMm;

@@ -76,6 +76,7 @@ const {
   preflight,
   readAskConfig,
   readReply,
+  readScadReply,
   reviewProposal,
   shapeDelta,
   userMessage,
@@ -1219,4 +1220,20 @@ test('the menu item and the failure button open the one Settings surface', () =>
   assert.match(tab, /onOpenSettings=\{openSettings\}/);
   // One component, rendered from two places — no second credential form.
   assert.equal((tab.match(/<AskSettings/g) ?? []).length, 1);
+});
+
+test('a reply cut off at the token limit, or with several different code blocks, is refused (bughunt 2026-11-15)', () => {
+  const full = 'cube([10, 10, 10]);\ntranslate([0, 0, 10]) cylinder(h = 5, r = 2);\n';
+  /* The first fence used to win: a model that shows the changed line, then the whole file,
+   * replaced the design with the one-line snippet. */
+  const two = 'Change this:\n```openscad\ncylinder(h = 5, r = 2);\n```\nWhole file:\n```openscad\n' + full + '```';
+  const r1 = readScadReply({ status: 200, ok: true, text: JSON.stringify({ choices: [{ message: { content: two } }] }) });
+  assert.equal(r1.ok, false);
+  /* A truncated reply is a design with its end missing. */
+  const cut = JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '```openscad\n' + full + '```' } }] });
+  const r2 = readScadReply({ status: 200, ok: true, text: cut });
+  assert.equal(r2.ok, false);
+  /* One fence, finished: read as before. */
+  const one = JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: '```openscad\n' + full + '```' } }] });
+  assert.equal(readScadReply({ status: 200, ok: true, text: one }).ok, true);
 });

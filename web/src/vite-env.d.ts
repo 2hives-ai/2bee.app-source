@@ -1,8 +1,13 @@
+/// <reference types="vite/client" />
+// ⚠ THE REFERENCE ABOVE MUST BE THE FIRST LINE. It sat below the
+// `__CTRL_TRANSCRIPTS__` declaration until 2026-10-15, where tsc treats a
+// triple-slash directive as an ordinary comment — so none of `vite/client`'s
+// types loaded and `import.meta.glob` was "not a property of ImportMeta" in every
+// file that used it (found by the pnp board list, `src/pnp/boards.ts`).
 // Build-time flag: true when committed controller transcripts exist in
 // gates/controller/.  Set by the `define` in vite.config.ts.
 declare const __CTRL_TRANSCRIPTS__: boolean;
 
-/// <reference types="vite/client" />
 
 // Raw text imports. The sample drawings are DXF files consumed as TEXT: the
 // importer parses the file's own bytes, so a bundler transform between the

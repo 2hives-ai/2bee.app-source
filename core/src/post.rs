@@ -375,11 +375,11 @@ mod capability_tests {
              block, mis-execute it, or stall mid-cut with the spindle down:\n{}",
             degraded.gcode
         );
-        assert_eq!(
-            count_starting(&degraded.gcode, &["G1 "]),
-            armed_g1 + 1,
-            "the arc did not become a linear move — it was DROPPED, which cuts a part with a \
-             feature missing:\n{}",
+        // More than one chord: a 90 deg arc of R20 within 0.01 mm needs ~25.
+        assert!(
+            count_starting(&degraded.gcode, &["G1 "]) > armed_g1 + 1,
+            "the arc did not become a tolerance-bounded polyline — it was DROPPED or replaced by \
+             one chord, which cuts a part with a feature missing or gouged:\n{}",
             degraded.gcode
         );
         // And it says so. A silent substitution is a different part with no
@@ -413,92 +413,90 @@ mod capability_tests {
         }
     }
 
+    /// The XY points the program's G1 lines visit, modal words carried, from
+    /// a known start.
+    fn g1_points(gcode: &str, start: (f64, f64)) -> Vec<(f64, f64)> {
+        let (mut x, mut y) = start;
+        let mut out = Vec::new();
+        for l in code_lines(gcode) {
+            if !l.starts_with("G1 ") {
+                continue;
+            }
+            x = word(l, 'X').unwrap_or(x);
+            y = word(l, 'Y').unwrap_or(y);
+            out.push((x, y));
+        }
+        out
+    }
+
+    /// Worst deviation of a chain of chords from a circle: each vertex off the
+    /// radius, and each chord's midpoint inside it (the sagitta).
+    fn worst_off_circle(start: (f64, f64), pts: &[(f64, f64)], c: (f64, f64), r: f64) -> f64 {
+        let mut worst = 0.0f64;
+        let mut prev = start;
+        for &p in pts {
+            let on = (((p.0 - c.0).powi(2) + (p.1 - c.1).powi(2)).sqrt() - r).abs();
+            let m = ((prev.0 + p.0) * 0.5, (prev.1 + p.1) * 0.5);
+            let sag = r - ((m.0 - c.0).powi(2) + (m.1 - c.1).powi(2)).sqrt();
+            worst = worst.max(on).max(sag);
+            prev = p;
+        }
+        worst
+    }
+
     #[test]
-    fn a_degraded_arc_is_one_chord_and_its_error_is_bounded_by_nothing() {
-        // 🔴 RECORDED, NOT ENDORSED. This test pins today's behaviour and prints
-        // the number it is worth: the post replaces each arc MOVE with ONE
-        // straight line to the same endpoint. The deviation is the sagitta,
-        // R(1-cos(sweep/2)), and NOTHING in the core caps it — how finely an arc
-        // was subdivided upstream is decided by tab width and ramping, which are
-        // not tolerances. A half-turn therefore deviates by a full RADIUS: a
-        // profiled hole becomes a straight line across its own diameter and the
-        // hole is not cut at all.
-        //
-        // If a chord tolerance is ever implemented, this test goes red. Invert
-        // it — do not delete it. See FUNCTIONAL-SPEC.md A5.
+    fn a_degraded_arc_is_a_polyline_within_the_flatten_tolerance() {
+        // 🔴 INVERTED 2026-11-14, as this test asked. It used to pin the defect:
+        // each arc became ONE chord to the same endpoint, so a half-turn of R20
+        // missed the true arc by a full radius — a profiled hole became a line
+        // across its own diameter. The post now walks the arc in chords whose
+        // sagitta is at most ARC_FLATTEN_TOL_MM. Asserted on the EMITTED lines.
         let r_mm = 20.0;
         let path = one_arc(false, (120.0, 100.0), (80.0, 100.0), (100.0, 100.0)); // 180°
         let m = Machine { supports_arcs: false, ..machine() };
         let g = post(&path, &m, &PostOptions::default());
         assert!(g.ok(), "{:?}", g.errors);
+        assert_eq!(count_starting(&g.gcode, &["G2 ", "G3 "]), 0, "{}", g.gcode);
 
-        let cuts: Vec<&str> = code_lines(&g.gcode)
-            .into_iter()
-            .filter(|l| l.starts_with("G1 ") && word(l, 'X').is_some())
-            .collect();
-        assert_eq!(
-            cuts.len(),
-            1,
-            "the half-turn was replaced by {} moves — if that is a tolerance-bounded polyline, \
-             this test is out of date and should be inverted, not deleted:\n{}",
-            cuts.len(),
-            g.gcode
-        );
-        // G-code words are MODAL: the emitted line carries no Y because the
-        // chord's endpoints share one, which is itself the shape of the defect
-        // — half a turn of a circle collapses onto a single straight line.
-        let (sx, sy) = (120.0f64, 100.0f64);
-        let (ex, ey) = (word(cuts[0], 'X').unwrap_or(sx), word(cuts[0], 'Y').unwrap_or(sy));
-        assert!((ex - 80.0).abs() < 1e-6 && (ey - 100.0).abs() < 1e-6, "{}", cuts[0]);
-
-        // The deviation, measured from the EMITTED line rather than asserted
-        // from theory: how far the far point of the true arc — (100, 120) —
-        // lies from the straight move the program actually contains.
-        let (fx, fy) = (100.0f64, 120.0f64);
-        let (dx, dy) = (ex - sx, ey - sy);
-        let t = (((fx - sx) * dx + (fy - sy) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
-        let deviation = ((fx - (sx + t * dx)).powi(2) + (fy - (sy + t * dy)).powi(2)).sqrt();
+        let pts = g1_points(&g.gcode, (120.0, 100.0));
+        assert!(pts.len() > 1, "the half-turn is still one chord:\n{}", g.gcode);
+        let last = *pts.last().unwrap();
+        assert!((last.0 - 80.0).abs() < 1e-3 && (last.1 - 100.0).abs() < 1e-3, "{last:?}");
+        // CCW from (120,100) to (80,100) about (100,100) passes over the TOP.
+        assert!(pts.iter().any(|p| p.1 > 119.9), "the polyline went the wrong way round");
+        let worst = worst_off_circle((120.0, 100.0), &pts, (100.0, 100.0), r_mm);
+        // The words are printed to 3 decimals, so the bound is the tolerance
+        // plus that rounding.
         assert!(
-            (deviation - r_mm).abs() < 1e-6,
-            "expected the chord to miss the true arc by a full radius ({r_mm}mm); measured \
-             {deviation}mm"
+            worst <= crate::post_grblhal::ARC_FLATTEN_TOL_MM + 1e-3,
+            "a chord misses the true arc by {worst:.4} mm"
         );
     }
 
     #[test]
-    fn a_full_circle_arc_degrades_to_no_motion_at_all() {
-        // 🔴 The worst shape of the same defect, and the reason the one above is
-        // not the whole story. An arc whose end IS its start is a full turn. The
-        // chord has zero length, the post emits no axis words, and the feature
-        // leaves the program entirely — with a warning that says "degraded",
-        // which reads as "approximated", not as "removed".
-        //
-        // `geometry::Contour::circle` encodes a circle as TWO half-turns, so the
-        // engine does not produce this move today; `Move::arc` accepts it, the
-        // post has no guard, and a bore emitted as one turn would vanish.
+    fn a_full_circle_arc_degrades_to_a_full_circle_of_chords() {
+        // 🔴 INVERTED 2026-11-14, as this test asked. An arc whose end IS its
+        // start is a full turn; the one-chord degrade had zero length, emitted
+        // no axis words, and the feature left the program entirely. It now
+        // goes all the way round.
         let path = one_arc(true, (120.0, 100.0), (120.0, 100.0), (100.0, 100.0));
         let m = Machine { supports_arcs: false, ..machine() };
         let g = post(&path, &m, &PostOptions::default());
         assert!(g.ok(), "{:?}", g.errors);
-        assert_eq!(
-            count_starting(&g.gcode, &["G2 ", "G3 "]),
-            0,
-            "arcs are off and one was emitted anyway:\n{}",
+        assert_eq!(count_starting(&g.gcode, &["G2 ", "G3 "]), 0, "{}", g.gcode);
+        let pts = g1_points(&g.gcode, (120.0, 100.0));
+        let reach = |f: &dyn Fn(&(f64, f64)) -> bool| pts.iter().any(f);
+        assert!(
+            reach(&|p| p.0 < 80.1) && reach(&|p| p.1 > 119.9) && reach(&|p| p.1 < 80.1),
+            "the full turn did not go all the way round ({} points):\n{}",
+            pts.len(),
             g.gcode
         );
-        let xy_cuts = code_lines(&g.gcode)
-            .into_iter()
-            .filter(|l| l.starts_with("G1 ") && word(l, 'X').is_some())
-            .count();
-        assert_eq!(
-            xy_cuts, 0,
-            "today a full-turn arc degrades to NOTHING. If it now emits motion, this defect has \
-             been fixed and this test should be inverted to assert the fix:\n{}",
-            g.gcode
-        );
+        let worst = worst_off_circle((120.0, 100.0), &pts, (100.0, 100.0), 20.0);
+        assert!(worst <= crate::post_grblhal::ARC_FLATTEN_TOL_MM + 1e-3, "off by {worst:.4} mm");
         assert!(
             g.warnings.iter().any(|w| w.contains("arc degraded")),
-            "a whole feature left the program in silence: {:?}",
+            "the program was changed and nothing said so: {:?}",
             g.warnings
         );
     }

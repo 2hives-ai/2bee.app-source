@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.browser.json --noEmit",
-    "build": "npm run shop && npm run typecheck && vite build",
+    "build": "npm run shop && npm run pnp:stackup && npm run pcb:gates && npm run typecheck && vite build",
     "preview": "vite preview --port 4173",
     "test:e2e": "playwright test",
     "test:node": "node --import ./tests/register.mjs --test tests/*.test.ts",
@@ -15,7 +15,13 @@
     "wasm": "cargo build --manifest-path ../Cargo.toml -p twobee-cam-wasm --target wasm32-unknown-unknown --release && wasm-bindgen --target web --out-dir src/wasm --no-typescript ../target/wasm32-unknown-unknown/release/twobee_cam_wasm.wasm",
     "dev:fresh": "npm run wasm && npm run shop && npm run dev",
     "gate": "node ../gates/slicer_gate_check.mjs",
-    "shop": "node --import ./tests/register.mjs scripts/build-shop-catalogue.ts"
+    "shop": "node --import ./tests/register.mjs scripts/build-shop-catalogue.ts",
+    "pnp:stackup": "node --import ./tests/register.mjs scripts/build-pnp-stackup.ts",
+    "pcb:gates": "node --import ./tests/register.mjs scripts/build-pcb-gates.ts",
+    "pnp:manifest": "node --import ./tests/register.mjs scripts/pnp-manifest.ts",
+    "designs:collect": "node --import ./tests/register.mjs scripts/collect-external-designs.ts",
+    "designs:verify": "node --import ./tests/register.mjs scripts/verify-external-designs.ts",
+    "designs": "npm run designs:collect && npm run designs:verify"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -33,6 +39,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "eslint": "^10.9.0",
     "eslint-plugin-react-hooks": "^7.1.1",
+    "pcb-stackup": "^4.2.8",
     "typescript": "^5.6.3",
     "typescript-eslint": "^8.67.0",
     "vite": "^5.4.11"

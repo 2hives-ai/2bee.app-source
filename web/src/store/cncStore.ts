@@ -30,6 +30,11 @@ import type { LoadedRecord } from '../savedSelection';
 // Restore session data once at module load
 const RESTORED = readSession();
 const R: Partial<SessionValues> = RESTORED.status === 'ok' ? RESTORED.values : {};
+const savedMaterial: string | undefined = (() => {
+  const raw = RESTORED.status === 'ok' ? RESTORED.raw : undefined;
+  const m = raw?.material;
+  return typeof m === 'string' && m.trim() ? m.trim() : undefined;
+})();
 
 const DEFAULT_TRAVEL_MM: [number, number, number] = [600, 900, 100];
 
@@ -122,6 +127,9 @@ export interface WorkpieceState {
   originY: number;
   rotation: number;
   material: string;
+  /** True only when `material` was STATED: restored from a saved session, or set by a control. The initial
+   *  'Plywood' is a placeholder for the Expert picker, never an operator's choice — see `operatorMaterial`. */
+  materialStated: boolean;
   workpieceMaterialFacet: string;
 }
 
@@ -399,7 +407,11 @@ export const useCncStore = create<CncStore>((set) => ({
   originX: R.originX ?? 0,
   originY: R.originY ?? 0,
   rotation: R.rotation ?? 0,
-  material: 'Plywood',
+  // 🔴 2026-11-14: the saved session's material, when it states one. It used to be 'Plywood' always, and only the
+  // Expert tab restored the saved one — so 2bee.cnc and Make planned every job on Plywood feeds and printed
+  // "Material: Plywood, from your 2bee.cnc settings". Validated against the library where it is used.
+  material: savedMaterial ?? 'Plywood',
+  materialStated: savedMaterial !== undefined,
   workpieceMaterialFacet: '',
 
   setStockX: (v) => set({ stockX: v }),
@@ -409,7 +421,7 @@ export const useCncStore = create<CncStore>((set) => ({
   setOriginX: (v) => set({ originX: v }),
   setOriginY: (v) => set({ originY: v }),
   setRotation: (v) => set({ rotation: v }),
-  setMaterial: (v) => set({ material: v }),
+  setMaterial: (v) => set({ material: v, materialStated: true }),
   setWorkpieceMaterialFacet: (v) => set({ workpieceMaterialFacet: v }),
 
   // Tools

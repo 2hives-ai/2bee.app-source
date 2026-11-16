@@ -77,7 +77,7 @@
 // ERR_MODULE_NOT_FOUND. Measured 2026-08-11 by making exactly that mistake.
 // The one consequence is `Mesher.inherit`, which re-derives `colourIsComplete`
 // rather than calling it; see the note there.
-import type { Colour, Facets, ParseDiagnostics, SceneNode, Vec3 } from './scad';
+import type { Colour, Facets, OffsetJoin, ParseDiagnostics, SceneNode, Vec3 } from './scad';
 
 // ---------------------------------------------------------------------------
 // Budgets. A browser tab that hangs is a defect; so is one that quietly returns
@@ -91,8 +91,63 @@ const EPS = 1e-5;
 const WELD_EPS = 1e-6;
 /** Polygons in any single CSG operand or result. */
 const MAX_POLYS = 200_000;
-/** Wall-clock for the whole evaluation. Exceeded ⇒ the node in flight is refused. */
-const MAX_MS = 6_000;
+/**
+ * 🔴 THE WORK BUDGET, AND WHY IT IS NOT A CLOCK (2026-10-15). This was
+ * `MAX_MS = 6_000`, wall-clock for the whole evaluation — and a wall-clock budget
+ * makes the VERDICT depend on how busy the machine is. Measured on this lane's
+ * own gate: at load ~75 files that are measurable on a calm box refused
+ * ("exceeded its 6000 ms budget"), the cut file 2bee_hive_panels_18mm_inner_wcnc
+ * flipped DIVERGES <-> STRICTER between runs, and a CAD1H ratchet was lowered on
+ * counts that were low only because the box was loaded. A budget is now counted
+ * in WORK UNITS: every `check(count)` charges the polygons the operation saw,
+ * every `tick()` charges 1. The same file always spends the same units, so it
+ * always gets the same answer, on any machine, under any load.
+ * CALIBRATION (see MAX_WORK's value): set above the largest work any corpus or
+ * hardware file spends on a calm box, where no file had hit the old 6 s budget,
+ * so no calm verdict moves.
+ */
+// CALIBRATED 2026-10-15 on cad-tree@1c75bf401150 (clean archive) against calm full pass #6: uncapped,
+// the heaviest files spend hive_variants 3.67e10, pnp_drive_assembly_1 3.10e10, autoframe assembly
+// 2.43e10 units, and EXACTLY ONE of 460 cases changes verdict — hive_variants, which the old 6 s clock
+// refused even on a calm box. 3.3e10 sits between the top two, so all 460 calm verdicts are reproduced,
+// now independent of load. Raising it is a decision (hive_variants would go STRICTER -> PENDING).
+const MAX_WORK = 33_000_000_000;
+/**
+ * A wall-clock BACKSTOP only, against a genuine hang (a tab that never comes
+ * back). 20× the old budget, so load alone cannot reach it for anything the work
+ * budget admits; when it fires it SAYS it was the clock, so a load-made refusal
+ * can never pass for a property of the model.
+ */
+const WALL_BACKSTOP_MS = 120_000;
+/**
+ * Scene-tree recursion depth. Exceeded ⇒ the node in flight is refused, by name.
+ *
+ * 🔴 SET FROM TWO MEASUREMENTS, NOT FROM A FEELING ABOUT NESTING. (2026-09-17)
+ *
+ * **The ceiling:** `meshScene` throws a raw `RangeError` at depth **665** on this
+ * runtime (deepest OK: 664), and `parseScad` throws at **616** (deepest OK: 615)
+ * — bisected against a real parsed tree, not a hand-built one.
+ * **The floor:** the deepest design in `hardware/cad` is **21** (389 of 389 files
+ * parsed; median 3, p90 9, p99 13).
+ *
+ * ⇒ **256 is ~12× the deepest thing anyone here has ever drawn and well under half
+ * the smallest measured ceiling.** The margin is deliberate: a stack limit is a
+ * property of the RUNTIME, so the browser's is not node's and neither is fixed.
+ * A guard set just below a number measured in one engine is a guard that stops
+ * working in the other, silently, at exactly the input it was written for.
+ *
+ * 🔴 IT MUST STAY ABOVE `MAX_NEST_DEPTH` (200) IN `scad.ts`, AND THE TWO COUNT
+ * DIFFERENT THINGS. This one walks the parser's tree **plus the root group the
+ * parser adds**, so source nested 255 deep arrives here as depth 256. With both
+ * constants at 256 — as they first were — the parser accepted a file and this
+ * refused it, and the tab drew nothing while two limits reading the same number
+ * both looked correct. ⇒ **The relation is the invariant; the values are not.**
+ *
+ * ⚠ AND THIS GUARD STILL HAS TO STAND ALONE. `meshScene` is called directly by
+ * the gates and by tests with hand-built trees the parser never saw, so it cannot
+ * rely on the parser having refused first.
+ */
+const MAX_DEPTH = 256;
 /** Any facet count above this is clamped, and the clamp is reported.
  *  ⚠ It applies to a count derived from `$fa`/`$fs` as well as to an explicit
  *  `$fn` — `$fa=1; $fs=0.1; sphere(5)` asks for 315 sides. A clamp that is
@@ -223,7 +278,22 @@ export interface MeshIssue {
    * look, and the cost of a spurious `trusted` is a cut part.
    */
   alters?: 'geometry' | 'precision' | 'appearance';
+  /**
+   * Set ONLY on a refusal caused by a {@link CsgLimit}: WHICH budget ran out.
+   * `polygons` (MAX_POLYS), `work` (MAX_WORK), `clock` (the wall-clock backstop)
+   * are budgets a coarser tessellation can bring under; `depth` (MAX_DEPTH) is
+   * not — the tree nests as deep at any resolution.
+   *
+   * 🔴 STRUCTURED, NOT READ OFF `detail` (2026-11-13). `cad/machine.ts`'s
+   * resolution ladder steps down ONLY on a budget refusal; matching the English
+   * sentence would let a reworded message silently turn the ladder off (or on).
+   * Absent ⇒ not a budget refusal, which is the direction that does NOT retry.
+   */
+  limit?: CsgLimitKind;
 }
+
+/** Which budget a {@link CsgLimit} ran out of. See `MeshIssue.limit`. */
+export type CsgLimitKind = 'polygons' | 'work' | 'clock' | 'depth';
 
 /**
  * Deliberate mesh corruptions, applied AFTER the kernel and BEFORE the audit.
@@ -256,8 +326,10 @@ export interface MeshResult {
     flats: number;
     booleansComputed: number;
     booleansRefused: number;
-    /** Milliseconds spent evaluating. Reported because the budget is real. */
+    /** Milliseconds spent evaluating. INFORMATION ONLY since 2026-10-15 — it depends on load. */
     ms: number;
+    /** Deterministic work units spent (see MAX_WORK). The budget is on THIS. */
+    work: number;
   };
   /** The one-word answer to "can I trust this picture?".
    *
@@ -1024,188 +1096,883 @@ function traceOutline(
   return outline;
 }
 
-function boolean2D(op: BooleanOp, flats: Flat[]): Flat[] | null {
-  if (flats.length < 2) return flats;
+/* ═════════════════════════════════════════════════════════════════════════════
+ * 2D REGIONS — exact booleans, and a cap triangulation that is CHECKED.
+ * ═════════════════════════════════════════════════════════════════════════════
+ *
+ * 🔴 TWO SILENT-GEOMETRY DEFECTS LIVED HERE UNTIL 2026-10-14 (found by the
+ * CAD1H triage, listed "found, not fixed" in 187f6a74ec):
+ *
+ *   1. `difference()` and `intersection()` read ONLY `flats[0]` and `flats[1]`
+ *      — every further operand was dropped — and even those two were wrong:
+ *      the intersection was Sutherland–Hodgman, which is only correct for a
+ *      CONVEX, CCW clip, and the difference returned the subject PLUS the
+ *      removed piece as a second flat labelled `hole(...)`. A list of flats is
+ *      a UNION everywhere downstream, so that "hole" filled itself back in:
+ *      `linear_extrude(3) difference(){ square(10); translate([3,3]) square(4); }`
+ *      was 348 mm³ here and is 252 in openscad 2026.08.07. And the operands
+ *      were flattened before the boolean, so `difference(){ union(){a;b} c }`
+ *      computed `a − b` and dropped `c`.
+ *   2. `linear_extrude` capped every outline with a FAN from vertex 0. The
+ *      fan's signed areas still sum to the outline's, so the volume read
+ *      right — and the triangles fold over and poke outside a concave outline.
+ *      A comb extruded that way, unioned with a pin standing in one of its
+ *      gaps, came out 136 mm³ and `non-manifold` (openscad: 135). The 2D
+ *      preview drew the same fan: a 44 mm² comb showed 92 mm² of triangles.
+ *
+ * WHAT REPLACED THEM, AND WHY EACH IS EXACT OR REFUSES:
+ *
+ *   · A region is ONE outer ring plus HOLES (`Flat.holes`). Before this there
+ *     was no way to say "square with a hole", which is why defect 1 could only
+ *     fake one.
+ *   · 2D difference / intersection are computed by the SAME BSP kernel as the
+ *     3D booleans, on prisms of the operands, and the 2D answer is read back
+ *     off the result's upward faces (see `boolean2D`). No new clipping code,
+ *     so no new numerical story: it is exactly as exact as every 3D
+ *     difference this file already draws.
+ *   · Caps are ear-clipped, with holes bridged in, and then VERIFIED rather
+ *     than trusted (`triangulateRegion`): every triangle positively wound, and
+ *     the triangles' edges cancel to EXACTLY the rings' edges. Those two facts
+ *     together prove every point of the region is covered once and nothing
+ *     outside it is covered at all (a degree argument — see the check). A
+ *     triangulation that fails the check is REFUSED by name; nothing falls
+ *     back to a fan.
+ */
 
-  const subject = flats[0];
-  const clip = flats[1];
-
-  // Ensure both outlines are closed (first == last)
-  const subj = ensureClosed(subject.outline);
-  const clp = ensureClosed(clip.outline);
-
-  if (subj.length < 3 || clp.length < 3) return null;
-
-  switch (op) {
-    case 'intersection': {
-      const result = clipPolygon(subj, clp);
-      if (result.length < 3) return [];
-      return [{ outline: result, label: subject.label, line: subject.line, colour: subject.colour }];
-    }
-    case 'difference': {
-      // Subject minus clip: keep the subject, punch out the intersection.
-      // For CNC, this means the subject outline stays, and the clip becomes
-      // a hole (returned as a separate flat).
-      const intersection = clipPolygon(subj, clp);
-      if (intersection.length < 3) {
-        // No overlap — subject unchanged
-        return [subject];
-      }
-      // Return subject outline + hole outline as separate flats.
-      // The extrude/preview will show both; for CNC, the hole is a pocket.
-      return [
-        { outline: subj, label: subject.label, line: subject.line, colour: subject.colour },
-        { outline: ensureClosed(intersection), label: `hole(${clip.label})`, line: clip.line, colour: clip.colour },
-      ];
-    }
-    case 'union': {
-      // Union of two polygons: combine outlines. For non-overlapping, just
-      // concatenate. For overlapping, compute the outer boundary.
-      const intersection = clipPolygon(subj, clp);
-      if (intersection.length < 3) {
-        // No overlap — both outlines are separate
-        return [subject, clip];
-      }
-      // Overlapping: return the larger outline (simplified — a proper union
-      // would compute the outer boundary, but for CNC the common case is
-      // non-overlapping parts or one containing the other).
-      const subjArea = polygonArea(subj);
-      const clipArea = polygonArea(clp);
-      if (subjArea >= clipArea) {
-        return [subject]; // Subject contains clip
-      }
-      return [clip]; // Clip contains subject
-    }
-  }
-  return null;
+/** A region in the XY plane: one outer ring and zero or more holes. */
+interface Region {
+  outer: V3[];
+  holes: V3[][];
 }
 
-/** Ensure a polygon is closed (first point == last point). */
-function ensureClosed(outline: V3[]): V3[] {
-  if (outline.length < 2) return outline;
-  const first = outline[0];
-  const last = outline[outline.length - 1];
-  if (Math.abs(first[0] - last[0]) < 1e-9 && Math.abs(first[1] - last[1]) < 1e-9) {
-    return outline;
-  }
-  return [...outline, first];
+type RegionResult = { kind: 'ok'; regions: Region[] } | { kind: 'refuse'; why: string };
+
+/** Orientation of r relative to the directed line p→q: >0 left, <0 right. */
+function orient2(p: V3, q: V3, r: V3): number {
+  return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
 }
 
-/** Signed area of a polygon (positive for CCW winding). */
-function polygonArea(pts: V3[]): number {
-  let area = 0;
-  for (let i = 0; i < pts.length - 1; i++) {
-    area += pts[i][0] * pts[i + 1][1] - pts[i + 1][0] * pts[i][1];
+function samePt(a: V3, b: V3): boolean {
+  return Math.abs(a[0] - b[0]) <= 1e-12 && Math.abs(a[1] - b[1]) <= 1e-12;
+}
+
+/** Even-odd point-in-ring, XY. Points ON the ring are not asked here — every
+ *  caller has already established that the point is off every ring edge. */
+function pointInRing(pt: V3, ring: V3[]): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i], b = ring[j];
+    if ((a[1] > pt[1]) !== (b[1] > pt[1])) {
+      const x = a[0] + ((pt[1] - a[1]) * (b[0] - a[0])) / (b[1] - a[1]);
+      if (pt[0] < x) inside = !inside;
+    }
   }
-  return area / 2;
+  return inside;
 }
 
 /**
- * Sutherland-Hodgman polygon clipping: clip `subject` against `clip`.
- * Returns the intersection polygon. Both inputs must be closed and CCW.
+ * Does segment a–b touch the OPEN segment p–m anywhere? Sharing an endpoint
+ * is not touching, unless the two run along each other from it.
+ * Conservative: "nearly touching" within a relative 1e-12 counts as touching,
+ * so a borderline bridge is rejected and another one tried.
  */
-function clipPolygon(subject: V3[], clip: V3[]): V3[] {
-  let output = subject.slice(0, -1); // Remove closing vertex if present
+function touchesOpenSegment(p: V3, m: V3, a: V3, b: V3): boolean {
+  const lpm = Math.hypot(m[0] - p[0], m[1] - p[1]);
+  const lab = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  if (!(lpm > 0) || !(lab > 0)) return false;
+  const tol = 1e-12 * lpm * Math.max(lab, lpm);
+  const o1 = orient2(p, m, a), o2 = orient2(p, m, b);
+  const o3 = orient2(a, b, p), o4 = orient2(a, b, m);
+  const s1 = Math.abs(o1) <= tol ? 0 : Math.sign(o1);
+  const s2 = Math.abs(o2) <= tol ? 0 : Math.sign(o2);
+  const s3 = Math.abs(o3) <= tol * (lab / lpm || 1) ? 0 : Math.sign(o3);
+  const s4 = Math.abs(o4) <= tol * (lab / lpm || 1) ? 0 : Math.sign(o4);
+  if (s1 * s2 < 0 && s3 * s4 < 0) return true;
+  // Parameter of a point along p→m; strictly inside (0,1) ⇔ on the open segment.
+  const along = (q: V3) => ((q[0] - p[0]) * (m[0] - p[0]) + (q[1] - p[1]) * (m[1] - p[1])) / (lpm * lpm);
+  const eps = 1e-12;
+  if (s1 === 0 && !samePt(a, p) && !samePt(a, m)) {
+    const t = along(a);
+    if (t > eps && t < 1 - eps) return true;
+  }
+  if (s2 === 0 && !samePt(b, p) && !samePt(b, m)) {
+    const t = along(b);
+    if (t > eps && t < 1 - eps) return true;
+  }
+  // Collinear overlap from a shared endpoint: a–b runs along p–m.
+  if (s1 === 0 && s2 === 0) {
+    const ta = along(a), tb = along(b);
+    const lo = Math.min(ta, tb), hi = Math.max(ta, tb);
+    if (hi > eps && lo < 1 - eps && hi - lo > eps) return true;
+  }
+  return false;
+}
 
-  for (let i = 0; i < clip.length - 1; i++) {
-    if (output.length === 0) return [];
-    const edgeStart = clip[i];
-    const edgeEnd = clip[i + 1];
-    const input = output;
-    output = [];
+interface RNode {
+  p: V3;
+  /** Id of the ring vertex this node stands for. Bridge copies share it. */
+  id: number;
+  prev: RNode;
+  next: RNode;
+}
 
-    for (let j = 0; j < input.length; j++) {
-      const current = input[j];
-      const prev = input[(j - 1 + input.length) % input.length];
+function linkRing(ring: V3[], base: number): RNode {
+  const nodes: RNode[] = ring.map((p, i) => ({ p, id: base + i }) as RNode);
+  nodes.forEach((n, i) => {
+    n.prev = nodes[(i - 1 + nodes.length) % nodes.length];
+    n.next = nodes[(i + 1) % nodes.length];
+  });
+  return nodes[0];
+}
 
-      const currentInside = isInsideEdge(current, edgeStart, edgeEnd);
-      const prevInside = isInsideEdge(prev, edgeStart, edgeEnd);
+/** Is direction d strictly inside the material wedge at node n? The material is
+ *  on the LEFT of the ring's direction (outer CCW, holes CW). */
+function inWedge(n: RNode, d: V3): boolean {
+  const p = n.p;
+  const e1: V3 = [n.next.p[0] - p[0], n.next.p[1] - p[1], 0];
+  const e0: V3 = [n.prev.p[0] - p[0], n.prev.p[1] - p[1], 0];
+  const cr = (u: V3, v: V3) => u[0] * v[1] - u[1] * v[0];
+  const c1 = cr(e1, d) > 0;
+  const c2 = cr(d, e0) > 0;
+  return cr(e1, e0) > 0 ? c1 && c2 : c1 || c2;
+}
 
-      if (currentInside) {
-        if (!prevInside) {
-          const intersection = lineIntersection(prev, current, edgeStart, edgeEnd);
-          if (intersection) output.push(intersection);
+/** Normalise a ring: no duplicate vertices, the requested winding, nonzero area.
+ *  `null` ⇔ the ring is DEGENERATE — every vertex on one line — and encloses
+ *  nothing. `'crossed'` ⇔ zero net area WITHOUT being degenerate: a
+ *  figure-eight whose lobes cancel. That is not "nothing"; it is a ring whose
+ *  meaning this kernel will not guess, and the caller refuses it. */
+function normaliseRing(pts: V3[], ccw: boolean): V3[] | null | 'crossed' {
+  const c = cleanOutline(pts);
+  if (c.length < 3) return null;
+  const a = openArea(c);
+  if (!(Math.abs(a) > 1e-12)) {
+    let far = c[0];
+    let fd = 0;
+    for (const q of c) {
+      const d = (q[0] - c[0][0]) ** 2 + (q[1] - c[0][1]) ** 2;
+      if (d > fd) { fd = d; far = q; }
+    }
+    return c.every((q) => Math.abs(orient2(c[0], far, q)) <= 1e-12 * fd) ? null : 'crossed';
+  }
+  return a > 0 === ccw ? c : c.slice().reverse();
+}
+
+type Triangulation =
+  | { kind: 'ok'; tris: [V3, V3, V3][]; outer: V3[]; holes: V3[][] }
+  | { kind: 'empty' }
+  | { kind: 'refuse'; why: string };
+
+/**
+ * Triangulate a region (outer ring + holes) in the XY plane by ear clipping,
+ * with every hole first bridged into the outer ring — and then PROVE the
+ * result, or refuse.
+ *
+ * Every returned triangle is CCW seen from +Z. The returned `outer` is CCW and
+ * every returned hole CW — the windings the walls of an extrusion need — and
+ * their vertices are exactly the vertices the triangles use, so a cap and its
+ * walls weld without T-junctions.
+ *
+ * ⚠ WHAT THIS DOES NOT DO: decide whether a self-intersecting ring "means"
+ * even-odd or nonzero. Such a ring fails the positivity half of the check and
+ * is refused — the answer for a figure-eight is not this function's to guess.
+ */
+function triangulateRegion(outer0: V3[], holes0: V3[][]): Triangulation {
+  const crossed = { kind: 'refuse', why: 'an outline crosses itself so that its lobes cancel to zero area' } as const;
+  const outer = normaliseRing(outer0, true);
+  if (outer === 'crossed') return crossed;
+  if (!outer) return { kind: 'empty' };
+  const holes: V3[][] = [];
+  for (const h of holes0) {
+    const r = normaliseRing(h, false);
+    if (r === 'crossed') return crossed;
+    if (r) holes.push(r);
+  }
+
+  const rings = [outer, ...holes];
+  const bases: number[] = [];
+  let nextId = 0;
+  for (const r of rings) {
+    bases.push(nextId);
+    nextId += r.length;
+  }
+
+  const head = linkRing(outer, 0);
+  const holeHeads = holes.map((h, i) => linkRing(h, bases[i + 1]));
+
+  // Obstacles a bridge may not touch: every ring edge, and every bridge laid.
+  const ringEdges: [V3, V3][] = [];
+  for (const r of rings) for (let i = 0; i < r.length; i++) ringEdges.push([r[i], r[(i + 1) % r.length]]);
+  const bridges: [V3, V3][] = [];
+  const inRegion = (q: V3) => pointInRing(q, outer) && !holes.some((h) => pointInRing(q, h));
+
+  // Bridge the holes in, rightmost first (Eberly's order; any order is correct
+  // here because every bridge is checked against every ring and every bridge).
+  const order = holeHeads
+    .map((h, i) => ({ h, i, maxX: Math.max(...holes[i].map((q) => q[0])) }))
+    .sort((a, b) => b.maxX - a.maxX);
+  for (const { h } of order) {
+    let m = h;
+    for (let n = h.next; n !== h; n = n.next) if (n.p[0] > m.p[0] || (n.p[0] === m.p[0] && n.p[1] > m.p[1])) m = n;
+    const cands: { n: RNode; d2: number }[] = [];
+    let n = head;
+    do {
+      const d2 = (n.p[0] - m.p[0]) ** 2 + (n.p[1] - m.p[1]) ** 2;
+      if (d2 > 1e-24) cands.push({ n, d2 });
+      n = n.next;
+    } while (n !== head);
+    cands.sort((a, b) => a.d2 - b.d2);
+    let bridged = false;
+    for (const { n: pn } of cands) {
+      const toM: V3 = [m.p[0] - pn.p[0], m.p[1] - pn.p[1], 0];
+      const toP: V3 = [-toM[0], -toM[1], 0];
+      if (!inWedge(pn, toM) || !inWedge(m, toP)) continue;
+      if (ringEdges.some(([a, b]) => touchesOpenSegment(pn.p, m.p, a, b))) continue;
+      if (bridges.some(([a, b]) => touchesOpenSegment(pn.p, m.p, a, b))) continue;
+      // The open segment touches no boundary, so it lies wholly inside the
+      // region or wholly outside it; one interior point decides which.
+      const mid: V3 = [(pn.p[0] + m.p[0]) / 2, (pn.p[1] + m.p[1]) / 2, 0];
+      if (!inRegion(mid)) continue;
+      // Splice: … pn → m → (around the hole) → m′ → pn′ → (old pn.next) …
+      const pn2: RNode = { p: pn.p, id: pn.id } as RNode;
+      const m2: RNode = { p: m.p, id: m.id } as RNode;
+      const pNext = pn.next;
+      const mPrev = m.prev;
+      pn.next = m;
+      m.prev = pn;
+      mPrev.next = m2;
+      m2.prev = mPrev;
+      m2.next = pn2;
+      pn2.prev = m2;
+      pn2.next = pNext;
+      pNext.prev = pn2;
+      bridges.push([pn.p, m.p]);
+      bridged = true;
+      break;
+    }
+    if (!bridged) {
+      return {
+        kind: 'refuse',
+        why:
+          'a hole could not be joined to its outline by any segment that stays inside the region (the hole may ' +
+          'touch or cross the outline, or another hole)',
+      };
+    }
+  }
+
+  // Ear clipping.
+  const tris: [RNode, RNode, RNode][] = [];
+  let count = 0;
+  {
+    let n = head;
+    do {
+      count++;
+      n = n.next;
+    } while (n !== head);
+  }
+  const isEar = (b: RNode): boolean => {
+    const a = b.prev, c = b.next;
+    const lab = Math.hypot(b.p[0] - a.p[0], b.p[1] - a.p[1]);
+    const lbc = Math.hypot(c.p[0] - b.p[0], c.p[1] - b.p[1]);
+    if (!(orient2(a.p, b.p, c.p) > 1e-12 * lab * lbc)) return false;
+    const x0 = Math.min(a.p[0], b.p[0], c.p[0]), x1 = Math.max(a.p[0], b.p[0], c.p[0]);
+    const y0 = Math.min(a.p[1], b.p[1], c.p[1]), y1 = Math.max(a.p[1], b.p[1], c.p[1]);
+    const tol = 1e-12 * Math.max(lab, lbc) ** 2;
+    for (let q = c.next; q !== a; q = q.next) {
+      const p = q.p;
+      if (p[0] < x0 || p[0] > x1 || p[1] < y0 || p[1] > y1) continue;
+      if (samePt(p, a.p) || samePt(p, b.p) || samePt(p, c.p)) continue;
+      // Inside OR ON the triangle blocks the ear — conservative.
+      if (orient2(a.p, b.p, p) >= -tol && orient2(b.p, c.p, p) >= -tol && orient2(c.p, a.p, p) >= -tol) return false;
+    }
+    return true;
+  };
+  let cur = head;
+  let stall = 0;
+  // Ear tests are O(n) each; the cap keeps a pathological outline from hanging
+  // the tab — it refuses, by name, instead.
+  let budget = 4e7;
+  while (count > 3) {
+    budget -= count;
+    if (budget < 0) {
+      return { kind: 'refuse', why: `the outline (${outer.length} vertices, ${holes.length} hole(s)) exceeded the triangulation budget` };
+    }
+    if (isEar(cur)) {
+      tris.push([cur.prev, cur, cur.next]);
+      cur.prev.next = cur.next;
+      cur.next.prev = cur.prev;
+      cur = cur.prev;
+      count--;
+      stall = 0;
+      continue;
+    }
+    cur = cur.next;
+    if (++stall > count) {
+      return {
+        kind: 'refuse',
+        why: `no valid ear was found with ${count} vertices left — the outline touches or crosses itself`,
+      };
+    }
+  }
+  tris.push([cur.prev, cur, cur.next]);
+
+  /* 🔴 THE CHECK. Two facts, both cheap, together a proof:
+   *   (a) every triangle is wound CCW (zero-area allowed — it covers nothing);
+   *   (b) the triangles' directed edges, summed with sign, equal the rings'
+   *       directed edges exactly — interior diagonals and bridge edges cancel
+   *       in pairs, every ring edge survives once, nothing else survives.
+   * By (b) the triangles form a chain whose boundary is the region's boundary,
+   * so the signed number of triangles covering any point is the winding number
+   * of the rings there: 1 inside the region, 0 outside. By (a) no triangle
+   * counts negatively, so "signed number" is "number": inside covered EXACTLY
+   * once, outside not at all. No overlap, no gap, nothing poking out. */
+  const net = new Map<number, number>();
+  const bump = (u: number, v: number, s: number) => {
+    if (u === v) return;
+    const k = u < v ? u * nextId + v : v * nextId + u;
+    net.set(k, (net.get(k) ?? 0) + (u < v ? s : -s));
+  };
+  const out: [V3, V3, V3][] = [];
+  for (const [a, b, c] of tris) {
+    const lab = Math.hypot(b.p[0] - a.p[0], b.p[1] - a.p[1]);
+    const lbc = Math.hypot(c.p[0] - b.p[0], c.p[1] - b.p[1]);
+    const o = orient2(a.p, b.p, c.p);
+    const tol = 1e-12 * Math.max(lab * lbc, 1e-300);
+    if (o < -tol) {
+      return { kind: 'refuse', why: 'the ear clipping produced an inverted triangle — the outline is not a simple polygon' };
+    }
+    bump(a.id, b.id, 1);
+    bump(b.id, c.id, 1);
+    bump(c.id, a.id, 1);
+    if (o > tol) out.push([a.p, b.p, c.p]);
+  }
+  rings.forEach((r, ri) => {
+    for (let i = 0; i < r.length; i++) bump(bases[ri] + i, bases[ri] + ((i + 1) % r.length), -1);
+  });
+  for (const v of net.values()) {
+    if (v !== 0) {
+      return {
+        kind: 'refuse',
+        why: 'the triangulation does not cover the outline exactly once (its edges do not cancel to the outline) — the outline touches or crosses itself',
+      };
+    }
+  }
+  return { kind: 'ok', tris: out, outer, holes };
+}
+
+/** Extrude a region between z0 and z1. Caps from `triangulateRegion`; walls
+ *  per ring, outward for the outer ring and into each hole for a hole. */
+function extrudeRegion(outline: V3[], holes: V3[][], z0: number, z1: number): { kind: 'ok'; polys: Poly[] } | { kind: 'refuse'; why: string } {
+  const t = triangulateRegion(outline, holes);
+  if (t.kind === 'refuse') return t;
+  if (t.kind === 'empty' || !(z1 > z0)) return { kind: 'ok', polys: [] };
+  const polys: Poly[] = [];
+  const lo = (v: V3): V3 => [v[0], v[1], z0];
+  const hi = (v: V3): V3 => [v[0], v[1], z1];
+  for (const [a, b, c] of t.tris) {
+    const pb = makePoly([lo(a), lo(c), lo(b)]); // normal −Z
+    if (pb) polys.push(pb);
+    const pt = makePoly([hi(a), hi(b), hi(c)]); // normal +Z
+    if (pt) polys.push(pt);
+  }
+  for (const ring of [t.outer, ...t.holes]) {
+    const n = ring.length;
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      const b0 = lo(ring[i]), b1 = lo(ring[j]), t0 = hi(ring[i]), t1 = hi(ring[j]);
+      const p1 = makePoly([b0, b1, t1]);
+      if (p1) polys.push(p1);
+      const p2 = makePoly([b0, t1, t0]);
+      if (p2) polys.push(p2);
+    }
+  }
+  return { kind: 'ok', polys };
+}
+
+/**
+ * Read a 2D region back off a BSP result: the projection of its UPWARD faces.
+ *
+ * Valid ONLY for a solid in which every vertical line meets the material in at
+ * most one interval — `boolean2D` builds exactly that, and the face check below
+ * refuses anything else (a slanted face, overlapping top faces).
+ */
+function regionsFromUpwardFaces(polys: Poly[]): RegionResult {
+  const up: Poly[] = [];
+  for (const p of polys) {
+    const nz = p.n[2];
+    if (nz > 1 - 1e-9) up.push(p);
+    else if (Math.abs(nz) > 1e-9 && nz > -1 + 1e-9) {
+      return { kind: 'refuse', why: 'the 2D boolean produced a slanted face, which a region read-back cannot interpret' };
+    }
+  }
+  if (!up.length) return { kind: 'ok', regions: [] };
+  let tc = 0;
+  for (const p of up) tc += p.v.length - 2;
+  const pos = new Float64Array(tc * 9);
+  let o = 0;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of up) {
+    for (let i = 1; i + 1 < p.v.length; i++) {
+      for (const q of [p.v[0], p.v[i], p.v[i + 1]]) {
+        pos[o++] = q[0];
+        pos[o++] = q[1];
+        pos[o++] = 0;
+        x0 = Math.min(x0, q[0]); x1 = Math.max(x1, q[0]);
+        y0 = Math.min(y0, q[1]); y1 = Math.max(y1, q[1]);
+      }
+    }
+  }
+  const w = weld(pos, tc);
+  const diag = Math.hypot(x1 - x0, y1 - y0) || 1;
+  const repair = repairTJunctions(w, diag);
+  if (repair.exhausted) {
+    return { kind: 'refuse', why: 'the 2D boolean result has too many seams for its outline to be traced within budget' };
+  }
+  const led = ledgerOf(w.tris);
+  if (led.nonManifold || led.misoriented) {
+    return { kind: 'refuse', why: 'the 2D boolean result overlaps itself, so it has no single outline' };
+  }
+  return traceRegions(w.verts, led.boundary.map(([a, b]) => [a, b] as [number, number]));
+}
+
+/**
+ * Trace directed boundary edges (material on the LEFT of each) into regions:
+ * CCW loops are outlines, CW loops holes, each hole given to the smallest
+ * outline containing it. Shared by the BSP read-back above and by
+ * {@link fillRegion}.
+ */
+function traceRegions(V: V3[], edges: [number, number][]): RegionResult {
+  // Trace the boundary. At a vertex with several outgoing edges (two pieces
+  // touching at a point) take the one with the smallest CLOCKWISE turn from
+  // the edge we arrived on: that keeps to the same piece, so every loop is
+  // simple and pieces that touch at a point come out as separate loops.
+  const outgoing = new Map<number, number[]>();
+  edges.forEach(([a], i) => {
+    const l = outgoing.get(a);
+    if (l) l.push(i);
+    else outgoing.set(a, [i]);
+  });
+  const used = new Array(edges.length).fill(false);
+  const loops: V3[][] = [];
+  for (let e0 = 0; e0 < edges.length; e0++) {
+    if (used[e0]) continue;
+    used[e0] = true;
+    const start = edges[e0][0];
+    const loop: number[] = [start];
+    let prev = start;
+    let cur = edges[e0][1];
+    for (let guard = 0; ; guard++) {
+      if (guard > edges.length) return { kind: 'refuse', why: 'the 2D boolean result outline did not close' };
+      const r: V3 = [V[prev][0] - V[cur][0], V[prev][1] - V[cur][1], 0];
+      let best = -1;
+      let bestA = Infinity;
+      for (const ei of outgoing.get(cur) ?? []) {
+        if (used[ei] && ei !== e0) continue;
+        const t = edges[ei][1];
+        const d: V3 = [V[t][0] - V[cur][0], V[t][1] - V[cur][1], 0];
+        let cw = -Math.atan2(r[0] * d[1] - r[1] * d[0], r[0] * d[0] + r[1] * d[1]);
+        if (cw <= 0) cw += 2 * Math.PI;
+        if (cw < bestA) {
+          bestA = cw;
+          best = ei;
         }
-        output.push(current);
-      } else if (prevInside) {
-        const intersection = lineIntersection(prev, current, edgeStart, edgeEnd);
-        if (intersection) output.push(intersection);
+      }
+      if (best < 0) return { kind: 'refuse', why: 'the 2D boolean result outline is open' };
+      if (best === e0) break;
+      used[best] = true;
+      loop.push(cur);
+      prev = cur;
+      cur = edges[best][1];
+    }
+    // Drop vertices that lie on a straight run — they carry no shape.
+    let pts = loop.map((i) => V[i]);
+    for (let changed = true; changed && pts.length > 3; ) {
+      changed = false;
+      for (let i = 0; i < pts.length && pts.length > 3; i++) {
+        const a = pts[(i - 1 + pts.length) % pts.length], b = pts[i], c = pts[(i + 1) % pts.length];
+        const lab = Math.hypot(b[0] - a[0], b[1] - a[1]), lbc = Math.hypot(c[0] - b[0], c[1] - b[1]);
+        const fwd = (b[0] - a[0]) * (c[0] - b[0]) + (b[1] - a[1]) * (c[1] - b[1]) > 0;
+        if (fwd && Math.abs(orient2(a, b, c)) <= 1e-12 * lab * lbc) {
+          pts = pts.slice(0, i).concat(pts.slice(i + 1));
+          changed = true;
+          i--;
+        }
       }
     }
+    if (pts.length >= 3 && Math.abs(openArea(pts)) > 1e-12) loops.push(pts.map((q) => [q[0], q[1], 0] as V3));
   }
-
-  return output;
+  // CCW loops are outlines, CW loops are holes. A hole belongs to the SMALLEST
+  // outline containing it; the midpoint of one of its edges decides, and is off
+  // every other loop because two loops of one region never share an edge.
+  const outers = loops.filter((l) => openArea(l) > 0).map((l) => ({ l, a: openArea(l), holes: [] as V3[][] }));
+  for (const h of loops.filter((l) => openArea(l) < 0)) {
+    const mid: V3 = [(h[0][0] + h[1][0]) / 2, (h[0][1] + h[1][1]) / 2, 0];
+    let host: (typeof outers)[number] | null = null;
+    for (const o2 of outers) if (pointInRing(mid, o2.l) && (!host || o2.a < host.a)) host = o2;
+    if (!host) return { kind: 'refuse', why: 'the 2D boolean result has a hole outside every outline' };
+    host.holes.push(h);
+  }
+  return { kind: 'ok', regions: outers.map((o2) => ({ outer: o2.l, holes: o2.holes })) };
 }
 
-/** Check if a point is on the inside (left side) of an edge. */
-function isInsideEdge(point: V3, edgeStart: V3, edgeEnd: V3): boolean {
-  return (
-    (edgeEnd[0] - edgeStart[0]) * (point[1] - edgeStart[1]) -
-    (edgeEnd[1] - edgeStart[1]) * (point[0] - edgeStart[0])
-  ) >= 0;
-}
+type Bool2D = { kind: 'ok'; flats: Flat[] } | { kind: 'refuse'; why: string };
 
-/** Find intersection of two lines (p1→p2) and (p3→p4). */
-function lineIntersection(p1: V3, p2: V3, p3: V3, p4: V3): V3 | null {
-  const d1x = p2[0] - p1[0], d1y = p2[1] - p1[1];
-  const d2x = p4[0] - p3[0], d2y = p4[1] - p3[1];
-  const denom = d1x * d2y - d1y * d2x;
-  if (Math.abs(denom) < 1e-12) return null;
-  const t = ((p3[0] - p1[0]) * d2y - (p3[1] - p1[1]) * d2x) / denom;
-  return [p1[0] + t * d1x, p1[1] + t * d1y, 0];
+/**
+ * The region where the WINDING NUMBER of a set of directed loops satisfies
+ * `inside` — exactly the operation Clipper performs when OpenSCAD asks it for
+ * a union (`w ≥ 1`, positive fill), for an offset's raw path (the same), or for
+ * a polygon's paths (even-odd). Added 2026-10-14 because the staggered-prism
+ * route ({@link boolean2D}) cannot carry these: a union of N pieces at N
+ * distinct heights fragments every top face by every wall, and the brood
+ * panel's sensor-pod slot (`offset(r=0.8)` of a 64-vertex outline: 99 pieces)
+ * exceeded the 200 000-polygon ceiling.
+ *
+ * HOW, and why each step is exact or refuses:
+ *   1. every edge is split wherever another edge crosses it or ends on it, and
+ *      vertices closer than `tol` are one vertex — so the edges form a planar
+ *      arrangement whose faces each have ONE winding number;
+ *   2. coincident edges are merged with their counts summed (two opposite
+ *      edges cancel: a shared triangle edge, a doubled path);
+ *   3. for each remaining edge the winding just beside it is COUNTED, by a ray
+ *      from its midpoint against every other edge — never inferred from a
+ *      neighbour, so one bad crossing cannot propagate;
+ *   4. an edge is boundary iff `inside` differs across it, and is directed with
+ *      the inside on its left; {@link traceRegions} turns those into regions,
+ *      and refuses an outline that does not close.
+ *
+ * `tol` is 1e-9 of the coordinate scale (1 nm at a metre) — far below the
+ * 2⁻²⁰-mm grid the rest of this kernel welds on.
+ */
+function fillRegion(loops: V3[][], inside: (w: number) => boolean, budget: Budget): RegionResult {
+  const segs: [V3, V3][] = [];
+  for (const l of loops) for (let i = 0; i < l.length; i++) segs.push([l[i], l[(i + 1) % l.length]]);
+  return fillSegments(segs, inside, budget, false);
 }
 
 /**
- * Extrude a 2D outline along Z to create a 3D solid.
- *
- * The outline is a closed polygon in the XY plane (z=0). The extrusion creates:
- * - Bottom face at z=0 (or z=-height/2 if centered)
- * - Top face at z=height (or z=height/2 if centered)
- * - Side walls connecting corresponding edges
- *
- * Returns an array of Poly (triangulated faces). The polygon is triangulated
- * by a simple fan from the first vertex, which works for convex polygons
- * and simple concave ones (the common case for CNC outlines).
+ * {@link fillRegion} over loose DIRECTED SEGMENTS — a section of a mesh comes
+ * as one segment per crossing face, never as loops. With `closed`, the
+ * segments must close up (every vertex as many edges in as out, after
+ * snapping) or the answer is REFUSED: an open section has no inside, and
+ * inventing one is filling a gap in the surface with material.
  */
-function extrudeOutline(outline: V3[], height: number, center: boolean): Poly[] {
-  const n = outline.length;
-  if (n < 3 || height <= 0) return [];
+function fillSegments(segs: [V3, V3][], inside: (w: number) => boolean, budget: Budget, closed: boolean): RegionResult {
+  let scale = 1;
+  for (const sg of segs) for (const q of sg) scale = Math.max(scale, Math.abs(q[0]), Math.abs(q[1]));
+  const tol = 1e-9 * scale;
+  const tol2 = tol * tol;
+  // ── vertices, snapped on a grid of cell `tol` ────────────────────────────
+  const V: V3[] = [];
+  const grid = new Map<string, number[]>();
+  const cell = (x: number) => Math.floor(x / tol);
+  const vid = (x: number, y: number): number => {
+    const cx = cell(x), cy = cell(y);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (const i of grid.get(`${cx + dx},${cy + dy}`) ?? []) {
+          if ((V[i][0] - x) ** 2 + (V[i][1] - y) ** 2 <= tol2) return i;
+        }
+      }
+    }
+    V.push([x, y, 0]);
+    const k = `${cx},${cy}`;
+    const g = grid.get(k);
+    if (g) g.push(V.length - 1);
+    else grid.set(k, [V.length - 1]);
+    return V.length - 1;
+  };
+  // ── merged undirected edges: key lo,hi → net count in the lo→hi direction ─
+  const merge = (into: Map<string, [number, number, number]>, a: number, b: number, c: number) => {
+    if (a === b || c === 0) return;
+    const lo = Math.min(a, b), hi = Math.max(a, b);
+    const k = `${lo},${hi}`;
+    const e = into.get(k);
+    const d = a === lo ? c : -c;
+    if (e) e[2] += d;
+    else into.set(k, [lo, hi, d]);
+  };
+  const raw = new Map<string, [number, number, number]>();
+  for (const [p, q] of segs) merge(raw, vid(p[0], p[1]), vid(q[0], q[1]), 1);
+  const E = [...raw.values()].filter((e) => e[2] !== 0);
+  if (closed) {
+    const net = new Map<number, number>();
+    for (const [a, b, c] of E) {
+      net.set(a, (net.get(a) ?? 0) + c);
+      net.set(b, (net.get(b) ?? 0) - c);
+    }
+    for (const [v, k] of net) {
+      if (k !== 0) {
+        return { kind: 'refuse', why: `the section is not closed — it has an open end at (${V[v][0]}, ${V[v][1]}), so the surface it was cut from has a gap there` };
+      }
+    }
+  }
+  if (!E.length) return { kind: 'ok', regions: [] };
+  // ── split every edge where another crosses it or ends on it ──────────────
+  const splits: number[][] = E.map(() => []);
+  const box = E.map(([a, b]) => [
+    Math.min(V[a][0], V[b][0]) - tol, Math.max(V[a][0], V[b][0]) + tol,
+    Math.min(V[a][1], V[b][1]) - tol, Math.max(V[a][1], V[b][1]) + tol,
+  ]);
+  const order = E.map((_, i) => i).sort((i, j) => box[i][0] - box[j][0]);
+  /** Does vertex p lie on the OPEN edge i (within tol)? */
+  const onEdge = (i: number, p: number): boolean => {
+    const [a, b] = E[i];
+    if (p === a || p === b) return false;
+    const A = V[a], B = V[b], P = V[p];
+    const dx = B[0] - A[0], dy = B[1] - A[1];
+    const L2 = dx * dx + dy * dy;
+    const t = ((P[0] - A[0]) * dx + (P[1] - A[1]) * dy) / L2;
+    if (!(t > 0 && t < 1)) return false;
+    const cx = A[0] + t * dx - P[0], cy = A[1] + t * dy - P[1];
+    return cx * cx + cy * cy <= tol2;
+  };
+  let work = 0;
+  for (let oi = 0; oi < order.length; oi++) {
+    const i = order[oi];
+    for (let oj = oi + 1; oj < order.length; oj++) {
+      const j = order[oj];
+      if (box[j][0] > box[i][1]) break;
+      if (box[j][2] > box[i][3] || box[j][3] < box[i][2]) continue;
+      if (++work % 20000 === 0) budget.tick();
+      const [a, b] = E[i], [c, d] = E[j];
+      for (const p of [c, d]) if (onEdge(i, p)) splits[i].push(p);
+      for (const p of [a, b]) if (onEdge(j, p)) splits[j].push(p);
+      if (a === c || a === d || b === c || b === d) continue;
+      // A proper crossing: the four orientations strictly opposite, by more
+      // than the snapping distance (anything nearer is an end-on-edge, above).
+      const A = V[a], B = V[b], C = V[c], D = V[d];
+      const lab = Math.hypot(B[0] - A[0], B[1] - A[1]), lcd = Math.hypot(D[0] - C[0], D[1] - C[1]);
+      const o1 = orient2(A, B, C) / lab, o2 = orient2(A, B, D) / lab;
+      const o3 = orient2(C, D, A) / lcd, o4 = orient2(C, D, B) / lcd;
+      if (!(((o1 > tol && o2 < -tol) || (o1 < -tol && o2 > tol)) && ((o3 > tol && o4 < -tol) || (o3 < -tol && o4 > tol)))) continue;
+      const t = o3 / (o3 - o4);
+      const p = vid(A[0] + t * (B[0] - A[0]), A[1] + t * (B[1] - A[1]));
+      if (p !== a && p !== b) splits[i].push(p);
+      if (p !== c && p !== d) splits[j].push(p);
+    }
+  }
+  const sub = new Map<string, [number, number, number]>();
+  E.forEach(([a, b, cnt], i) => {
+    const A = V[a], B = V[b];
+    const dx = B[0] - A[0], dy = B[1] - A[1];
+    const at = (p: number) => (V[p][0] - A[0]) * dx + (V[p][1] - A[1]) * dy;
+    const chain = [a, ...[...new Set(splits[i])].sort((p, q) => at(p) - at(q)), b];
+    for (let k = 0; k + 1 < chain.length; k++) merge(sub, chain[k], chain[k + 1], cnt);
+  });
+  const S = [...sub.values()].filter((e) => e[2] !== 0);
+  // ── the winding on each side of every edge, COUNTED ──────────────────────
+  const boundary: [number, number][] = [];
+  for (let i = 0; i < S.length; i++) {
+    if (i % 200 === 0) budget.tick();
+    const [a, b, c] = S[i];
+    const A = V[a], B = V[b];
+    const mx = (A[0] + B[0]) / 2, my = (A[1] + B[1]) / 2;
+    const alongX = Math.abs(B[1] - A[1]) >= Math.abs(B[0] - A[0]);
+    let w = 0;
+    for (let j = 0; j < S.length; j++) {
+      if (j === i) continue;
+      const [p, q, cq] = S[j];
+      const P = V[p], Q = V[q];
+      if (alongX) {
+        // Ray to +x: an upward edge to the right counts +1, downward −1.
+        if (P[1] > my !== Q[1] > my) {
+          const x = P[0] + ((my - P[1]) * (Q[0] - P[0])) / (Q[1] - P[1]);
+          if (x > mx) w += (Q[1] > P[1] ? 1 : -1) * cq;
+        }
+      } else if (P[0] > mx !== Q[0] > mx) {
+        // Ray to +y: a leftward edge above counts +1, rightward −1.
+        const y = P[1] + ((mx - P[0]) * (Q[1] - P[1])) / (Q[0] - P[0]);
+        if (y > my) w += (Q[0] > P[0] ? -1 : 1) * cq;
+      }
+    }
+    // `w` is the winding just beyond this edge in the ray's direction. Crossing
+    // a→b from its right to its left adds c.
+    const rayIsLeft = alongX ? B[1] < A[1] : B[0] > A[0];
+    const wL = rayIsLeft ? w : w + c;
+    const wR = wL - c;
+    const inL = inside(wL), inR = inside(wR);
+    if (inL !== inR) boundary.push(inL ? [a, b] : [b, a]);
+  }
+  if (!boundary.length) return { kind: 'ok', regions: [] };
+  return traceRegions(V, boundary);
+}
 
+/**
+ * The union of `flats` as DISJOINT regions — one outline per piece, with the
+ * holes the pieces enclose — by {@link fillRegion} (positive fill, the rule
+ * OpenSCAD's own union uses). A list of flats already MEANS its union to
+ * everything that draws or extrudes it; this is for the consumers that must
+ * see the union's BOUNDARY, first of all `offset()`.
+ */
+function union2D(flats: Flat[], budget: Budget): Bool2D {
+  const loops: V3[][] = [];
+  const z = flats[0]?.outline[0]?.[2] ?? 0;
+  for (const f of flats) {
+    const outer = normaliseRing(f.outline, true);
+    if (outer === 'crossed') return { kind: 'refuse', why: `${f.label} (line ${f.line}) has an outline that crosses itself` };
+    if (!outer) continue;
+    loops.push(outer);
+    for (const h0 of f.holes ?? []) {
+      const h = normaliseRing(h0, false);
+      if (h === 'crossed') return { kind: 'refuse', why: `${f.label} (line ${f.line}) has a hole that crosses itself` };
+      if (h) loops.push(h);
+    }
+    for (const ring of [f.outline, ...(f.holes ?? [])]) {
+      if (ring.some((q) => Math.abs(q[2] - z) > 1e-9)) return { kind: 'refuse', why: 'its outlines do not all lie in one plane parallel to XY' };
+    }
+  }
+  const res = fillRegion(loops, (w) => w >= 1, budget);
+  if (res.kind === 'refuse') return res;
+  const f0 = flats[0];
+  return {
+    kind: 'ok',
+    flats: res.regions.map((r) => ({
+      outline: r.outer.map((q) => [q[0], q[1], z] as V3),
+      holes: r.holes.length ? r.holes.map((h) => h.map((q) => [q[0], q[1], z] as V3)) : undefined,
+      label: f0.label,
+      line: f0.line,
+      colour: f0.colour,
+    })),
+  };
+}
+
+
+/**
+ * A 2D boolean over ALL of its operands. `groups[i]` is operand i — a list of
+ * flats, which MEANS their union (`operand()` keeps them grouped so that
+ * `difference(){ union(){a;b} c }` subtracts `c` from both).
+ *
+ * 🔴 HOW IT IS EXACT: each operand becomes PRISMS and the existing BSP kernel
+ * does the boolean in 3D — `difference` = first minus every later flat, in
+ * turn; `intersection` = first ∩ (union of operand 2) ∩ (union of operand 3) …
+ * The heights are chosen so the answer can be read back off the top:
+ *   · the first operand's flats are prisms [−k, 1+k] (k = its index): distinct
+ *     heights, so no two top faces are coplanar, and every interval contains
+ *     [0,1], so the union is ONE column per point;
+ *   · every other flat is a prism taller than all of those, [−B−k, B+1+k], so
+ *     it removes or keeps WHOLE columns and contributes no top face.
+ * The result's upward faces are then exactly its 2D region, each point once —
+ * `regionsFromUpwardFaces` reads them back, and refuses if that ever stops
+ * being true. A flat whose cap cannot be triangulated exactly refuses the
+ * whole boolean, by name. Nothing is dropped and nothing is approximated.
+ *
+ * ⚠ `union` is NOT computed here: a list of flats already is its union (see
+ * the note on `union` below), and the consumer that needs ONE outline —
+ * `offset()` — refuses overlapping inputs by name.
+ */
+function boolean2D(op: BooleanOp, groups: Flat[][], budget: Budget): Bool2D {
+  /* 🔴 A 2D UNION RETURNS EVERY OPERAND — THE LIST IS THE UNION (2026-10-14).
+   * This branch used to keep `flats[0]` and `flats[1]` and drop the rest;
+   * measured on the sensor-pod slot cut by `2bee_hive_brood_panel_wcnc.scad`,
+   * 35 of 37 rectangles were discarded with no diagnostic. A list of flats
+   * MEANS their union everywhere downstream — an extrude turns each into a
+   * solid and a boolean operand unions those solids exactly (`operand()`), and
+   * the top level draws siblings unmerged, as OpenSCAD's preview does. */
+  if (op === 'union') return { kind: 'ok', flats: groups.flat() };
+
+  const all = groups.flat();
+  const first = groups[0];
+  if (!first.length) return { kind: 'ok', flats: [] };
+  // Nothing to subtract / nothing to intersect with: the first operand IS the
+  // answer, and its flats already mean their union. (An intersection with an
+  // EMPTY operand never reaches here — the caller refuses it.)
+  if (groups.length === 1 || (op === 'difference' && all.length === first.length)) return { kind: 'ok', flats: first };
+  // Every outline must lie in one plane parallel to XY: the boolean is taken in
+  // XY and the plane's z put back. A tilted 2D operand (a 2D child under a 3D
+  // rotation) is refused — computing it in XY would answer a different shape.
+  const z = first[0].outline[0]?.[2] ?? 0;
+  for (const f of all) {
+    for (const ring of [f.outline, ...(f.holes ?? [])]) {
+      if (ring.some((q) => Math.abs(q[2] - z) > 1e-9)) {
+        return { kind: 'refuse', why: 'its operands do not all lie in one plane parallel to XY' };
+      }
+    }
+  }
+  const B = all.length + 2;
+  const prism = (f: Flat, z0: number, z1: number): { kind: 'ok'; polys: Poly[] } | { kind: 'refuse'; why: string } => {
+    const r = extrudeRegion(f.outline, f.holes ?? [], z0, z1);
+    if (r.kind === 'refuse') return { kind: 'refuse', why: `operand ${f.label} (line ${f.line}): ${r.why}` };
+    return r;
+  };
+  let acc: Poly[] = [];
+  for (let k = 0; k < first.length; k++) {
+    const r = prism(first[k], -k, 1 + k);
+    if (r.kind === 'refuse') return r;
+    acc = acc.length ? csgUnion(acc, r.polys, budget) : r.polys;
+  }
+  if (op === 'difference') {
+    let k = 0;
+    for (const g of groups.slice(1)) {
+      for (const f of g) {
+        if (!acc.length) break;
+        const r = prism(f, -B - k, B + 1 + k);
+        k++;
+        if (r.kind === 'refuse') return r;
+        if (r.polys.length) acc = csgSubtract(acc, r.polys, budget);
+      }
+    }
+  } else {
+    for (const g of groups.slice(1)) {
+      let opnd: Poly[] = [];
+      for (let k = 0; k < g.length; k++) {
+        const r = prism(g[k], -B - k, B + 1 + k);
+        if (r.kind === 'refuse') return r;
+        opnd = opnd.length ? csgUnion(opnd, r.polys, budget) : r.polys;
+      }
+      acc = opnd.length && acc.length ? csgIntersect(acc, opnd, budget) : [];
+    }
+  }
+  const back = regionsFromUpwardFaces(acc);
+  if (back.kind === 'refuse') return back;
+  const f0 = first[0];
+  return {
+    kind: 'ok',
+    flats: back.regions.map((r) => ({
+      outline: r.outer.map((q) => [q[0], q[1], z] as V3),
+      holes: r.holes.map((h) => h.map((q) => [q[0], q[1], z] as V3)),
+      label: f0.label,
+      line: f0.line,
+      colour: f0.colour,
+    })),
+  };
+}
+
+/**
+ * Extrude a 2D region (outline + holes) along Z to create a 3D solid.
+ *
+ * 🔴 THE CAPS ARE TRIANGULATED, NOT FANNED (2026-10-14). They used to be a fan
+ * from vertex 0, which is only right for an outline that is star-shaped about
+ * that vertex. See the block header above `Region`: on a comb the fan folded
+ * over and poked outside, the volume still read right (signed areas sum to the
+ * outline's either way), and a union with a pin in a gap came out 136 mm³ and
+ * `non-manifold` against openscad's 135. A cap that cannot be triangulated
+ * exactly is REFUSED by the caller, by name.
+ */
+function extrudeOutline(
+  outline0: V3[],
+  holes: V3[][],
+  height: number,
+  center: boolean,
+): { kind: 'ok'; polys: Poly[] } | { kind: 'refuse'; why: string } {
+  /* 🔴 THE WINDING IS READ, NOT ASSUMED (2026-10-14). Every face is wound for
+   * a CCW outline. A CW one — which is what ANY mirror between the extrude and
+   * its 2D child produces — came out as an INSIDE-OUT solid: closed, every
+   * edge paired, audited `closed`, and negative volume. Subtracting it
+   * intersects instead. Measured, openscad 2026.08.07 vs ours before this:
+   *
+   *     linear_extrude(5) mirror([1,0]) square(10);          500   vs  -500
+   *     difference(){ translate([-20,-5,0]) cube([30,20,3]);
+   *       translate([0,0,-1]) linear_extrude(5)
+   *       mirror([1,0]) square(4); }                         1752  vs    48
+   *
+   * `2bee_hive_brood_panel_wcnc.scad` cuts its front-mount node openings
+   * through exactly this (`fm_panel_cut` → `linear_extrude` → `mirror` →
+   * rounded rectangle), and the whole panel evaluated to the opening.
+   * `triangulateRegion` now normalises every ring's winding itself. */
+  if (!(height > 0)) return { kind: 'ok', polys: [] };
   const z0 = center ? -height / 2 : 0;
   const z1 = center ? height / 2 : height;
-
-  const polys: Poly[] = [];
-
-  // Bottom face: outline at z0, wound so normal points down (-Z).
-  // Fan triangulation from vertex 0.
-  const bottomVerts = outline.map((v) => [v[0], v[1], z0] as V3);
-  for (let i = 1; i < n - 1; i++) {
-    const p = makePoly([bottomVerts[0], bottomVerts[i + 1], bottomVerts[i]]);
-    if (p) polys.push(p);
-  }
-
-  // Top face: outline at z1, wound so normal points up (+Z).
-  const topVerts = outline.map((v) => [v[0], v[1], z1] as V3);
-  for (let i = 1; i < n - 1; i++) {
-    const p = makePoly([topVerts[0], topVerts[i], topVerts[i + 1]]);
-    if (p) polys.push(p);
-  }
-
-  // Side walls: quad between each pair of consecutive edges.
-  for (let i = 0; i < n; i++) {
-    const j = (i + 1) % n;
-    const b0 = bottomVerts[i];
-    const b1 = bottomVerts[j];
-    const t0 = topVerts[i];
-    const t1 = topVerts[j];
-    // Two triangles per quad, wound so normal points outward.
-    const p1 = makePoly([b0, b1, t1]);
-    if (p1) polys.push(p1);
-    const p2 = makePoly([b0, t1, t0]);
-    if (p2) polys.push(p2);
-  }
-
-  return polys;
+  return extrudeRegion(outline0, holes, z0, z1);
 }
 
 /**
@@ -1220,7 +1987,25 @@ function extrudeOutline(outline: V3[], height: number, center: boolean): Poly[] 
  * This is a simplified Quickhull that works for the common CNC case:
  * relatively few points (< 10000) and mostly convex inputs.
  */
-function quickhull(points: V3[]): Poly[] {
+function quickhull(input: V3[]): Poly[] {
+  // 🔴 bughunt 2026-11-15: `hull()` of two $fn=32 spheres threw "Maximum call stack size exceeded" and took the
+  // whole catalogue build (and gate I1's web server) down. Visibility was `dist > 1e-12` on an UNNORMALISED normal,
+  // so a point a hair off a face plane (every sphere/cylinder has many near-coplanar points, and the poles repeat)
+  // saw some faces of a flat region and not others; each such step added sliver faces instead of replacing them,
+  // and the face list exploded until `faces.push(...newFaces)` overflowed the call stack. Now: duplicate points
+  // merged, distance normalised and compared with a tolerance relative to the model's size, no spread push.
+  const seen = new Map<string, number>();
+  const points: V3[] = [];
+  let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const q of input) {
+    for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], q[k]); hi[k] = Math.max(hi[k], q[k]); }
+  }
+  const scale = Math.max(1e-9, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]));
+  const tol = scale * 1e-9;
+  for (const q of input) {
+    const key = `${Math.round(q[0] / tol)},${Math.round(q[1] / tol)},${Math.round(q[2] / tol)}`;
+    if (!seen.has(key)) { seen.set(key, points.length); points.push(q); }
+  }
   const n = points.length;
   if (n < 4) return [];
 
@@ -1286,14 +2071,14 @@ function quickhull(points: V3[]): Poly[] {
     if (vol > maxVol) { maxVol = vol; d = i; }
   }
 
-  if (maxVol < 1e-12) {
+  if (maxVol < 1e-12 || maxVol / Math.sqrt(nx * nx + ny * ny + nz * nz) <= tol) {
     // All points are coplanar — return empty
     return [];
   }
 
   // Build initial tetrahedron faces
   // Ensure correct winding: each face's normal should point outward
-  const faces: number[][] = [];
+  let faces: number[][] = [];
 
   // Helper: signed volume of tetrahedron (a,b,c,d)
   const signedVol = (ai: number, bi: number, ci: number, di: number): number => {
@@ -1316,6 +2101,19 @@ function quickhull(points: V3[]): Poly[] {
     faces.push([a, c, b], [a, b, d], [b, c, d], [c, a, d]);
   }
 
+  // 🔴 Orient against an INTERIOR point, not the sign convention of `signedVol`:
+  // every face must have the tetrahedron's centroid behind it. (bughunt 2026-11-15:
+  // `hull(){cube(10);}` came out at 833 mm³, two cubes non-manifold.)
+  const inside: V3 = [0, 1, 2].map((k) => (points[a][k] + points[b][k] + points[c][k] + points[d][k]) / 4) as V3;
+  const side = (f: number[], q: V3): number => {
+    const [fa, fb, fc] = f;
+    const ux = points[fb][0] - points[fa][0], uy = points[fb][1] - points[fa][1], uz = points[fb][2] - points[fa][2];
+    const vx = points[fc][0] - points[fa][0], vy = points[fc][1] - points[fa][1], vz = points[fc][2] - points[fa][2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    return nx * (q[0] - points[fa][0]) + ny * (q[1] - points[fa][1]) + nz * (q[2] - points[fa][2]);
+  };
+  for (const f of faces) if (side(f, inside) > 0) f.reverse();
+
   // Quickhull: for each remaining point, add it to the hull
   const remaining = new Set<number>();
   for (let i = 0; i < n; i++) {
@@ -1337,39 +2135,40 @@ function quickhull(points: V3[]): Poly[] {
       const fnx = fay * fbz - faz * fby;
       const fny = faz * fbxx - fax * fbz;
       const fnz = fax * fby - fay * fbxx;
-      // Distance from p to face plane
+      // Distance from p to face plane, in model units (a sliver face's normal is near zero: skip the division)
+      const len = Math.sqrt(fnx * fnx + fny * fny + fnz * fnz);
       const dist = fnx * (p[0] - points[fa][0]) + fny * (p[1] - points[fa][1]) + fnz * (p[2] - points[fa][2]);
-      if (dist > 1e-12) {
+      if (len > 0 && dist / len > tol) {
         visible.push(fi);
       }
     }
 
     if (visible.length === 0) continue; // p is inside the hull
 
-    // Find horizon edges (edges shared by visible and non-visible faces)
-    const edgeCount = new Map<string, number>();
+    // Horizon edges: a DIRECTED edge of a visible face whose reverse belongs to no
+    // visible face. Keeping the direction is what keeps the new face [e0, e1, p]
+    // wound like the face it replaces — outward. (The edge used to be stored
+    // unordered, so new faces were wound at random and the final global flip
+    // could not repair a MIXED winding.)
+    const directed = new Set<string>();
+    for (const fi of visible) {
+      const face = faces[fi];
+      for (let ei = 0; ei < 3; ei++) directed.add(`${face[ei]}:${face[(ei + 1) % 3]}`);
+    }
     for (const fi of visible) {
       const face = faces[fi];
       for (let ei = 0; ei < 3; ei++) {
         const e0 = face[ei];
         const e1 = face[(ei + 1) % 3];
-        const key = e0 < e1 ? `${e0}:${e1}` : `${e1}:${e0}`;
-        edgeCount.set(key, (edgeCount.get(key) ?? 0) + 1);
-      }
-    }
-
-    // Horizon edges appear exactly once in visible faces
-    for (const [key, count] of edgeCount) {
-      if (count === 1) {
-        const [e0, e1] = key.split(':').map(Number);
-        horizon.push([e0, e1]);
+        if (!directed.has(`${e1}:${e0}`)) horizon.push([e0, e1]);
       }
     }
 
     // Remove visible faces
+    const gone = new Set(visible);
     const newFaces: number[][] = [];
     for (let fi = 0; fi < faces.length; fi++) {
-      if (!visible.includes(fi)) {
+      if (!gone.has(fi)) {
         newFaces.push(faces[fi]);
       }
     }
@@ -1379,8 +2178,7 @@ function quickhull(points: V3[]): Poly[] {
       newFaces.push([e0, e1, pi]);
     }
 
-    faces.length = 0;
-    faces.push(...newFaces);
+    faces = newFaces;
   }
 
   // Check volume sign — if negative, flip all faces to ensure outward normals.
@@ -1600,84 +2398,33 @@ function parseHeightmap(source: string, center: boolean, invert: boolean): Poly[
   return polys;
 }
 
-/**
- * Compute the Minkowski sum of two solids (brute-force triangle pairwise).
- *
- * For each pair of triangles from the two operands, compute the Minkowski
- * sum as a polyhedron (6 vertices: each vertex of triangle A + each vertex
- * of triangle B), then union all results.
- *
- * This is O(n*m) where n and m are the triangle counts. For the common
- * CNC case (a cube grown by a sphere with ~$fn=12), n*m is manageable.
- *
- * The Minkowski sum of two convex polyhedra is the convex hull of the
- * pairwise sums of their vertices. For non-convex inputs, we decompose
- * into triangles and sum each pair, then union.
- */
-function minkowskiSum(solids: Solid[]): Poly[] {
-  if (solids.length < 2) return [];
-  const a = solids[0];
-  const b = solids[1];
-
-  // Collect all triangles from both operands
-  const trisA: V3[][] = [];
-  for (const poly of a.polys) {
-    if (poly.v.length === 3) trisA.push(poly.v);
-    else {
-      // Triangulate polygon by fan
-      for (let i = 1; i < poly.v.length - 1; i++) {
-        trisA.push([poly.v[0], poly.v[i], poly.v[i + 1]]);
-      }
-    }
-  }
-  const trisB: V3[][] = [];
-  for (const poly of b.polys) {
-    if (poly.v.length === 3) trisB.push(poly.v);
-    else {
-      for (let i = 1; i < poly.v.length - 1; i++) {
-        trisB.push([poly.v[0], poly.v[i], poly.v[i + 1]]);
-      }
-    }
-  }
-
-  if (trisA.length === 0 || trisB.length === 0) return [];
-
-  // For each pair of triangles, compute the Minkowski sum polyhedron.
-  // The Minkowski sum of two triangles is a polyhedron with 6 vertices.
-  // We compute the convex hull of these 6 vertices.
-  const allPolys: Poly[] = [];
-  const seen = new Set<string>();
-
-  for (const triA of trisA) {
-    for (const triB of trisB) {
-      // 6 vertices: each vertex of A + each vertex of B
-      const verts: V3[] = [];
-      for (const va of triA) {
-        for (const vb of triB) {
-          verts.push([va[0] + vb[0], va[1] + vb[1], va[2] + vb[2]]);
-        }
-      }
-      // Compute convex hull of the 6 vertices
-      const hull = quickhull(verts);
-      for (const poly of hull) {
-        // Deduplicate by vertex hash
-        const hash = poly.v.map((v) => `${v[0].toFixed(4)},${v[1].toFixed(4)},${v[2].toFixed(4)}`).join('|');
-        if (!seen.has(hash)) {
-          seen.add(hash);
-          allPolys.push(poly);
-        }
-      }
-    }
-  }
-
-  // Union all the polyhedra
-  if (allPolys.length === 0) return [];
-  let result = allPolys[0] ? [allPolys[0]] : [];
-  for (let i = 1; i < allPolys.length; i++) {
-    result = csgUnion(result, [allPolys[i]], makeBudget(Date.now() + 30000));
-  }
-  return result;
+/** Distinct vertices of a set of polygons. */
+function uniqueVerts(polys: Poly[]): V3[] {
+  const seen = new Map<string, V3>();
+  for (const p of polys) for (const v of p.v) seen.set(`${v[0]},${v[1]},${v[2]}`, v);
+  return [...seen.values()];
 }
+
+/** |volume| of a closed polygon set (divergence theorem, fan-triangulated). */
+function polysVolume(polys: Poly[]): number {
+  let v6 = 0;
+  for (const p of polys) {
+    const a = p.v[0];
+    for (let i = 1; i + 1 < p.v.length; i++) {
+      const b = p.v[i], c = p.v[i + 1];
+      v6 += a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+    }
+  }
+  return Math.abs(v6) / 6;
+}
+
+/** A solid is convex when it fills its own hull (to 1e-6 relative). */
+function isConvexSolid(polys: Poly[]): boolean {
+  const hull = quickhull(uniqueVerts(polys));
+  const hv = polysVolume(hull);
+  return hv > 0 && Math.abs(hv - polysVolume(polys)) <= 1e-6 * hv;
+}
+
 
 /**
  * Project 3D solids onto the XY plane as 2D outlines.
@@ -1693,118 +2440,82 @@ function minkowskiSum(solids: Solid[]): Poly[] {
  * convex hull of the projected points (simplified — a proper 2D union
  * would be needed for concave silhouettes).
  */
-function projectToXY(solids: Solid[], cut: boolean): Flat[] {
-  if (cut) {
-    // Slice at z=0: find triangles that cross the plane and compute intersection.
-    const edges: [V3, V3][] = [];
-    for (const solid of solids) {
-      for (const poly of solid.polys) {
-        for (let i = 0; i < poly.v.length - 2; i++) {
-          const v0 = poly.v[0];
-          const v1 = poly.v[i + 1];
-          const v2 = poly.v[i + 2];
-          // Check if this triangle crosses z=0
-          const z0 = v0[2], z1 = v1[2], z2 = v2[2];
-          const above = (z0 > 0 ? 1 : 0) + (z1 > 0 ? 1 : 0) + (z2 > 0 ? 1 : 0);
-          if (above === 0 || above === 3) continue; // entirely above or below
-
-          // Find intersection points with z=0 plane
-          const pts: [number, number][] = [];
-          const pairs: [V3, V3][] = [[v0, v1], [v1, v2], [v2, v0]];
-          for (const [a, b] of pairs) {
-            if ((a[2] > 0 && b[2] <= 0) || (a[2] <= 0 && b[2] > 0)) {
-              const t = a[2] / (a[2] - b[2]);
-              pts.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]);
-            }
-          }
-          if (pts.length === 2) {
-            edges.push([[pts[0][0], pts[0][1], 0], [pts[1][0], pts[1][1], 0]]);
-          }
-        }
-      }
-    }
-
-    if (edges.length === 0) return [];
-
-    // Chain edges into contours
-    const contours = chainEdges(edges);
-    return contours.map((outline, i) => ({
-      outline,
-      label: i === 0 ? 'projection' : `projection-${i + 1}`,
-      line: 0,
-      colour: null as null,
-    }));
-  }
-
-  // cut=false: orthographic projection — drop Z, return convex hull of all vertices.
-  const allPts: [number, number][] = [];
+/**
+ * `projection()` of 3D solids onto XY, as REGIONS — outline plus holes — or
+ * refused by name.
+ *
+ * 🔴 BOTH MODES WERE WRONG UNTIL 2026-10-14, AND NEITHER SAID SO.
+ *   · `cut = true` chained the section's edges into loops and returned EVERY
+ *     loop as a filled flat. A list of flats is a union, so a ring (a tube cut
+ *     across) came back as two filled discs: the hole refilled itself. Openscad
+ *     2026.08.07: `projection(cut=true) difference(){ cylinder(r=10,h=2,center=true,$fn=32);
+ *     cylinder(r=5,h=4,center=true,$fn=32); }` encloses 234.11 mm²; this said 312.15.
+ *   · `cut = false` returned the CONVEX HULL of every vertex — an L-shaped plate
+ *     projected as a triangle-cornered square. `cnc_nest/cut_outline.scad` and
+ *     `metal_nest/metal_outline.scad` take their CUT OUTLINES from exactly
+ *     this call.
+ * NOW: the section's segments are DIRECTED by their face's normal (material on
+ * the left), and the silhouette is the union of the up-facing faces' shadows —
+ * every point under a closed solid is under one of its upward faces, and a
+ * vertical face casts no area. Both go to {@link fillSegments} with `w ≥ 1`,
+ * which also unions overlapping solids, as OpenSCAD unions the children first.
+ * A section that does not close is REFUSED, not chained into a guess.
+ */
+function projectToXY(solids: Solid[], cut: boolean, budget: Budget): { kind: 'ok'; flats: Flat[] } | { kind: 'refuse'; why: string } {
+  const segs: [V3, V3][] = [];
   for (const solid of solids) {
     for (const poly of solid.polys) {
-      for (const v of poly.v) {
-        allPts.push([v[0], v[1]]);
+      const v = poly.v;
+      if (!cut) {
+        if (!(poly.n[2] > 1e-12)) continue;
+        for (let i = 1; i + 1 < v.length; i++) {
+          const tri: V3[] = [v[0], v[i], v[i + 1]];
+          for (let k = 0; k < 3; k++) segs.push([[tri[k][0], tri[k][1], 0], [tri[(k + 1) % 3][0], tri[(k + 1) % 3][1], 0]]);
+        }
+        continue;
       }
-    }
-  }
-  if (allPts.length < 3) return [];
-
-  // Compute convex hull of the projected points
-  const hull = convexHull2D(allPts);
-  if (hull.length < 3) return [];
-
-  return [{
-    outline: hull.map(([x, y]) => [x, y, 0]),
-    label: 'projection',
-    line: 0,
-    colour: null,
-  }];
-}
-
-/**
- * Chain intersection edges into closed contours.
- * Simple greedy chaining: start from an unvisited edge, follow connected edges.
- */
-function chainEdges(edges: [V3, V3][]): V3[][] {
-  const used = new Set<number>();
-  const contours: V3[][] = [];
-  const EPS = 1e-6;
-  const near = (a: V3, b: V3) =>
-    Math.abs(a[0] - b[0]) < EPS && Math.abs(a[1] - b[1]) < EPS;
-
-  for (let start = 0; start < edges.length; start++) {
-    if (used.has(start)) continue;
-    used.add(start);
-    const chain: V3[] = [
-      [edges[start][0][0], edges[start][0][1], 0],
-      [edges[start][1][0], edges[start][1][1], 0],
-    ];
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (let i = 0; i < edges.length; i++) {
-        if (used.has(i)) continue;
-        const [a, b] = edges[i];
-        const tail = chain[chain.length - 1];
-        if (near(tail, a)) {
-          chain.push([b[0], b[1], 0]);
-          used.add(i);
-          changed = true;
-        } else if (near(tail, b)) {
-          chain.push([a[0], a[1], 0]);
-          used.add(i);
-          changed = true;
+      // Section at z = 0, the half-open rule `z > 0` deciding which side a
+      // vertex on the plane falls — the same rule for every face, so shared
+      // edges cross at the same point.
+      const pts: V3[] = [];
+      for (let i = 0; i < v.length; i++) {
+        const a = v[i], b = v[(i + 1) % v.length];
+        if (a[2] > 0 !== b[2] > 0) {
+          const t = a[2] / (a[2] - b[2]);
+          pts.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), 0]);
         }
       }
-    }
-    if (chain.length >= 3) {
-      contours.push(chain);
+      if (pts.length !== 2) continue; // a convex face meets a plane in one segment or not at all
+      // Material on the LEFT: the face's outward normal points right of travel.
+      const [p, q] = pts;
+      const along = (q[0] - p[0]) * -poly.n[1] + (q[1] - p[1]) * poly.n[0];
+      segs.push(along >= 0 ? [p, q] : [q, p]);
     }
   }
-  return contours;
+  if (!segs.length) return { kind: 'ok', flats: [] };
+  const res = fillSegments(segs, (w) => w >= 1, budget, cut);
+  if (res.kind === 'refuse') return res;
+  if (!res.regions.length) {
+    // Nothing with POSITIVE winding. If there is area with NEGATIVE winding
+    // the solid is inside out (a polyhedron wound the other way), and an empty
+    // answer would read as "nothing at this height". Say which it is.
+    const neg = fillSegments(segs, (w) => w <= -1, budget, cut);
+    if (neg.kind === 'ok' && neg.regions.length) {
+      return { kind: 'refuse', why: 'the solid is wound INSIDE OUT (its faces point inward), so its projection has negative area' };
+    }
+  }
+  return {
+    kind: 'ok',
+    flats: res.regions.map((g, i) => ({
+      outline: g.outer,
+      holes: g.holes.length ? g.holes : undefined,
+      label: i === 0 ? 'projection' : `projection-${i + 1}`,
+      line: 0,
+      colour: null,
+    })),
+  };
 }
 
-/**
- * 2D convex hull using Graham scan.
- */
 function convexHull2D(points: [number, number][]): [number, number][] {
   const n = points.length;
   if (n < 3) return points;
@@ -1864,6 +2575,8 @@ function rotateExtrudeOutline(outline: V3[], angleDeg: number, x: Xf, fn: number
    * fn is ceil'd (`$fn` rounds UP — see the note at `fragmentsRequested`).
    * Absent it, the historical fixed 48/turn stands (that path predates
    * `$fa`/`$fs` support here and is a named gap, not a silent one). */
+  // ⚠ MIRRORED as `ROTATE_EXTRUDE_DEFAULT_FN` in scad.ts (a value import is barred, see the import note), which
+  // `ScadOptions.maxFragments` caps against. Change both or the cap stops bounding a no-`$fn` revolve.
   let perTurn = 48;
   if (fn !== null) {
     perTurn = !Number.isFinite(fn) ? 3 : Math.max(3, Math.ceil(fn));
@@ -1958,53 +2671,251 @@ function rotateExtrudeOutline(outline: V3[], angleDeg: number, x: Xf, fn: number
 }
 
 /**
- * Offset a 2D polygon outline by a given radius.
+ * 2D offset — see {@link offsetFlat} for the contract.
  *
- * Positive r expands, negative r shrinks. For each edge, the edge is moved
- * perpendicular to itself by r. At corners, arcs (approximated by line
- * segments) connect the offset edges.
- *
- * The algorithm:
- * 1. For each pair of consecutive edges, compute the offset edge (parallel,
- *    shifted by r in the outward normal direction).
- * 2. Find the intersection of consecutive offset edges — these are the new
- *    vertices.
- * 3. For positive r, add arc segments at corners where the polygon turns.
- * 4. For negative r, the same logic applies but the arcs go inward.
- *
- * This handles convex and simple concave polygons. Self-intersecting results
- * (from large negative offset on a concave polygon) are not cleaned up — the
- * result may have crossing edges in that case.
+ * ⚠ THIS BLOCK USED TO END *"Self-intersecting results … are not cleaned up —
+ * the result may have crossing edges in that case."* That was the whole defect
+ * written down as a property: a crossing or inverted outline was RETURNED and
+ * then extruded, subtracted and audited `closed`. Since 2026-10-14 such a result
+ * is REFUSED by name, and an inward offset that consumes a convex outline is
+ * empty, as OpenSCAD's is.
  */
-function offsetOutline(outline: V3[], r: number, fn: number = 16): V3[] {
-  const n = outline.length;
-  if (n < 3 || Math.abs(r) < 1e-9) return outline;
+/**
+ * `rawOffset`'s `fn` (formerly `offsetOutline`'s) in ITS OWN UNIT — segments per HALF-TURN, not per circle.
+ *
+ * 🔴 THIS FUNCTION EXISTS BECAUSE THE UNITS DIFFER AND THE FIRST FIX GOT IT
+ * WRONG (2026-09-18, TODO #169). `offsetOutline` computes
+ * `arcSegments = ceil((sweep / π) · fn)`, so its `fn` is **per π of sweep** and
+ * its default of 16 means **32 per full circle**. `fragments(r, f)` returns
+ * OpenSCAD's count **per full circle**. Passing one straight into the other
+ * DOUBLED the density everywhere `fragments ≥ 16`.
+ *
+ * ⚠ AND THE DOUBLING WAS INVISIBLE ON THE FILE I WAS AIMING AT. On
+ * `panels_18mm_inner_wcnc` the radii are small (`r = 0.8`, `$fa/$fs` ⇒ 5
+ * fragments) so the count still FELL and the change looked right. It was
+ * `2bee_hive_fan_box_panel_wcnc.scad` — `offset(r = 3, $fn = 32)` — that went
+ * 32 → 64 per circle, crossed `MAX_POLYS`, and had its `difference()` abandoned:
+ * **DIVERGES → STRICTER, drawing NOTHING for a part OpenSCAD draws.** The
+ * oracle caught it; the file I was optimising never would have.
+ */
+/* 🔴 `arcFn` RETIRED 2026-10-14 — AND THE UNIT FLIPS BACK, DELIBERATELY.
+ * The arc is now placed by {@link clipperArc}, whose `n` is Clipper's
+ * `steps_per_360`: fragments per FULL circle, exactly `fragments(|r|, f)`. The
+ * half-turn unit above existed only because `rawOffset` split each turn into
+ * `ceil(sweep/π · fn)` even pieces — which is not what Clipper does, and the
+ * halving rounded every odd count (5 → 6 at r = 0.8 under the default
+ * `$fa`/`$fs`). The lesson above stands with the units reversed: every caller
+ * of `offsetFlat` / `rawOffset` / `offsetRegion` passes a PER-CIRCLE count. */
 
-  // Compute edge normals (outward for CCW winding).
-  // For each edge i→j, the outward normal is perpendicular to the edge direction.
+/** One offset outline, or the reason there is none. See {@link offsetFlat}. */
+type OffsetOutcome =
+  | { kind: 'ok'; outline: V3[] }
+  /** The offset region is EMPTY — an inward offset that consumed the shape.
+   *  A real answer (OpenSCAD: "Current top level object is not a 2D object"),
+   *  not a failure. */
+  | { kind: 'empty' }
+  /** This kernel cannot compute the offset EXACTLY. Nothing may be drawn. */
+  | { kind: 'refuse'; why: string };
+
+/** Drop a closing duplicate and any consecutive duplicate vertices. */
+function cleanOutline(outline: V3[]): V3[] {
+  const out: V3[] = [];
+  for (const p of outline) {
+    const q = out[out.length - 1];
+    if (q && Math.abs(q[0] - p[0]) < 1e-12 && Math.abs(q[1] - p[1]) < 1e-12) continue;
+    out.push(p);
+  }
+  while (out.length > 1) {
+    const a = out[0], b = out[out.length - 1];
+    if (Math.abs(a[0] - b[0]) < 1e-12 && Math.abs(a[1] - b[1]) < 1e-12) out.pop();
+    else break;
+  }
+  return out;
+}
+
+/** Signed area of an OPEN outline (no closing vertex). Positive ⇔ CCW. */
+function openArea(pts: V3[]): number {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i], q = pts[(i + 1) % pts.length];
+    a += p[0] * q[1] - q[0] * p[1];
+  }
+  return a / 2;
+}
+
+/** A CCW outline with no reflex vertex (collinear runs allowed). */
+function isConvexCcw(pts: V3[]): boolean {
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    const a = pts[(i - 1 + n) % n], b = pts[i], c = pts[(i + 1) % n];
+    const cr = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+    // Scaled tolerance: the cross of two edges is length², so compare against
+    // the product of the lengths — a reflex turn of 1e-9 rad still counts.
+    const la = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const lc = Math.hypot(c[0] - b[0], c[1] - b[1]);
+    if (cr < -1e-9 * la * lc) return false;
+  }
+  return true;
+}
+
+/**
+ * The inward offset of a CONVEX CCW polygon by `d > 0`: the intersection of the
+ * polygon's edge half-planes, each moved `d` inward.
+ *
+ * 🔴 THIS IS EXACT FOR ALL THREE JOINS, NOT AN APPROXIMATION OF ONE. An inward
+ * offset of a convex polygon has no convex corner to join — every corner turns
+ * AWAY from the offset direction — so `r`, `delta` and `chamfer` all reduce to
+ * the same half-plane intersection. (Clipper2, which OpenSCAD calls, takes its
+ * "concave" branch at every vertex for exactly this reason.) And unlike moving
+ * vertices along their bisectors, it cannot invert: a short edge that the
+ * offset consumes simply stops contributing, and a polygon the offset consumes
+ * entirely clips to NOTHING — which is what OpenSCAD draws.
+ */
+function erodeConvex(pts: V3[], d: number): V3[] {
+  let poly: V3[] = pts.map((p) => [p[0], p[1], 0]);
+  const n = pts.length;
+  for (let i = 0; i < n && poly.length >= 3; i++) {
+    const a = pts[i], b = pts[(i + 1) % n];
+    const ex = b[0] - a[0], ey = b[1] - a[1];
+    const len = Math.hypot(ex, ey);
+    if (len < 1e-12) continue;
+    // Inward (left) unit normal of a CCW edge, and the shifted line n·p = c.
+    const nx = -ey / len, ny = ex / len;
+    const c = nx * a[0] + ny * a[1] + d;
+    const side = (p: V3) => nx * p[0] + ny * p[1] - c; // >= 0 ⇔ kept
+    const next: V3[] = [];
+    for (let j = 0; j < poly.length; j++) {
+      const p = poly[j], q = poly[(j + 1) % poly.length];
+      const sp = side(p), sq = side(q);
+      if (sp >= 0) next.push(p);
+      if ((sp >= 0) !== (sq >= 0)) {
+        const t = sp / (sp - sq);
+        next.push([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]), 0]);
+      }
+    }
+    poly = cleanOutline(next);
+  }
+  return poly;
+}
+
+/** Do segments ab and cd intersect or touch (inclusive), in 2D? */
+function segmentsMeet(a: V3, b: V3, c: V3, d: V3, eps: number): boolean {
+  const orient = (p: V3, q: V3, r: V3) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+  const d1 = orient(c, d, a), d2 = orient(c, d, b), d3 = orient(a, b, c), d4 = orient(a, b, d);
+  if (((d1 > eps && d2 < -eps) || (d1 < -eps && d2 > eps)) && ((d3 > eps && d4 < -eps) || (d3 < -eps && d4 > eps))) {
+    return true;
+  }
+  const onSeg = (p: V3, q: V3, r: V3, o: number) =>
+    Math.abs(o) <= eps &&
+    Math.min(p[0], q[0]) - 1e-12 <= r[0] && r[0] <= Math.max(p[0], q[0]) + 1e-12 &&
+    Math.min(p[1], q[1]) - 1e-12 <= r[1] && r[1] <= Math.max(p[1], q[1]) + 1e-12;
+  return onSeg(c, d, a, d1) || onSeg(c, d, b, d2) || onSeg(a, b, c, d3) || onSeg(a, b, d, d4);
+}
+
+/** Vertex count above which the O(n²) simplicity check is not attempted. */
+const OFFSET_SIMPLE_CHECK_MAX = 4000;
+
+/** Is the closed outline simple — no two non-adjacent edges meet, and no
+ *  adjacent pair folds back on itself? `null` ⇔ too large to decide here. */
+function outlineIsSimple(pts: V3[]): boolean | null {
+  const n = pts.length;
+  if (n > OFFSET_SIMPLE_CHECK_MAX) return null;
+  let scale = 0;
+  for (const p of pts) scale = Math.max(scale, Math.abs(p[0]), Math.abs(p[1]));
+  const eps = 1e-12 * Math.max(1, scale * scale);
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n], c = pts[(i + 2) % n];
+    // Adjacent fold-back: collinear and reversing.
+    const cr = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+    const dt = (b[0] - a[0]) * (c[0] - b[0]) + (b[1] - a[1]) * (c[1] - b[1]);
+    if (Math.abs(cr) <= eps && dt < 0) return false;
+  }
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n];
+    const minx = Math.min(a[0], b[0]), maxx = Math.max(a[0], b[0]);
+    const miny = Math.min(a[1], b[1]), maxy = Math.max(a[1], b[1]);
+    for (let j = i + 2; j < n; j++) {
+      if (i === 0 && j === n - 1) continue; // adjacent through the wrap
+      const c = pts[j], d = pts[(j + 1) % n];
+      if (Math.max(c[0], d[0]) < minx - 1e-12 || Math.min(c[0], d[0]) > maxx + 1e-12) continue;
+      if (Math.max(c[1], d[1]) < miny - 1e-12 || Math.min(c[1], d[1]) > maxy + 1e-12) continue;
+      if (segmentsMeet(a, b, c, d, eps)) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The round join at corner `p`, from `s0 = p + r·n0` to `s1 = p + r·n1`, placed
+ * EXACTLY as Clipper2's `DoRound` places it — which is what OpenSCAD draws.
+ *
+ * 🔴 NOT A UNIFORM SUBDIVISION OF THE TURN (2026-10-14). OpenSCAD sets the arc
+ * tolerance so that Clipper's `steps_per_360` is `n = fragments(|r|)`; Clipper
+ * then emits `s0`, the points at FIXED steps of 360°/n from it — `ceil(n·θ/360°)
+ * − 1` of them — and `s1`, so the last segment is the short one. This used to
+ * split the turn evenly into `max(2, ceil(θ/180° · round(n/2)))` pieces: equal
+ * at a 90° corner when `n` is a multiple of 4 (every case measured so far), and
+ * wrong anywhere else — a 15° corner got a midpoint Clipper does not put there,
+ * and an odd `n` (5 at r = 0.8 under the default `$fa`/`$fs`) was rounded.
+ * Measured on the sensor-pod slot at `$fn = 24`, openscad 2026.08.07:
+ * `linear_extrude(1) offset(r=3) enc_pcb_slot_2d()` 1209.246 mm³ — 1209.962
+ * the old way, and the slot is offset twice on its way to the plywood.
+ */
+function clipperArc(p: V3, s0: V3, s1: V3, r: number, n: number): V3[] {
+  const v0x = s0[0] - p[0], v0y = s0[1] - p[1];
+  const v1x = s1[0] - p[0], v1y = s1[1] - p[1];
+  const turn = Math.abs(Math.atan2(v0x * v1y - v0y * v1x, v0x * v1x + v0y * v1y));
+  const steps = Math.ceil((n / (2 * Math.PI)) * turn - 1e-9);
+  const step = ((r > 0 ? 1 : -1) * 2 * Math.PI) / n;
+  const c = Math.cos(step), sn = Math.sin(step);
+  const out: V3[] = [[s0[0], s0[1], 0]];
+  let x = v0x, y = v0y;
+  for (let k = 1; k < steps; k++) {
+    const nx = x * c - y * sn;
+    y = x * sn + y * c;
+    x = nx;
+    out.push([p[0] + x, p[1] + y, 0]);
+  }
+  // A corner with no turn has s1 = s0; one point, not a zero-length edge.
+  const last = out[out.length - 1];
+  if (Math.abs(last[0] - s1[0]) > 1e-12 || Math.abs(last[1] - s1[1]) > 1e-12) out.push([s1[0], s1[1], 0]);
+  return out;
+}
+
+/**
+ * The RAW offset of a CCW outline: every edge moved `r` along its outward
+ * normal, consecutive offset edges joined at each vertex.
+ *
+ * Also returns, per ORIGINAL edge, the indices of the two output points that
+ * carry it (the last point of corner i, the first point of corner i+1), so the
+ * caller can ask whether any edge came out REVERSED — the signature of a
+ * feature the offset consumed, which this construction does not remove.
+ */
+function rawOffset(
+  outline: V3[],
+  r: number,
+  fn: number,
+  join: OffsetJoin,
+): { pts: V3[]; first: number[]; last: number[] } {
+  const n = outline.length;
+  // Outward normal of a CCW edge i→j: (dy, -dx) normalised.
   const normals: [number, number][] = [];
   for (let i = 0; i < n; i++) {
     const j = (i + 1) % n;
     const dx = outline[j][0] - outline[i][0];
     const dy = outline[j][1] - outline[i][1];
     const len = Math.sqrt(dx * dx + dy * dy);
-    if (len < 1e-12) {
-      normals.push([0, 0]);
-      continue;
-    }
-    // Outward normal for CCW winding: (dy, -dx) normalized
-    normals.push([dy / len, -dx / len]);
+    normals.push(len < 1e-12 ? [0, 0] : [dy / len, -dx / len]);
   }
 
-  // Compute offset edges: each edge shifted by r along its normal.
-  // For each pair of consecutive offset edges, find their intersection.
   const result: V3[] = [];
+  const first: number[] = [];
+  const last: number[] = [];
   for (let i = 0; i < n; i++) {
     const prev = (i - 1 + n) % n;
     const curr = i;
+    first.push(result.length);
 
-    // Offset edge prev: outline[prev] + r * normals[prev] → outline[i] + r * normals[prev]
-    // Offset edge curr: outline[i] + r * normals[curr] → outline[j] + r * normals[curr]
     const p0x = outline[prev][0] + r * normals[prev][0];
     const p0y = outline[prev][1] + r * normals[prev][1];
     const p1x = outline[i][0] + r * normals[prev][0];
@@ -2014,45 +2925,28 @@ function offsetOutline(outline: V3[], r: number, fn: number = 16): V3[] {
     const q1x = outline[(i + 1) % n][0] + r * normals[curr][0];
     const q1y = outline[(i + 1) % n][1] + r * normals[curr][1];
 
-    // Find intersection of lines (p0→p1) and (q0→q1).
-    // Using parametric form: p0 + t*(p1-p0) = q0 + s*(q1-q0)
     const adx = p1x - p0x, ady = p1y - p0y;
     const bdx = q0x - q1x, bdy = q0y - q1y;
     const cdx = q0x - p0x, cdy = q0y - p0y;
     const det = adx * bdy - ady * bdx;
 
     // 🔴 A ROUND JOIN REPLACES THE MITER APEX — IT DOES NOT FOLLOW IT.
-    //
-    // This used to push the intersection of the two offset edges AND THEN the
-    // arc's INTERIOR points (`k = 1 … arcSegments-1`, endpoints excluded). At a
-    // convex corner the miter apex lies OUTSIDE the arc — for a 90° corner it is
-    // r·√2 from the vertex against the arc's r — so the outline ran out to a
-    // spike, jumped to the middle of the fillet, and never emitted the arc's own
-    // start and end points at all.
-    //
-    // ⇒ THE POLYGON WAS SELF-INTERSECTING AT EVERY CONVEX CORNER, and that is a
-    // property of the OUTLINE rather than of the triangle soup it becomes.
-    // ⚠ Which is why it was invisible to every mesh-level check: measured
-    // 2026-09-04, the extruded solid is CLOSED, correctly wound (signed volume
-    // +527.7, matching the analytic rounded-rect area), has no zero-length edges
-    // and no degenerate triangles — and poisoned every boolean it entered,
-    // `union` as surely as `difference`. FIVE mesh-level hypotheses died on it
-    // before I read this function.
+    // (2026-09-04: pushing the apex AND the arc's interior made every convex
+    // corner self-intersecting, closed and correctly wound, and it poisoned
+    // every boolean it entered. Five mesh-level hypotheses died on it.)
     const cross = normals[prev][0] * normals[curr][1] - normals[prev][1] * normals[curr][0];
-    if (r > 0 && cross > 0.01) {
-      // Arc from the END of offset edge `prev` to the START of offset edge
-      // `curr`, ENDPOINTS INCLUDED, and no apex.
-      const cx = outline[i][0];
-      const cy = outline[i][1];
-      const startAngle = Math.atan2(p1y - cy, p1x - cx);
-      const endAngle = Math.atan2(q0y - cy, q0x - cx);
-      let sweep = endAngle - startAngle;
-      if (sweep <= 0) sweep += Math.PI * 2;
-      const arcSegments = Math.max(2, Math.ceil((sweep / Math.PI) * fn));
-      for (let k = 0; k <= arcSegments; k++) {
-        const a = startAngle + sweep * (k / arcSegments);
-        result.push([cx + r * Math.cos(a), cy + r * Math.sin(a), 0]);
-      }
+    /* `join === 'miter'` takes the intersection branch below — that branch is
+     * exactly the corner `delta` asks for (TODO #169, 2026-09-21).
+     *
+     * 🔴 THE ARC IS ON WHICHEVER SIDE THE OFFSET MOVES AWAY FROM THE CORNER,
+     * AND THAT IS `r · cross > 0`, NOT `cross > 0` (2026-10-14). The old test
+     * drew arcs only for `r > 0` at convex corners, so an INWARD round offset
+     * mitred every REFLEX corner instead of rounding it. Measured on the L
+     * `polygon([[0,0],[10,0],[10,2],[2,2],[2,10],[0,10]])`, openscad
+     * 2026.08.07: `offset(r=-0.5,$fn=64)` encloses **17.054**, and the mitre
+     * encloses **17.000** — the area of `offset(delta=-0.5)`, a different call. */
+    if (join === 'round' && r * cross > 0) {
+      result.push(...clipperArc(outline[i], [p1x, p1y, 0], [q0x, q0y, 0], r, fn));
     } else if (Math.abs(det) < 1e-12) {
       // Parallel edges — use the midpoint of the two offset points
       result.push([(p1x + q0x) / 2, (p1y + q0y) / 2, 0]);
@@ -2060,9 +2954,193 @@ function offsetOutline(outline: V3[], r: number, fn: number = 16): V3[] {
       const t = (cdx * bdy - cdy * bdx) / det;
       result.push([p0x + t * adx, p0y + t * ady, 0]);
     }
+    last.push(result.length - 1);
+  }
+  return { pts: result, first, last };
+}
+
+/**
+ * Offset ONE outline exactly, or say why it cannot be.
+ *
+ * 🔴 WHY THIS EXISTS — THE PANEL THAT EVALUATED TO A SLIVER (2026-10-14).
+ * The old `offsetOutline` moved every vertex and returned whatever came out,
+ * with no idea whether it was the offset. Two of its failure modes put a WRONG
+ * PART on `2bee_hive_brood_panel_wcnc.scad` with **no refusal, no warning, and
+ * an audit verdict of `closed`**:
+ *
+ *   1. **An inward offset that consumes the shape INVERTED it instead of
+ *      emptying it.** `offset(delta=-0.8) square([1.4,4.7])` came out as a
+ *      0.2 mm-wide rectangle wound backwards; extruded, that is an inside-out
+ *      solid, and subtracting an inside-out solid INTERSECTS. Measured:
+ *      `difference(){ cube(10); translate([2,2,-1]) linear_extrude(12)
+ *      offset(delta=-0.8) square([1.4,4.7]); }` — openscad 1000 mm³ (the
+ *      offset is empty, the cube is untouched), ours a 0.2×3.1×10 sliver. On
+ *      the brood panel: openscad 1 647 657 mm³, ours **39.5 mm³**.
+ *   2. **The winding was assumed, never read.** An outline that arrives CW (any
+ *      mirror above it — the sensor-pod slot is under one) was offset along
+ *      its INWARD normals, so `offset(r=3)` SHRANK it. openscad:
+ *      `offset(r=3,$fn=32) mirror([1,0]) square(10)` encloses 248.093.
+ *
+ * So the outline is first put CCW (a flat is a filled region in this kernel's
+ * model; holes never reach here — see the overlap refusal at the call site),
+ * and then exactly one of three things happens:
+ *
+ *   · **convex + inward** → {@link erodeConvex}, exact for every join, and
+ *     EMPTY when the offset consumes the polygon;
+ *   · **otherwise** → the raw offset, ACCEPTED ONLY IF it is a simple polygon,
+ *     still CCW, and no original edge came out reversed. Under those three
+ *     conditions the raw curve IS the boundary of the offset region — it is
+ *     what Clipper2's positive-fill union of the same raw path returns;
+ *   · **anything else** → REFUSED. A raw offset that self-intersects (a neck
+ *     pinched off, a notch closed, a short edge consumed) needs that union to
+ *     resolve, and there is no polygon clipper here to do it. Returning the
+ *     raw loop would draw material that is not there.
+ */
+function offsetFlat(outline0: V3[], r: number, fn: number, join: OffsetJoin): OffsetOutcome {
+  let outline = cleanOutline(outline0);
+  if (outline.length < 3) return { kind: 'empty' };
+  const area0 = openArea(outline);
+  if (Math.abs(area0) < 1e-12) return { kind: 'empty' };
+  if (area0 < 0) outline = outline.slice().reverse();
+  if (Math.abs(r) < 1e-9) return { kind: 'ok', outline };
+
+  if (r < 0 && isConvexCcw(outline)) {
+    const eroded = erodeConvex(outline, -r);
+    if (eroded.length < 3 || openArea(eroded) <= 1e-12) return { kind: 'empty' };
+    return { kind: 'ok', outline: eroded };
   }
 
-  return result;
+  const raw = rawOffset(outline, r, fn, join);
+  const n = outline.length;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const ex = outline[j][0] - outline[i][0], ey = outline[j][1] - outline[i][1];
+    const a = raw.pts[raw.last[i]], b = raw.pts[raw.first[j]];
+    const dot = (b[0] - a[0]) * ex + (b[1] - a[1]) * ey;
+    if (dot <= 1e-12 * Math.hypot(ex, ey)) {
+      return {
+        kind: 'refuse',
+        why:
+          `the offset by ${r} consumes edge ${i + 1} of a ${n}-vertex non-convex outline (it comes out ` +
+          'reversed). The true offset removes that feature and re-joins its neighbours, which needs a ' +
+          'polygon clipper this kernel does not have',
+      };
+    }
+  }
+  const simple = outlineIsSimple(raw.pts);
+  if (simple === null) {
+    return {
+      kind: 'refuse',
+      why: `the offset outline has ${raw.pts.length} vertices, above the ${OFFSET_SIMPLE_CHECK_MAX} this kernel will check for self-intersection`,
+    };
+  }
+  if (!simple) {
+    return {
+      kind: 'refuse',
+      why:
+        `the raw offset by ${r} of a ${n}-vertex non-convex outline SELF-INTERSECTS (a neck pinches off or ` +
+        'a notch closes). Resolving that needs a polygon clipper this kernel does not have',
+    };
+  }
+  if (openArea(raw.pts) <= 1e-12) {
+    return { kind: 'refuse', why: `the offset by ${r} produced an inverted outline that this kernel cannot classify` };
+  }
+  return { kind: 'ok', outline: raw.pts };
+}
+
+/**
+ * Offset a whole 2D REGION — any number of outlines, with holes — exactly as
+ * OpenSCAD does, or refuse by name. This is the path for everything
+ * {@link offsetFlat} cannot take: holes, a raw offset that consumes an edge or
+ * pinches off a neck, and several regions at once (2026-10-14).
+ *
+ * 🔴 IT IS CLIPPER'S OWN CONSTRUCTION, NOT AN APPROXIMATION OF IT. OpenSCAD
+ * hands the region to Clipper2's `ClipperOffset`, which builds a RAW path per
+ * ring — every edge moved `r` along its outward normal; at a corner turning
+ * AWAY from the offset, the join (arc, or mitre for `delta`); at a corner
+ * turning INTO it, `p + r·n0 → p → p + r·n1` — and keeps the points where
+ * the raw paths' winding number is POSITIVE. That is exactly what is built
+ * here and handed to {@link fillRegion} with `w ≥ 1`. The arc vertices are
+ * placed as {@link rawOffset} places them — the construction already measured
+ * against the binary (17.054 for the L). Every ring is wound with the material
+ * on its LEFT (outer CCW, holes CW), so one formula serves holes too, and the
+ * windings of disjoint regions add, which is why several are taken at once.
+ *
+ * REFUSED, by name: a ring that crosses itself (its winding is not this
+ * function's to guess) and a SPIKE (an edge doubling straight back, whose
+ * mitre is at infinity).
+ */
+function offsetRegion(
+  flats: Flat[],
+  r: number,
+  fn: number,
+  join: OffsetJoin,
+  budget: Budget,
+): { kind: 'ok'; flats: Flat[] } | { kind: 'refuse'; why: string } {
+  const loops: V3[][] = [];
+  for (const f of flats) {
+    const rings: V3[][] = [];
+    const outer = normaliseRing(f.outline, true);
+    if (outer === 'crossed') return { kind: 'refuse', why: `${f.label} (line ${f.line}) has an outline that crosses itself` };
+    if (!outer) continue;
+    rings.push(outer);
+    for (const h0 of f.holes ?? []) {
+      const h = normaliseRing(h0, false);
+      if (h === 'crossed') return { kind: 'refuse', why: `${f.label} (line ${f.line}) has a hole that crosses itself` };
+      if (h) rings.push(h);
+    }
+    for (const ring of rings) {
+      const n = ring.length;
+      const nrm: [number, number][] = [];
+      for (let i = 0; i < n; i++) {
+        const a = ring[i], b = ring[(i + 1) % n];
+        const dx = b[0] - a[0], dy = b[1] - a[1];
+        const l = Math.hypot(dx, dy);
+        nrm.push([dy / l, -dx / l]); // cleanOutline left no zero-length edge
+      }
+      const path: V3[] = [];
+      for (let i = 0; i < n; i++) {
+        const p = ring[i];
+        const n0 = nrm[(i - 1 + n) % n], n1 = nrm[i];
+        const cross = n0[0] * n1[1] - n0[1] * n1[0];
+        const dt = n0[0] * n1[0] + n0[1] * n1[1];
+        if (Math.abs(cross) < 1e-12 && dt < 0) {
+          return {
+            kind: 'refuse',
+            why: `${f.label} (line ${f.line}) has a spike — an edge that doubles straight back at (${p[0]}, ${p[1]}) — whose offset corner is at infinity`,
+          };
+        }
+        const s0: V3 = [p[0] + r * n0[0], p[1] + r * n0[1], 0];
+        const s1: V3 = [p[0] + r * n1[0], p[1] + r * n1[1], 0];
+        if (!(r * cross > 0)) {
+          // Turning INTO the offset (or straight on): Clipper's concave join.
+          if (Math.abs(cross) < 1e-12) path.push(s0);
+          else path.push(s0, [p[0], p[1], 0], s1);
+        } else if (join === 'round') {
+          path.push(...clipperArc(p, s0, s1, r, fn));
+        } else {
+          // Mitre: where the two offset edges meet, p + r·(n0 + n1)/(1 + n0·n1).
+          const k = r / (1 + dt);
+          path.push([p[0] + k * (n0[0] + n1[0]), p[1] + k * (n0[1] + n1[1]), 0]);
+        }
+      }
+      loops.push(path);
+    }
+  }
+  if (!loops.length) return { kind: 'ok', flats: [] };
+  const res = fillRegion(loops, (w) => w >= 1, budget);
+  if (res.kind === 'refuse') return res;
+  const f0 = flats[0];
+  return {
+    kind: 'ok',
+    flats: res.regions.map((g) => ({
+      outline: g.outer,
+      holes: g.holes.length ? g.holes : undefined,
+      label: `offset(${f0.label})`,
+      line: f0.line,
+      colour: f0.colour,
+    })),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2076,7 +3154,11 @@ function offsetOutline(outline: V3[], r: number, fn: number = 16): V3[] {
 // ---------------------------------------------------------------------------
 
 class CsgLimit extends Error {
-  constructor(public reason: string) {
+  constructor(
+    public reason: string,
+    /** Which budget ran out — carried onto the issue as `MeshIssue.limit`. */
+    public kind: CsgLimitKind,
+  ) {
     super(reason);
   }
 }
@@ -2159,6 +3241,8 @@ function splitPolygon(
 
 interface Budget {
   deadline: number;
+  /** Work units spent so far — deterministic, reported as `stats.work`. */
+  readonly units: number;
   check(count: number): void;
   /**
    * The deadline alone, for places that produce geometry without producing a
@@ -2172,21 +3256,29 @@ interface Budget {
   tick(): void;
 }
 
-function makeBudget(deadline: number): Budget {
-  const overdue = () => {
+function makeBudget(deadline: number, maxWork: number = MAX_WORK): Budget {
+  let units = 0;
+  const spend = (n: number) => {
+    units += n;
+    if (units > maxWork) {
+      throw new CsgLimit(`the evaluation exceeded its work budget of ${maxWork.toLocaleString()} units`, 'work');
+    }
     if (now() > deadline) {
-      throw new CsgLimit(`the evaluation exceeded its ${MAX_MS} ms budget`);
+      throw new CsgLimit('the evaluation hit the wall-clock backstop (a hang guard, not a property of the model)', 'clock');
     }
   };
   return {
     deadline,
+    get units() {
+      return units;
+    },
     check(count: number) {
       if (count > MAX_POLYS) {
-        throw new CsgLimit(`the operation exceeded ${MAX_POLYS.toLocaleString()} polygons`);
+        throw new CsgLimit(`the operation exceeded ${MAX_POLYS.toLocaleString()} polygons`, 'polygons');
       }
-      overdue();
+      spend(count);
     },
-    tick: overdue,
+    tick: () => spend(1),
   };
 }
 
@@ -2704,6 +3796,12 @@ interface Solid {
 }
 interface Flat {
   outline: V3[];
+  /** Holes inside `outline` (2026-10-14). Absent ⇔ none. Before this a region
+   *  with a hole could not be represented, and `difference()` faked one with a
+   *  second flat that, a list of flats being a union, filled it back in. Every
+   *  consumer either honours these or REFUSES a flat that has them — none may
+   *  read `outline` alone and draw the hole solid. */
+  holes?: V3[][];
   label: string;
   line: number;
   colour: Colour | null;
@@ -2994,9 +4092,15 @@ class Mesher {
   booleansRefused = 0;
   private budget: Budget;
   private seen = new Set<string>();
+  /** Current `evalNode` recursion depth. See `MAX_DEPTH`. */
+  private depth = 0;
 
-  constructor(deadline: number) {
-    this.budget = makeBudget(deadline);
+  constructor(deadline: number, maxWork: number = MAX_WORK) {
+    this.budget = makeBudget(deadline, maxWork);
+  }
+  /** Deterministic work spent — `stats.work`. */
+  get workUnits(): number {
+    return this.budget.units;
   }
 
   private note(
@@ -3005,11 +4109,12 @@ class Mesher {
     line: number,
     detail: string,
     alters: MeshIssue['alters'] = 'geometry',
+    limit?: CsgLimitKind,
   ): void {
     const k = `${severity}|${name}@${line}`;
     if (this.seen.has(k)) return;
     this.seen.add(k);
-    this.issues.push({ severity, name, line, detail, alters });
+    this.issues.push({ severity, name, line, detail, alters, ...(limit ? { limit } : {}) });
   }
 
   /**
@@ -3044,6 +4149,32 @@ class Mesher {
     // budgets exist to prevent. The throw lands in the existing `CsgLimit` catch
     // in `meshScene`, which already reports it as `refused` with the budget named.
     this.budget.tick();
+
+    // 🔴 THE DEPTH GUARD, AND WHY IT IS A REFUSAL AND NOT A CRASH (#163).
+    // `RangeError: Maximum call stack size exceeded` is not a verdict. It escapes
+    // every `catch (e instanceof CsgLimit)` in this file, and `CadTab` runs
+    // `parseScad` + `meshScene` SYNCHRONOUSLY ON THE MAIN THREAD — so a visitor
+    // who opens a deeply nested third-party design gets a blank tab that says
+    // nothing about why. Found on `Adam-CAD/CADAM` `benchmarks/13-v8-engine.scad`.
+    //
+    // ⚠ THE RECURSION IS NOT THE ONLY THING THAT RUNS OUT. `quickhull` sat at the
+    // top of that stack trace, which is why the bound is on DEPTH rather than on
+    // a frame count: the guard has to leave room for whatever the deepest node
+    // then calls, and a bound that only just fits leaves none.
+    if (++this.depth > MAX_DEPTH) {
+      this.depth--;
+      throw new CsgLimit(`the scene nests deeper than ${MAX_DEPTH} levels`, 'depth');
+    }
+    try {
+      return this.evalNodeInner(node, x, c);
+    } finally {
+      this.depth--;
+    }
+  }
+
+  /** The body of {@link evalNode}. Split out ONLY so the depth guard above has a
+   *  single exit to decrement on — every `return` in here is one of many. */
+  private evalNodeInner(node: SceneNode, x: Xf, c: Colour | null): Evaluated {
     switch (node.kind) {
       case 'primitive':
         return this.primitive(node, x, c);
@@ -3081,7 +4212,20 @@ class Mesher {
         // ⇒ A fix scoped to the branch whose symptom you measured is scoped to
         // the branch you happened to look at. `offset` needs no change: it
         // returns flats and inherits whichever frame its parent establishes.
-        const childX = node.extrude || node.rotateExtrude ? IDENTITY : x;
+        // 🔴 `offset` JOINED THIS LIST 2026-10-14, for the same reason as the
+        // extrudes: an offset is computed in the LOCAL frame and the enclosing
+        // transform is applied AFTERWARDS. Offsetting already-transformed
+        // outlines is only right for rigid in-plane transforms; under a scale it
+        // is a different shape (`scale([2,1]) offset(r=1) square(1)` has
+        // ELLIPTICAL corners in OpenSCAD — the arcs are scaled too — and had
+        // circular ones here), and under a mirror it flipped the winding the
+        // offset reads its outward normals from.
+        // 🔴 `projection` JOINED 2026-10-14: the section is taken at the
+        // projection's OWN z = 0, so an enclosing transform must not move the
+        // solid before the cut. Openscad: `translate([0,0,5]) projection(cut=true)
+        // translate([0,0,-1]) cube(2)` is a 4 mm² square; cutting in world space
+        // found the cube 4 mm above the plane and drew nothing.
+        const childX = node.extrude || node.rotateExtrude || node.offset || node.projection ? IDENTITY : x;
         const out: Evaluated = { solids: [], flats: [] };
         for (const ch of node.children) {
           const e = this.evalNode(ch, childX, inner);
@@ -3097,7 +4241,19 @@ class Mesher {
               // Extruded in the LOCAL frame, then carried into world space by the
               // enclosing transform — which also makes scale and shear correct,
               // not only rotation.
-              const polys = transformPolys(extrudeOutline(flat.outline, height, center), x);
+              const ex = extrudeOutline(flat.outline, flat.holes ?? [], height, center);
+              if (ex.kind === 'refuse') {
+                this.note(
+                  'refused',
+                  'linear_extrude()',
+                  node.line,
+                  `the end cap of ${flat.label} (line ${flat.line}) could not be triangulated exactly: ${ex.why}. ` +
+                    'NOTHING is drawn for this node — a cap that overlaps itself or pokes outside the outline is a ' +
+                    'solid the source does not describe.',
+                );
+                return { solids: [], flats: [] };
+              }
+              const polys = transformPolys(ex.polys, x);
               if (polys.length > 0) {
                 extruded.push({ polys, label: `extrude(${flat.label})`, line: flat.line, colour: flat.colour });
               }
@@ -3109,6 +4265,20 @@ class Mesher {
         if (node.rotateExtrude && out.flats.length > 0) {
           const { angle, fn, start } = node.rotateExtrude;
           if (angle > 0) {
+            // A region with a hole is revolved as outline minus hole; this
+            // function revolves ONE outline. Revolving the outline alone would
+            // fill the hole, so it is refused by name instead.
+            const holed = out.flats.find((fl) => fl.holes?.length);
+            if (holed) {
+              this.note(
+                'refused',
+                'rotate_extrude()',
+                node.line,
+                `${holed.label} (line ${holed.line}) has ${holed.holes!.length} hole(s), and this kernel revolves ` +
+                  'outlines only — revolving the outline alone would fill the hole. NOTHING is drawn for this node.',
+              );
+              return { solids: [], flats: [] };
+            }
             const solids: Solid[] = [];
             for (const flat of out.flats) {
               const polys = rotateExtrudeOutline(flat.outline, angle, x, fn, start);
@@ -3119,18 +4289,90 @@ class Mesher {
             return { solids, flats: [] };
           }
         }
-        // offset: offset flat outlines by r
-        if (node.offset && out.flats.length > 0) {
-          const { r } = node.offset;
-          if (Math.abs(r) > 1e-9) {
-            const offsetFlats: Flat[] = [];
-            for (const flat of out.flats) {
-              const outline = offsetOutline(flat.outline, r);
-              if (outline.length >= 3) {
-                offsetFlats.push({ outline, label: `offset(${flat.label})`, line: flat.line, colour: flat.colour });
-              }
+        // offset: offset the children's outlines in the LOCAL frame, then place.
+        if (node.offset) {
+          const { r, f } = node.offset;
+          const place = (o: V3[]): V3[] => o.map((q) => applyXf(x, q));
+          // A 3D child of an offset is not offset (OpenSCAD ignores it with a
+          // warning); it is carried through, placed like everything else.
+          const solids = out.solids.map((s) => ({ ...s, polys: transformPolys(s.polys, x) }));
+          if (!out.flats.length) return { solids, flats: [] };
+          const refuse = (why: string, limit?: CsgLimitKind): Evaluated => {
+            this.note(
+              'refused',
+              'offset()',
+              node.line,
+              `${why}. NOTHING is drawn for this node: an approximate offset is a part cut to an ` +
+                'outline the source does not describe.',
+              'geometry',
+              limit,
+            );
+            return { solids, flats: [] };
+          };
+          const placeFlat = (fl: Flat): Flat => ({ ...fl, outline: place(fl.outline), holes: fl.holes?.map(place) });
+          /* 🔴 THE CHILDREN ARE UNIONED FIRST, EXACTLY — AS OPENSCAD DOES (2026-10-14).
+           * OpenSCAD unions an offset's children and offsets the union
+           * (`GeometryEvaluator::visit(OffsetNode)` → `applyToChildren2D(UNION)`
+           * → `ClipperUtils::applyOffset`). An inward offset does not distribute
+           * over a union: the material where two rectangles overlap survives
+           * the union's offset and not either rectangle's. Measured, openscad
+           * 2026.08.07: `offset(delta=-1) union(){ square([10,2]); square([2,10]); }`
+           * is NO 2D OBJECT (both arms are 2 wide), while
+           * `offset(delta=-1) union(){ square([10,4]); square([4,10]); }` is ONE
+           * L of 28 mm² (two 2-wide arms sharing a 2×2 corner).
+           * Until today overlapping children were REFUSED here ("no exact 2D
+           * union"), and that refusal is what the brood panel's sensor-pod slot
+           * (`enc_pcb_slot_2d`: `offset(r=0.8) offset(delta=-0.8)` over 37
+           * overlapping rectangles) hit. `union2D` is that exact union, and
+           * `offsetRegion` offsets what it returns — holes included. */
+          let flats = out.flats;
+          try {
+            if (Math.abs(r) < 1e-9) {
+              const u = flats.length > 1 ? union2D(flats, this.budget) : { kind: 'ok' as const, flats };
+              if (u.kind === 'refuse') return refuse(`the union of this offset's ${flats.length} children could not be computed exactly: ${u.why}`);
+              return { solids, flats: u.flats.map(placeFlat) };
             }
-            return { solids: out.solids, flats: offsetFlats };
+            if (flats.length > 1) {
+              const u = union2D(flats, this.budget);
+              if (u.kind === 'refuse') {
+                return refuse(`the union of this offset's ${flats.length} children could not be computed exactly: ${u.why}`);
+              }
+              flats = u.flats;
+            }
+            const fn = fragments(Math.abs(r), f);
+            /* The single-outline path (`offsetFlat`) is kept where it answers:
+             * it is the construction the existing measurements were taken on,
+             * and it is exact when it accepts (see its header). Everything else
+             * — holes, several regions, a raw outline that consumes an edge or
+             * pinches a neck — goes to `offsetRegion`, which is Clipper's own
+             * positive-fill construction over ALL rings at once (an inward
+             * mitre of one region can reach into another; outward offsets of
+             * neighbours can merge — both need the rings together). */
+            if (flats.length === 1 && !flats[0].holes?.length) {
+              const flat = flats[0];
+              /* 🔴 `fragments(|r|, f)`, NOT THE LITERAL 16 — TODO #169, 2026-09-18.
+               * This call passed no `fn`, so the old `offsetOutline` used its
+               * default of 16 segments per half-turn for EVERY offset in every
+               * design, ignoring `$fn`/`$fa`/`$fs` entirely. **Measured at
+               * `r = 0.8, $fa = 12, $fs = 2`: OpenSCAD 5 fragments per circle, ours
+               * the equivalent of 32.** ⚠ `Math.abs(r)` because an INWARD offset
+               * tessellates by the same radius; the sign chooses the direction. */
+              const res = offsetFlat(flat.outline, r, fn, node.offset.join);
+              if (res.kind === 'ok') {
+                return { solids, flats: [{ outline: place(res.outline), label: `offset(${flat.label})`, line: flat.line, colour: flat.colour }] };
+              }
+              // 'empty': the offset consumed this outline — OpenSCAD draws
+              // nothing for it either, and that is an answer, not a refusal.
+              if (res.kind === 'empty') return { solids, flats: [] };
+              // 'refuse': the raw outline needs the positive-fill union that
+              // `offsetFlat` cannot take. `offsetRegion` takes it exactly.
+            }
+            const g = offsetRegion(flats, r, fn, node.offset.join, this.budget);
+            if (g.kind === 'refuse') return refuse(g.why);
+            return { solids, flats: g.flats.map(placeFlat) };
+          } catch (e) {
+            if (!(e instanceof CsgLimit)) throw e;
+            return refuse(`${e.reason} while computing this offset exactly`, e.kind);
           }
         }
         // hull: compute convex hull of all children's geometry.
@@ -3185,7 +4427,29 @@ class Mesher {
         // For each pair of triangles from different operands, compute the
         // Minkowski sum as a small polyhedron (6 vertices), then union all.
         if (node.minkowski && out.solids.length >= 2) {
-          const result = minkowskiSum(out.solids);
+          /* 🔴 CONVEX OPERANDS ONLY, AND SAID OTHERWISE. The triangle-pair union below
+           * returned one triangle, volume 0, for `minkowski(){cube(10); sphere(1);}`
+           * (bughunt 2026-11-15). For convex operands the sum IS the hull of the
+           * pairwise vertex sums — exact. A non-convex operand needs a convex
+           * decomposition this kernel does not have: refused by name, not guessed. */
+          const nonConvex = out.solids.find((sd) => !isConvexSolid(sd.polys));
+          if (nonConvex) {
+            this.note(
+              'refused',
+              'minkowski()',
+              node.line,
+              `${nonConvex.label} (line ${nonConvex.line}) is not convex, and this kernel sums convex operands only ` +
+                '(their sum is the hull of the pairwise vertex sums). NOTHING is drawn for this node.',
+            );
+            return { solids: [], flats: [] };
+          }
+          let sums: V3[] = [[0, 0, 0]];
+          for (const sd of out.solids) {
+            const vs = uniqueVerts(sd.polys);
+            sums = sums.flatMap((p) => vs.map((q) => [p[0] + q[0], p[1] + q[1], p[2] + q[2]] as V3));
+            sums = uniqueVerts(quickhull(sums));
+          }
+          const result = quickhull(sums);
           if (result.length > 0) {
             return {
               solids: [{ polys: result, label: 'minkowski', line: node.line, colour: null }],
@@ -3253,8 +4517,10 @@ class Mesher {
               }
             }
             for (const flat of out.flats) {
-              for (const v of flat.outline) {
-                v[0] *= sx; v[1] *= sy; v[2] *= sz;
+              for (const ring of [flat.outline, ...(flat.holes ?? [])]) {
+                for (const v of ring) {
+                  v[0] *= sx; v[1] *= sy; v[2] *= sz;
+                }
               }
             }
           }
@@ -3262,8 +4528,24 @@ class Mesher {
         }
         // projection: project 3D solids onto XY plane as 2D outlines.
         if (node.projection && out.solids.length > 0) {
-          const flats = projectToXY(out.solids, node.projection.cut);
-          return { solids: [], flats };
+          try {
+            const pr = projectToXY(out.solids, node.projection.cut, this.budget);
+            const pl = (o: V3[]): V3[] => o.map((q) => applyXf(x, q));
+            if (pr.kind === 'ok') {
+              return { solids: [], flats: pr.flats.map((fl) => ({ ...fl, outline: pl(fl.outline), holes: fl.holes?.map(pl), line: node.line })) };
+            }
+            this.note(
+              'refused',
+              'projection()',
+              node.line,
+              `${pr.why}. NOTHING is drawn for this node — an outline guessed across a gap is a part cut to a shape ` +
+                'the source does not describe.',
+            );
+          } catch (e) {
+            if (!(e instanceof CsgLimit)) throw e;
+            this.note('refused', 'projection()', node.line, `${e.reason} while projecting. NOTHING is drawn for this node.`, 'geometry', e.kind);
+          }
+          return { solids: [], flats: [] };
         }
         // multmatrix: apply an arbitrary 4×4 transform to children.
         // The matrix is stored as a 9-element array (3×3 rotation/scale) +
@@ -3406,6 +4688,56 @@ class Mesher {
         return { solids: [], flats: [{ outline: circleOutline(p.r, p).map((q) => applyXf(x, q)), label: 'circle', line, colour: c }] };
       }
       case 'polygon': {
+        /* 🔴 A SELF-CROSSING OUTLINE WITHOUT `paths` IS FILLED EVEN-ODD TOO
+         * (2026-10-14). It went straight to the cap triangulation, whose check
+         * (every triangle positive, edges cancel to the ring) ACCEPTS a ring
+         * that crosses itself without its lobes cancelling — and draws it
+         * counting the doubly-wound area twice. Measured, openscad 2026.08.07:
+         * `polygon([[0,0],[10,0],[10,10],[0,10],[2,2],[8,2],[8,8],[2,8]])` (the
+         * two rings of a plate-with-hole written as ONE loop) encloses 55.5 mm²;
+         * this drew 132, and extruded it 132 mm³. A ring whose lobes cancel
+         * (`'crossed'`, a bow-tie) is left to the existing refusal. */
+        let paths = p.paths;
+        if (!paths && p.points.length >= 4) {
+          const ring = p.points.map(([px, py]) => [px, py, 0] as V3);
+          const cleaned = cleanOutline(ring);
+          if (normaliseRing(ring, true) instanceof Array && outlineIsSimple(cleaned) === false) {
+            paths = [p.points.map((_, k) => k)];
+          }
+        }
+        if (paths) {
+          /* EVEN-ODD over the paths, exactly as openscad fills them (see
+           * `PolygonParams.paths`): every loop goes to `fillRegion` and the
+           * answer comes back as regions with holes. A path of fewer than three
+           * distinct points encloses nothing and contributes nothing to an
+           * even-odd fill — openscad drops it too, and the area is unchanged. */
+          const loops = paths.map((ix) => ix.map((k) => [p.points[k][0], p.points[k][1], 0] as V3)).filter((l) => cleanOutline(l).length >= 3);
+          try {
+            const res = fillRegion(loops, (w) => Math.abs(w) % 2 === 1, this.budget);
+            if (res.kind === 'refuse') {
+              this.note('refused', 'polygon()', line, `its paths could not be filled exactly: ${res.why}. Nothing was drawn.`);
+              return empty;
+            }
+            if (!res.regions.length) {
+              this.note('warning', 'polygon()', line, `its ${paths.length} path(s) enclose nothing under the even-odd rule openscad fills them by; nothing was drawn`);
+              return empty;
+            }
+            return {
+              solids: [],
+              flats: res.regions.map((g) => ({
+                outline: g.outer.map((q) => applyXf(x, q)),
+                holes: g.holes.length ? g.holes.map((h) => h.map((q) => applyXf(x, q))) : undefined,
+                label: 'polygon',
+                line,
+                colour: c,
+              })),
+            };
+          } catch (e) {
+            if (!(e instanceof CsgLimit)) throw e;
+            this.note('refused', 'polygon()', line, `${e.reason} while filling its paths. Nothing was drawn.`, 'geometry', e.kind);
+            return empty;
+          }
+        }
         if (p.points.length < 3) {
           this.note('refused', 'polygon()', line, `a polygon with ${p.points.length} points has no area; nothing was drawn`);
           return empty;
@@ -3582,21 +4914,50 @@ class Mesher {
       const solidCount = operands.reduce((n, o) => n + o.polys.length, 0);
 
       // 2D booleans: all operands are flats (no solids).
+      /* 🔴 THE OPERANDS STAY GROUPED (2026-10-14). This used to flatten every
+       * operand's flats into one list and hand the first TWO to the boolean, so
+       * `difference(){ union(){a;b} c }` computed `a − b` and dropped `c`, and a
+       * third operand of any difference or intersection was never read. Each
+       * operand's flats are its union; `boolean2D` folds over ALL operands. */
       if (flatCount > 0 && solidCount === 0) {
-        const allFlats = operands.flatMap((o) => o.flats);
-        if (allFlats.length < 2) {
-          return { solids: [], flats: allFlats };
+        const groups = operands.map((o) => o.flats);
+        if (node.op === 'intersection' && groups.some((g) => !g.length)) {
+          // The same rule, and the same reason, as the 3D intersection below.
+          this.booleansRefused++;
+          this.note(
+            'refused',
+            name,
+            line,
+            'one or more operands of this 2D intersection produced no geometry (refused or empty). The ' +
+              'intersection with an empty region is empty, and quietly intersecting only the remaining ' +
+              'operands would return a LARGER outline than the source describes. Nothing is drawn.',
+          );
+          return { solids: [], flats: [] };
         }
-        const result = boolean2D(node.op, allFlats);
-        if (result !== null) {
-          return { solids: [], flats: result };
+        if (node.op === 'difference' && !groups[0].length) {
+          this.note(
+            'warning',
+            name,
+            line,
+            'the first operand of this 2D difference produced no geometry, so there is nothing to subtract from. ' +
+              'Nothing is drawn — in particular the subtrahends are NOT drawn.',
+          );
+          return { solids: [], flats: [] };
         }
-        // Fallback: if 2D boolean fails, refuse
-        const dims: OperandDim[] = operands.map((o) =>
-          o.polys.length && o.flats.length ? 'mixed' : o.polys.length ? 3 : o.flats.length ? 2 : 0,
-        );
+        const result = boolean2D(node.op, groups, this.budget);
+        if (result.kind === 'ok') {
+          if (node.op !== 'union') this.booleansComputed++;
+          return { solids: [], flats: result.flats };
+        }
         this.booleansRefused++;
-        this.note('refused', name, line, twoDimensionalRefusal(node.op, dims, flatCount));
+        this.note(
+          'refused',
+          name,
+          line,
+          `this 2D ${node.op} over ${groups.length} operands could not be computed exactly: ${result.why}. ` +
+            'NOTHING is drawn for this node — dropping an operand or approximating the outline would cut a ' +
+            'part the source does not describe.',
+        );
         return { solids: [], flats: [] };
       }
 
@@ -3711,6 +5072,8 @@ class Mesher {
         `${e.reason}. The operation was abandoned and NOTHING is drawn for this node — a partially applied ` +
           'boolean is not a shape, and showing the operands instead would show material that the source says ' +
           'is not there.',
+        'geometry',
+        e.kind,
       );
       return { solids: [], flats: [] };
     }
@@ -3757,13 +5120,20 @@ function applyPlant(w: Welded, plant: MeshPlant): void {
  * only way to exceed a 6 s wall-clock was to find a model that genuinely takes
  * 6 s — which is slow, machine-dependent, and would rot into a flake.
  *
- * ⚠ IT WIDENS NOTHING AT THE DEFAULT. Omitted, this is `MAX_MS` exactly as
+ * ⚠ CHANGED 2026-10-15: `budgetMs` is now only the wall-clock BACKSTOP (default
+ * WALL_BACKSTOP_MS); the budget that decides verdicts is `budgetWork` (default
+ * MAX_WORK), deterministic. ⚠ IT WIDENS NOTHING AT THE DEFAULT. Omitted, this is the default exactly as
  * before, and no product caller passes it — `CadTab` calls `meshScene(scene)`.
  * A caller COULD pass a larger budget, which is why it is named `budgetMs`
  * rather than something that reads like a tuning knob: the browser's contract is
  * the default and this is the seam a test drives it through.
  */
-export function meshScene(scene: SceneNode, plant?: MeshPlant, budgetMs: number = MAX_MS): MeshResult {
+export function meshScene(
+  scene: SceneNode,
+  plant?: MeshPlant,
+  budgetMs: number = WALL_BACKSTOP_MS,
+  budgetWork: number = MAX_WORK,
+): MeshResult {
   const t0 = now();
   // The parser's own report, stamped on the root by `parseScad`. Read here
   // rather than accepted as an argument so that arming this cannot be left to
@@ -3772,7 +5142,7 @@ export function meshScene(scene: SceneNode, plant?: MeshPlant, budgetMs: number 
   // UNKNOWN below and never as clean.
   const sourceDiagnostics: ParseDiagnostics | null =
     scene.kind === 'group' && scene.diagnostics ? scene.diagnostics : null;
-  const mesher = new Mesher(t0 + budgetMs);
+  const mesher = new Mesher(t0 + budgetMs, budgetWork);
   let evaluated: Evaluated;
   try {
     evaluated = mesher.evalNode(scene, IDENTITY);
@@ -3784,6 +5154,7 @@ export function meshScene(scene: SceneNode, plant?: MeshPlant, budgetMs: number 
       name: 'the whole model',
       line: scene.line,
       detail: `${e.reason}. Evaluation stopped and nothing is drawn.`,
+      limit: e.kind,
     });
   }
 
@@ -3826,12 +5197,55 @@ export function meshScene(scene: SceneNode, plant?: MeshPlant, budgetMs: number 
   });
 
   evaluated.flats.forEach((f, i) => {
-    const p = makePoly(f.outline);
-    if (!p) return;
-    const t = triangulate([p]);
-    if (!t.count) return;
-    const count = t.count;
-    const pos = Float32Array.from(t.pos); // narrowed for the GPU; nothing is measured on a flat
+    /* 🔴 TRIANGULATED, NOT FANNED (2026-10-14). This was `triangulate([makePoly
+     * (f.outline)])` — a fan, valid only for a convex polygon (the invariant
+     * `triangulate` states for CSG output, which a user's outline is not). A
+     * 44 mm² comb drew 92 mm² of overlapping triangles, and a hole could not be
+     * drawn at all. The outline is triangulated in its own plane — the
+     * dominant axis of its normal — so a 2D shape under a 3D rotation still
+     * draws. A triangulation that cannot be proved is refused, by name. */
+    // NOT `cleanOutline` here: it compares x,y only and would collapse an
+    // outline standing in a vertical plane. The projected rings are cleaned.
+    const nrm = makePoly(f.outline);
+    if (!nrm) {
+      /* No net area. A DEGENERATE outline (every vertex on one line) encloses
+       * nothing and OpenSCAD draws nothing for it either — but a bow-tie whose
+       * lobes cancel also has no net area, and returning here drew NOTHING with
+       * no word (2026-10-14: `polygon([[0,0],[10,0],[0,10],[10,10]])` — openscad
+       * 50 mm², two triangles — was silently empty). That one is named. */
+      if (normaliseRing(f.outline, true) === 'crossed') {
+        mesher.issues.push({
+          severity: 'refused',
+          name: f.label,
+          line: f.line,
+          detail:
+            'this outline crosses itself so that its lobes cancel to zero net area. openscad fills it even-odd; ' +
+            'this reader does not guess which lobes are material. Nothing is drawn for it.',
+        });
+      }
+      return;
+    }
+    const ax = Math.abs(nrm.n[0]) >= Math.abs(nrm.n[1]) && Math.abs(nrm.n[0]) >= Math.abs(nrm.n[2]) ? 0
+      : Math.abs(nrm.n[1]) >= Math.abs(nrm.n[2]) ? 1 : 2;
+    const u = (ax + 1) % 3, v = (ax + 2) % 3;
+    const toPlane = (q: V3): V3 => [q[u], q[v], 0];
+    const back = new Map<V3, V3>();
+    const proj = (ring: V3[]) => ring.map((q) => { const r = toPlane(q); back.set(r, q); return r; });
+    const tr = triangulateRegion(proj(f.outline), (f.holes ?? []).map(proj));
+    if (tr.kind === 'refuse') {
+      mesher.issues.push({
+        severity: 'refused',
+        name: f.label,
+        line: f.line,
+        detail: `this outline could not be triangulated exactly for drawing: ${tr.why}. Nothing is drawn for it.`,
+      });
+      return;
+    }
+    if (tr.kind === 'empty' || !tr.tris.length) return;
+    const count = tr.tris.length;
+    const pos = new Float32Array(count * 9); // narrowed for the GPU; nothing is measured on a flat
+    let o = 0;
+    for (const tri of tr.tris) for (const q of tri) { const w = back.get(q)!; pos[o++] = w[0]; pos[o++] = w[1]; pos[o++] = w[2]; }
     triangles += count;
     parts.push({
       id: `f${i}@${f.line}`,
@@ -4019,6 +5433,7 @@ export function meshScene(scene: SceneNode, plant?: MeshPlant, budgetMs: number 
       booleansComputed: mesher.booleansComputed,
       booleansRefused: mesher.booleansRefused,
       ms: Math.round((now() - t0) * 10) / 10,
+      work: mesher.workUnits,
     },
     trust,
     trustDetail,

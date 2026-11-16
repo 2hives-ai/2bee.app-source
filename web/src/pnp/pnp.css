@@ -1,0 +1,172 @@
+/* 2bee.pnp chat view — the 2bee.3d look the other chat tabs use (`.cad-simple`,
+ * `.cad-chat*` in styles.css). Only what is PnP-specific lives here; every value
+ * is a brand token. */
+.pnp-simple { height: 100%; min-height: 560px; }
+.pnp-right { display: grid; grid-template-rows: minmax(380px, 1fr) auto auto; gap: 12px 16px; min-height: 0; }
+.pnp-right > .cad-simple-canvas { min-height: 380px; }
+.pnp-chat-head-right { display: inline-flex; align-items: center; gap: 10px; }
+.pnp-expert-link { font-size: 12px; color: var(--muted); }
+.pnp-pick { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.pnp-pick > span { color: var(--muted); }
+.pnp-pick select, .pnp-card select, .pnp-row input {
+  font: inherit; padding: 6px 8px; color: var(--ink); background: var(--color-bg-card);
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+}
+.pnp-pick-src { color: var(--muted); font-size: 11.5px; word-break: break-all; }
+
+.pnp-view { position: absolute; inset: 0; background: var(--color-bg-card); }
+.pnp-view-legend {
+  position: absolute; left: 10px; right: 10px; bottom: 8px; font-size: 12px; color: var(--muted); pointer-events: none;
+  background: color-mix(in srgb, var(--color-bg-card) 85%, transparent); padding: 2px 6px; border-radius: var(--radius-sm);
+}
+.pnp-view-hover {
+  position: absolute; top: 8px; left: 10px; font-size: 12.5px; padding: 3px 8px; pointer-events: none;
+  background: var(--color-bg-card); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm);
+}
+.pnp-sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; }
+.pnp-sw.amber { background: var(--color-amber); }
+.pnp-sw.grey { background: var(--color-text-muted, var(--muted)); }
+
+.pnp-below { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.pnp-card {
+  background: var(--color-bg-card); border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-default); box-shadow: var(--shadow-card); padding: 16px;
+  display: flex; flex-direction: column; gap: 8px; min-width: 0; font-size: 13.5px;
+}
+.pnp-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pnp-card-head strong { font-size: 15px; font-weight: 600; color: var(--color-heading, var(--ink)); }
+.pnp-card p { margin: 0; }
+.pnp-card-note { color: var(--muted); font-size: 12px; }
+.pnp-card button.primary {
+  align-self: flex-start; background: var(--color-amber); border-color: var(--color-amber); color: var(--color-on-amber); font-weight: 600;
+}
+.pnp-card button.primary:hover:not(:disabled) { background: var(--color-interactive-hover); border-color: var(--color-interactive-hover); }
+.pnp-ok { color: var(--color-status-success, var(--ink)); }
+.pnp-badge {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--color-border); color: var(--muted); white-space: nowrap;
+}
+.pnp-facts { display: grid; grid-template-columns: 1fr; gap: 3px; margin: 0; }
+.pnp-facts div { display: grid; grid-template-columns: 84px 1fr; gap: 8px; }
+.pnp-facts dt { color: var(--muted); }
+.pnp-facts dd { margin: 0; }
+.pnp-facts dd.pnp-unknown { color: var(--muted); font-style: italic; }
+.pnp-sources summary, .pnp-card details summary { cursor: pointer; font-size: 12.5px; }
+.pnp-sources ul, .pnp-list { margin: 4px 0 0; padding-left: 18px; font-size: 12px; }
+.pnp-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pnp-row input { width: 80px; }
+.pnp-trays { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.pnp-trays li { display: grid; grid-template-columns: 40px 1fr auto; gap: 6px; align-items: center; }
+.pnp-trays select { min-width: 0; width: 100%; }
+.pnp-x { background: none; border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm); padding: 2px 8px; }
+.pnp-lanes { border-collapse: collapse; font-size: 12px; margin-top: 4px; width: 100%; }
+.pnp-lanes th, .pnp-lanes td { text-align: left; padding: 2px 6px; border-bottom: 1px solid var(--color-border-subtle); }
+
+@media (max-width: 1100px) {
+  .pnp-below { grid-template-columns: 1fr; }
+}
+/* Phone: the shared `.cad-simple` rule fixes row 1 at 55vh and puts the view
+ * first; this view is taller than that (3D + cards), so the rows size to their
+ * content, and the chat comes FIRST because the board picker is in it. */
+@media (max-width: 760px) {
+  .pnp-simple { min-height: 0; grid-template-rows: auto auto; height: auto; }
+  .pnp-simple > .cad-chat { max-height: 70vh; }
+  .pnp-simple > .cad-simple-view { order: 0; }
+  .pnp-right { grid-template-rows: 320px auto auto; }
+  .pnp-right > .cad-simple-canvas { min-height: 320px; }
+  .pnp-below { grid-template-columns: 1fr; }
+}
+
+/* Board picker (BoardPicker.tsx) — the design-page card look, as a list. */
+.pnp-board-picker { display: flex; flex-direction: column; gap: 6px; }
+.pnp-board-search {
+  font: inherit; font-size: 13px; padding: 6px 10px; color: var(--ink); background: var(--color-bg-card);
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm); width: 100%; box-sizing: border-box;
+}
+.pnp-board-list { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
+.pnp-board-item {
+  display: grid; grid-template-columns: 52px 1fr; gap: 8px; align-items: center; text-align: left; width: 100%;
+  padding: 4px 6px; background: var(--color-bg-card); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm);
+}
+.pnp-board-item:hover, .pnp-board-item:focus-visible { border-color: var(--color-amber); }
+.pnp-board-item.selected { border-color: var(--color-amber); background: var(--color-bg-secondary); }
+.pnp-board-item img, .pnp-board-thumb-empty { width: 52px; height: 36px; object-fit: contain; border-radius: 3px; background: var(--color-bg-secondary); display: block; }
+.pnp-board-text { display: flex; flex-direction: column; min-width: 0; }
+.pnp-board-text strong { font-size: 13px; }
+.pnp-board-text small { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pnp-board-current { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center; }
+.pnp-board-change { font-size: 12px; padding: 4px 10px; }
+
+/* Component list (ComponentList.tsx); `hot` = highlighted with the 3D. */
+.pnp-components-scroll { max-height: 320px; overflow: auto; }
+.pnp-comp-table td { white-space: nowrap; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.pnp-comp-table tbody tr { cursor: default; }
+.pnp-comp-table tbody tr:focus { outline: none; }
+.pnp-comp-table tbody tr.hot td {
+  background: color-mix(in srgb, var(--pnp-hot) 14%, transparent);
+}
+.pnp-comp-table tbody tr.hot td:first-child { box-shadow: inset 3px 0 0 var(--pnp-hot); }
+.pnp-comp-table thead th { position: sticky; top: 0; background: var(--color-bg-card); }
+/* The highlight shared by the component list and the 3D (BoardView reads it from
+ * :root). Brand has no "info"/selection token, and amber already means "has a
+ * lane" in the 3D, so this is an INSTRUMENT colour, like cnc's move-class
+ * colours — chosen to be distinct from amber, grey and the green board. */
+:root { --pnp-hot: #2563eb; }
+:root[data-theme='dark'] { --pnp-hot: #60a5fa; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) { --pnp-hot: #60a5fa; } }
+/* Framing buttons over the 3D (BoardView). */
+.pnp-view-fit { position: absolute; top: 8px; right: 10px; display: flex; gap: 6px; z-index: 2; }
+.pnp-view-fit button {
+  font-size: 12px; padding: 3px 10px; background: var(--color-bg-card);
+  border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm);
+}
+.pnp-view-fit button:hover { border-color: var(--color-amber); }
+/* Parts our machine does not place (hand, fab, DNP): one instrument colour in the
+ * 3D and the list, distinct from amber (has a lane), grey (no lane) and --pnp-hot. */
+:root { --pnp-hand: #8b5cf6; }
+.pnp-sw.hand { background: var(--pnp-hand); }
+.pnp-by { font-size: 11px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--color-border-subtle); white-space: nowrap; }
+.pnp-by.machine { border-color: var(--color-amber); }
+.pnp-by:not(.machine) { border-color: var(--pnp-hand); color: var(--pnp-hand); }
+/* Side / By filter pills on the component list. */
+.pnp-filters { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
+.pnp-filter-group { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.pnp-filter-label { color: var(--muted); font-size: 12px; margin-right: 2px; }
+.pnp-pill {
+  border: 1px solid var(--color-border); background: var(--color-bg-secondary); border-radius: 999px;
+  padding: 2px 10px; font-size: 12.5px;
+}
+.pnp-pill.on { border-color: var(--color-amber); background: var(--color-bg-card); font-weight: 600; }
+.pnp-pill-n { color: var(--muted); font-weight: 400; margin-left: 2px; }
+
+/* The line under the 3D, and the folded "About this view" (nothing on the canvas). */
+.pnp-about { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+.pnp-about details summary { cursor: pointer; }
+.pnp-about details > div { margin-top: 3px; }
+/* The hover card: the one text on the canvas. */
+.pnp-hover-card {
+  position: absolute; z-index: 3; pointer-events: none; max-width: 260px; padding: 7px 10px;
+  background: var(--color-bg-card); color: var(--ink); border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow-card); font-size: 11.5px; line-height: 1.45;
+}
+.pnp-hover-card strong { font-size: 13px; }
+.pnp-hover-card dl { margin: 3px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; }
+.pnp-hover-card dl > div { display: contents; }
+.pnp-hover-card dt { color: var(--muted); }
+.pnp-hover-card dd { margin: 0; overflow-wrap: anywhere; }
+/* Assembly-sequence group headers + step numbers in the component list. */
+.pnp-comp-table tr.pnp-seq-head td {
+  background: var(--color-bg-secondary); padding-top: 6px; white-space: normal; max-width: none;
+}
+.pnp-seq-basis { color: var(--muted); font-size: 11px; margin-left: 6px; }
+.pnp-step { color: var(--muted); text-align: right; }
+
+/* Gates column (gates/GatesPanel.tsx): AI · 3D (+ cards) · Gates. The panel's own
+ * look is in styles.css; only its place in this grid is here. */
+.pnp-simple { grid-template-columns: minmax(280px, 360px) minmax(0, 1fr) auto; }
+.pnp-simple > .gates-panel { width: 280px; align-self: start; max-height: 100%; }
+.pnp-simple > .gates-panel.gates-collapsed { width: 44px; }
+@media (max-width: 1100px) { .pnp-simple > .gates-panel { width: 220px; } }
+@media (max-width: 760px) {
+  .pnp-simple { grid-template-columns: 1fr; }
+  .pnp-simple > .gates-panel { width: auto; }
+}

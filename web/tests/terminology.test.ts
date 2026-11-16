@@ -358,6 +358,25 @@ const ALLOW: Allow[] = [
     file: 'cad/menu.tsx',
     re: /cheat sheet/,
   },
+  // ADDED 2026-10-16 with the materials tab. NEW rulings made here, as above.
+  {
+    why:
+      'X1/§10a — the materials tab lists the PURCHASED panel goods the shop holds (a supplier ' +
+      'product on a shelf, not the object in the job), and the pill word is the founder\'s own ' +
+      '(2026-10-16: "sheets (cnc stock) · filaments (3d)"). Pinned to the one label line; every ' +
+      'other string in the tab says "stock", and `bed` stays armed.',
+    file: 'materials/MaterialsTab.tsx',
+    term: /^sheets$/,
+    re: /const KIND_LABEL: Record<Kind, string> = \{ stock: 'sheets',/,
+  },
+  {
+    why:
+      'X4 — the localStorage key the founder named for the stock list ' +
+      "('2bee.app.materials.sheets'); a persistence contract, renaming it orphans saved stock.",
+    file: 'materials/stock.ts',
+    term: /^sheets$/,
+    re: /export const SHEETS_KEY = '2bee\.app\.materials\.sheets';/,
+  },
 ];
 
 /**

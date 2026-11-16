@@ -321,6 +321,17 @@ export function encodeLine(line: string): Uint8Array {
           'it would cost more bytes on the wire than the character count charges for'
       );
     }
+    // 🔴 A realtime byte (`?` `!` `~`) or a control byte (0x18 is soft-reset)
+    // is acted on by grblHAL's serial layer wherever it sits in the stream —
+    // inside a comment too. Realtime commands go through their own one-byte
+    // path; one inside a line is a name or a comment that was not sanitised,
+    // and it would hold, resume or reset the machine mid-program.
+    if (c === 0x3f || c === 0x21 || c === 0x7e || c < 0x20 || c === 0x7f) {
+      throw new RangeError(
+        `realtime or control byte 0x${c.toString(16)} in a g-code line: ${JSON.stringify(line)} — ` +
+          'grblHAL would act on it mid-stream, even inside a comment'
+      );
+    }
     out[i] = c;
   }
   out[line.length] = 0x0a;
@@ -659,15 +670,43 @@ export class StreamPump {
       this.lastWriteAt = this.startedAt;
     }
     try {
-      for (;;) {
+      outer: for (;;) {
         const batch = this.streamer.nextLines();
         if (batch.length === 0) break;
-        for (const line of batch) {
+        for (let i = 0; i < batch.length; i++) {
+          /* 🔴 Re-asked before EVERY write. A batch is up to a buffer's worth of
+           * lines, and each write is awaited — Stop, an ALARM or an error can
+           * land between two of them. This loop used to write the rest of the
+           * batch regardless: lines after the operator's Stop, on the wire. The
+           * lines taken and never written go back, so `sent` stays the count
+           * that actually left. */
+          if (this.streamer.state !== 'streaming' && this.streamer.state !== 'done') {
+            this.streamer.withdraw(batch.length - i);
+            break outer;
+          }
+          const line = batch[i];
           const bytes = encodeLine(line);
-          await this.link.write(bytes);
+          /* 🔴 A WRITE THAT FAILS ENDS THE STREAM. It used to propagate out of
+           * `pump()` — unhandled when the pump was kicked by an `ok` — with the
+           * line already counted as sent and the streamer still `streaming`.
+           * The next `ok` carried on from the line AFTER the one that never left:
+           * measured, a lost `G0 Z20` retract put the following XY rapid at Z5.
+           * A program with a hole in it is not the program that was planned, so
+           * nothing after the hole may go out. */
+          try {
+            await this.link.write(bytes);
+          } catch (e) {
+            this.streamer.stop(
+              `a write to the controller failed at line ${this.streamer.sent - (batch.length - 1 - i)} ` +
+                `(${e instanceof Error ? e.message : String(e)}) — the stream was stopped so nothing after ` +
+                'that line is sent. The line itself may have reached the controller in part.'
+            );
+            this.streamer.withdraw(batch.length - i);
+            break outer;
+          }
           this.bytes += bytes.length;
           this.lastWriteAt = this.now();
-          this.emit({ t: 'sent', line, lineNumber: this.streamer.sent });
+          this.emit({ t: 'sent', line, lineNumber: this.streamer.sent - (batch.length - 1 - i) });
         }
       }
       this.announceState();
@@ -694,6 +733,13 @@ export class StreamPump {
    * before it calls.
    */
   realtime(name: RealtimeName, plant?: ProtocolPlant): Promise<void> {
+    /* 🔴 A soft reset ENDS the stream, here, before the byte goes out. `0x18`
+     * flushes the controller's RX buffer and planner; at rest (`Hold:0`,
+     * `Idle` in a dwell) grblHAL raises NO alarm, so nothing inbound ever told
+     * the streamer. It stayed `streaming` with lines outstanding, and the next
+     * `ok` — to any later line — resumed the program mid-way with the spindle
+     * off. Abort and the console's `0x18` both arrive through this method. */
+    if (name === 'reset') this.stop('soft reset (0x18) sent — the controller flushed its buffers');
     return this.link.write(realtimeBytes(name, plant));
   }
 

@@ -90,6 +90,16 @@ export function resolveMaterial(stated: string | undefined | null, library: read
   };
 }
 
+/** The material a 2bee.cnc / Make plan may use: the store's, ONLY when it was stated (a saved session or a
+ *  control set it) and only when the library carries it. The store's initial 'Plywood' is a placeholder and
+ *  reads as `not-stated` here — planning on it printed "Material: Plywood, from your 2bee.cnc settings" for a
+ *  material nobody chose (2026-11-14). */
+export function operatorMaterial(s: { material: string; materialStated: boolean }, library: readonly string[]): MaterialVerdict {
+  return s.materialStated
+    ? resolveMaterial(s.material, library)
+    : { state: 'not-stated', why: 'no material has been chosen for this job. It scales every feed in the program, so the job is not planned on a placeholder.' };
+}
+
 /** The material a saved workpiece states, if it states one. Kept as its own
  *  function so the field name is written once. */
 export function materialOfWorkpiece(w: { material?: string } | null | undefined): string | undefined {

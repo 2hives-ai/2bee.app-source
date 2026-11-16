@@ -31,8 +31,9 @@
 // reason: `web/src/styles.css` keeps no palette of its own, so a hex literal
 // here would be a second copy of a value this app deliberately stopped holding.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { dragMode } from '../view3d/mouse';
 import type { MeshPart, MeshResult } from './mesh';
 import {
   AXES,
@@ -47,6 +48,7 @@ import {
   orthoFrustum,
   worldPerPixel,
   type Projection,
+  zoomTowardCursor,
 } from '../projection';
 // 🔴 THE GL GUARD AND THE ABSENCE PANEL ARE SHARED WITH THE CNC VIEWPORT, ON
 // PURPOSE. There are exactly two `WebGLRenderer` construction sites in this app
@@ -57,6 +59,7 @@ import {
 // was the boundary of the change that added it; a later pass may well want it
 // somewhere neutral, and nothing here depends on where it sits.
 import { GlUnavailable, tryRenderer } from '../Viewport';
+import { NAMED_VIEWS, gizmoAxes, viewForAxis, viewTitle, type ViewName } from './gizmo';
 
 /**
  * The origin triad's colours — X red, Y green, Z blue.
@@ -163,6 +166,22 @@ export interface CadPreviewProps {
    * return.
    */
   onCameraChange?: (camera: CadCamera) => void;
+  /**
+   * Give each SOLID part its own hue when the source states no colour (design
+   * viewer, founder 2026-10-16: "open up in 3d in colored"). APPEARANCE ONLY, and
+   * the viewer says so: a hue tells parts apart, it is not a material. A part
+   * whose source chose a colour keeps it; an unsound part keeps the warning.
+   */
+  partHues?: boolean;
+  /**
+   * A plain click (no drag) on a part: which part, and where on it (founder
+   * 2026-11-13: "point something on the object what is automatically put ... into
+   * the AI assistant so I can refer to a specific item"). Absent = clicking does
+   * nothing, as before. A click on empty space reports nothing; it never falls
+   * back to a plane the way double-click re-centre does, because a reference to a
+   * point that is not on the object would send the model a fake location.
+   */
+  onPickPart?: (pick: PartPick) => void;
   /**
    * OpenSCAD's `view/showAxes`. Draws the origin cross AND the corner gizmo —
    * `GLView.cc:196`, `:225` and `:198` all gate on this one flag.
@@ -621,6 +640,22 @@ function cssToColor(text: string): THREE.Color | null {
   return null;
 }
 
+/** What a click on the model points at. Millimetres, model coordinates. */
+export interface PartPick {
+  id: string;
+  /** The part's own label (`MeshPart.label`), in the source's vocabulary. */
+  label: string;
+  /** 1-based source line that produced the part. */
+  line: number;
+  point: [number, number, number];
+}
+
+/** The text a pick puts into an AI prompt: line and point, so the model can find it in the source. */
+export function pickReference(p: PartPick): string {
+  const f = (v: number) => (Math.round(v * 10) / 10).toString();
+  return `[${p.label} at line ${p.line}, point (${p.point.map(f).join(', ')}) mm]`;
+}
+
 export function CadPreview({
   result,
   stale,
@@ -629,6 +664,8 @@ export function CadPreview({
   projection,
   initialCamera = null,
   onCameraChange,
+  partHues = false,
+  onPickPart,
 }: CadPreviewProps) {
   const host = useRef<HTMLDivElement>(null);
   /* 🔴 THE CALLBACK GOES THROUGH A REF, and this is not ceremony. The setup
@@ -641,6 +678,13 @@ export function CadPreview({
   useEffect(() => {
     cameraOut.current = onCameraChange;
   }, [onCameraChange]);
+  /* Same reason as `cameraOut`: read from the `[]` setup effect's handlers. */
+  const pickOut = useRef(onPickPart);
+  useEffect(() => {
+    pickOut.current = onPickPart;
+  }, [onPickPart]);
+  const partsNow = useRef(result.parts);
+  partsNow.current = result.parts;
   const kit = useRef<{
     renderer?: THREE.WebGLRenderer;
     scene?: THREE.Scene;
@@ -653,6 +697,10 @@ export function CadPreview({
     frameScene?: (c: THREE.Vector3, r: number) => void;
     /** Re-frame on the last scene, on request. See the note where it is set. */
     refit?: () => void;
+    /** Snap the eye to a named view. Written by the setup effect. */
+    setView?: (v: ViewName) => void;
+    /** Move the corner gizmo's DOM to a camera. Written by the gizmo's effect. */
+    paintGizmo?: (theta: number, phi: number) => void;
     /** 🔴 THE ORBIT TARGET, NOT THE BOX CENTRE — see {@link framing}. */
     lastPivot?: THREE.Vector3;
     lastSpan?: number;
@@ -688,6 +736,15 @@ export function CadPreview({
      * honoured on load. */
   }>({ dispose: [], view: { axes: showAxes, scale: showScaleMarkers, projection } });
 
+  /* The gizmo hands its painter up through the kit, so the render loop can call
+   * it without this component re-rendering. `useCallback` with no deps because
+   * `kit` is a ref: an unstable identity here would re-run the gizmo's effect on
+   * every parent render and re-register the same function forever. */
+  const registerGizmo = useCallback((paint: ((theta: number, phi: number) => void) | undefined) => {
+    kit.current.paintGizmo = paint;
+  }, []);
+  const pickView = useCallback((v: ViewName) => kit.current.setView?.(v), []);
+
   /* Whether there is a renderer, MEASURED. `null` until the setup effect has
    * run — published as an absent `data-gl`, never as a word, because "not yet
    * measured" and "measured, and there is none" are different facts. */
@@ -717,6 +774,15 @@ export function CadPreview({
     // castShadow flag with no shadow map enabled is a setting that does nothing.
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    /* 🔴 THE CANVAS'S CSS SIZE IS SET HERE, ONCE. `resize` calls `setSize(w, h, false)`, which sets
+     * the drawing buffer (w·h × devicePixelRatio) and leaves the CSS size alone, so with no CSS
+     * size the canvas laid out at its BUFFER size: on any DPR-2 screen (the founder's Mac, every
+     * iPhone and iPad) the preview drew at twice its pane and showed only the top-left quarter of
+     * the scene (journey test, 2026-10-15). Following the pane by percentage keeps `false`'s point:
+     * the canvas never sizes its own container, so the ResizeObserver cannot loop. */
+    renderer.domElement.style.width = '100%';
+    renderer.domElement.style.height = '100%';
+    renderer.domElement.style.display = 'block';
     el.appendChild(renderer.domElement);
     renderer.domElement.setAttribute('data-testid', 'cad-preview-canvas');
 
@@ -1072,6 +1138,9 @@ export function CadPreview({
     let viewW = 1;
     let viewH = 1;
     let lastTheme: string | null = null;
+    /** What the corner gizmo was last painted for. See the paint call in `tick`. */
+    let paintedTheta = Number.NaN;
+    let paintedPhi = Number.NaN;
     /** What `applyProjection` last built for. Compared once per frame. */
     let builtProjection: Projection | null = null;
 
@@ -1094,6 +1163,14 @@ export function CadPreview({
        ⚠ AND "FOV" IS THE ZOOM, NOT A SECOND NUMBER. There is one scalar,
        `radius`; the orthographic half-height is derived from it. See
        {@link CadCamera}. */
+    /* 🔴 RESET FIRST. `kit` is a ref, so it outlives this effect: under React
+       StrictMode (the dev server) this effect runs, is torn down and runs again,
+       and the second run starts the orbit at its defaults while a `framedOnce`
+       left `true` by the first run stops the `[result]` effect from framing.
+       The model then opened zoomed into a corner on every dev load, while `Fit`
+       framed it correctly (measured 2026-10-15: radius 288 → 200, target
+       [60,52.5,0] → origin, between the two runs). */
+    kit.current.framedOnce = false;
     const seed = readCamera(initialCamera);
     if (seed) {
       theta = seed.theta;
@@ -1178,15 +1255,62 @@ export function CadPreview({
     };
 
     const dom = renderer.domElement;
+    /* A CLICK is a press and release that moved under 4 px in total, left button
+     * only. Anything more is a pan or orbit and must not also pick. */
+    let pressX = 0;
+    let pressY = 0;
+    let pressMoved = 0;
+    let pressButton = -1;
+    let pickMarker: THREE.Mesh | null = null;
+    const pick = (e: PointerEvent) => {
+      if (!pickOut.current) return;
+      const r = dom.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return;
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(
+        new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1),
+        camera,
+      );
+      const hit = ray.intersectObjects(
+        scene.children.filter((o) => o.name.startsWith('part:')),
+        false,
+      )[0];
+      const part = hit ? partsNow.current.find((p) => `part:${p.id}` === hit.object.name) : undefined;
+      dom.setAttribute('data-pick', part ? part.id : 'none');
+      if (!hit || !part) return;
+      /* A dot where the click landed. It is not a part, so it is never picked or
+       * re-centred on, and the mesh rebuild removes it: after a change the old
+       * point may no longer be on the object. */
+      if (pickMarker) {
+        scene.remove(pickMarker);
+        pickMarker.geometry.dispose();
+        (pickMarker.material as THREE.Material).dispose();
+      }
+      pickMarker = new THREE.Mesh(
+        new THREE.SphereGeometry(worldPerPixel(radius, viewH) * 5, 16, 12),
+        new THREE.MeshBasicMaterial({ color: 0xe5484d, depthTest: false }),
+      );
+      pickMarker.name = 'pick-marker';
+      pickMarker.renderOrder = 999;
+      pickMarker.position.copy(hit.point);
+      scene.add(pickMarker);
+      pickOut.current({ id: part.id, label: part.label, line: part.line, point: [hit.point.x, hit.point.y, hit.point.z] });
+    };
     const down = (e: PointerEvent) => {
+      pressX = e.clientX;
+      pressY = e.clientY;
+      pressMoved = 0;
+      pressButton = e.button;
       dragging = true;
-      panning = e.button === 2 || e.shiftKey;
+      /* Founder 2026-10-16, every 3D: left-drag MOVES (pans; shift too), right-drag (or alt+left) ROTATES. */
+      panning = dragMode(e) === 'pan';
       lx = e.clientX;
       ly = e.clientY;
       (e.target as Element).setPointerCapture?.(e.pointerId);
     };
     const move = (e: PointerEvent) => {
       if (!dragging) return;
+      pressMoved = Math.max(pressMoved, Math.hypot(e.clientX - pressX, e.clientY - pressY));
       const dx = e.clientX - lx;
       const dy = e.clientY - ly;
       lx = e.clientX;
@@ -1216,17 +1340,105 @@ export function CadPreview({
       place();
       cameraMoved();
     };
-    const up = () => {
+    const up = (e: PointerEvent) => {
+      const wasClick = dragging && e.type === 'pointerup' && pressButton === 0 && pressMoved < 4 && !e.altKey && !e.shiftKey;
       dragging = false;
       panning = false;
+      if (wasClick) pick(e);
     };
     const wheel = (e: WheelEvent) => {
       e.preventDefault();
+      const before = radius;
       radius = Math.min(200000, Math.max(1, radius * (e.deltaY > 0 ? 1.12 : 0.9)));
+      /* 🔴 ZOOM TOWARD THE POINTER. The line above is untouched — same factor,
+       * same direction, still byte-identical to the other viewport and still
+       * matching OpenSCAD. What this adds is the LATERAL shift that keeps the
+       * thing you are pointing at under the pointer; zooming toward the middle
+       * of the screen while the part you are looking at sits in a corner is what
+       * makes a 3D view feel like it is fighting you. See `zoomTowardCursor`.
+       *
+       * ⚠ ONE DEFINITION, NOT A COPY. Both viewports call the same function in
+       * `projection.ts`, which they already both import, so there is no second
+       * copy for the parity test to have to police. */
+      {
+        const r = dom.getBoundingClientRect();
+        const z = zoomTowardCursor({
+          offsetX: e.clientX - r.left - r.width / 2,
+          offsetY: e.clientY - r.top - r.height / 2,
+          viewH,
+          before,
+          after: radius,
+          theta,
+          phi,
+        });
+        target.x += z.x;
+        target.y += z.y;
+      }
       place();
       cameraMoved();
     };
+    /**
+     * DOUBLE-CLICK TO RE-CENTRE THE VIEW ON WHAT IS UNDER THE POINTER.
+     *
+     * 🔴 THIS IS THE "CENTRE OF VIEW" HALF OF THE FOUNDER'S ASK (2026-09-09,
+     * *"2bee.cad mouse interaction, mouse, center of view"*). Orbit turns about
+     * `target`, and `target` was only ever set by `Fit` or by a pan — so
+     * inspecting a corner of a big part meant orbiting about a point somewhere
+     * off in the middle of the model and chasing the view with pans. Choosing
+     * the pivot is what makes orbit feel like it is about the thing you are
+     * looking at.
+     *
+     * ⚠ IT MOVES ONLY `target`. Angles and radius are untouched: the view does
+     * not jump, it re-anchors. A re-centre that also re-framed would be `Fit`
+     * wearing a different gesture, and this lane already keeps those apart.
+     *
+     * 🔴 AND A MISS IS NOT A NO-OP. Raycasting the part meshes answers "what
+     * solid is under the cursor"; when the answer is nothing — background, a
+     * gap, a 2D plate seen edge-on — falling through to the horizontal plane
+     * through the CURRENT pivot gives a defensible answer in the same units
+     * rather than a click that silently does nothing. A control that sometimes
+     * does nothing and never says so teaches that the app is unreliable.
+     * `data-pivot-from` publishes which of the two happened, so a test can tell
+     * a hit from a fallback and so can anyone reading the DOM.
+     */
+    const recentre = (e: MouseEvent) => {
+      e.preventDefault();
+      const r = dom.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return;
+      const ndc = new THREE.Vector2(
+        ((e.clientX - r.left) / r.width) * 2 - 1,
+        -((e.clientY - r.top) / r.height) * 2 + 1,
+      );
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(ndc, camera);
+      /* Only the PART meshes. The ground plane, the grid, the rulers and the
+       * pivot triad are instruments; re-centring on the instrument that marks
+       * the centre would be a gesture that reports success and does nothing. */
+      const parts = scene.children.filter((o) => o.name.startsWith('part:'));
+      const hit = ray.intersectObjects(parts, false)[0];
+      let from: 'part' | 'plane' | 'none' = 'none';
+      if (hit) {
+        target.copy(hit.point);
+        from = 'part';
+      } else {
+        /* The horizontal plane through the current pivot. `intersectPlane`
+         * returns null when the ray is parallel to it — edge-on views — and
+         * that is the one case where nothing sensible exists to pick. */
+        const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -target.z);
+        const at = new THREE.Vector3();
+        if (ray.ray.intersectPlane(plane, at)) {
+          target.copy(at);
+          from = 'plane';
+        }
+      }
+      dom.setAttribute('data-pivot-from', from);
+      if (from === 'none') return;
+      place();
+      cameraMoved();
+    };
+
     const ctx = (e: Event) => e.preventDefault();
+    dom.addEventListener('dblclick', recentre);
     dom.addEventListener('pointerdown', down);
     dom.addEventListener('pointermove', move);
     dom.addEventListener('pointerup', up);
@@ -1281,6 +1493,31 @@ export function CadPreview({
       const s = kit.current.lastSpan;
       if (!c || !s) return;
       kit.current.frameScene?.(c, s);
+    };
+
+    /**
+     * Snap to a named view. The corner gizmo and the bottom bar are its only
+     * callers.
+     *
+     * 🔴 IT MOVES THE EYE AND NOTHING ELSE — `target` and `radius` are
+     * untouched. A "Top" that also re-framed would silently throw away a zoom
+     * the operator had set, which is the same defect `refit` exists to make
+     * DELIBERATE rather than automatic. Looking from above and looking at the
+     * whole model are two requests, and the bar offers both separately.
+     *
+     * ⚠ `cameraMoved()` is called for the same reason `frameScene` calls it: a
+     * view the operator chose is part of the camera the next session restores.
+     */
+    kit.current.setView = (v: ViewName) => {
+      const want = NAMED_VIEWS[v];
+      theta = want.theta;
+      phi = want.phi;
+      place();
+      cameraMoved();
+      /* Paint immediately rather than waiting for the next frame: on a hidden
+       * or zero-sized pane the tick returns early, and a gizmo that lagged a
+       * click would read as a dead control. */
+      kit.current.paintGizmo?.(theta, phi);
     };
 
     const tick = () => {
@@ -1363,6 +1600,21 @@ export function CadPreview({
 
       renderer.render(scene, camera);
 
+      /* ── the corner gizmo's DOM, repainted only when the eye has moved ──
+       * 🔴 OUTSIDE THE `view.axes` GATE BELOW, and deliberately so. The removed
+       * WebGL gizmo shared OpenSCAD's single `showaxes` flag with the origin
+       * cross and the rulers. This one is a DOM control with click targets —
+       * hiding it with the axes would take away the only way to snap the view,
+       * on the same keystroke that hides a decoration. The bar and the gizmo are
+       * CONTROLS; the cross and the rulers are INSTRUMENTS.
+       *
+       * ⚠ TWO FLOAT COMPARES PER FRAME, and the paint runs only on a change. */
+      if (theta !== paintedTheta || phi !== paintedPhi) {
+        paintedTheta = theta;
+        paintedPhi = phi;
+        kit.current.paintGizmo?.(theta, phi);
+      }
+
       /* 🔴 THE CORNER GIZMO GOES WITH THE AXES, BECAUSE IT DOES IN OPENSCAD.
        * `GLView.cc:225` is `if (showaxes) GLView::showSmallaxes(axescolor)` —
        * the same flag that draws the origin cross at `:196` and gates the scale
@@ -1380,14 +1632,34 @@ export function CadPreview({
        * ⚠ `setViewport`/`setScissor` take CSS pixels here, the same units
        * `setSize(w, h, false)` was given; three.js applies the pixel ratio.
        *
-       * 🔴 THE CORNER GIZMO IS REMOVED. The founder's original request was
-       * "move the xyz arrow to the corner", but the user now wants it near
-       * the object instead — like the CNC viewport's triad at the machine
-       * origin. The pivot triad at the orbit centre already serves this
-       * purpose, so the corner gizmo rendering is disabled.
+       * 🔴 THE WEBGL CORNER GIZMO IS GONE, AND A DOM ONE IS BACK. Both halves
+       * of that are founder rulings and the second does not erase the first:
        *
-       * The gizmo scene/camera are still built (for the pivot triad's
-       * shared axisArrow helper) but not rendered into a scissor box. */
+       *   2026-08-x  "move the xyz arrow to the corner" — built here, scissored.
+       *   later      the arrows were wanted NEAR THE OBJECT instead, like the
+       *              CNC tab's triad; this pass was disabled and the pivot triad
+       *              at the orbit centre became the orientation indicator.
+       *   2026-09-09 "I like the top right corner xyz, and menu structure on the
+       *              bottom" — pointing at a product-page 3D viewer.
+       *
+       * ⚠ THE TWO INDICATORS ANSWER DIFFERENT QUESTIONS, which is why both now
+       * stand: the pivot triad is in the WORLD and says what the view turns
+       * about (a pan moves it); the corner widget is on the SCREEN and says
+       * which way the camera points (nothing moves it). The old corner gizmo was
+       * removed for being read as the first.
+       *
+       * 🔴 AND THE REPLACEMENT IS DOM, NOT A SECOND SCISSORED PASS — see
+       * `CornerGizmo` at the foot of this file. The ask is click-to-orient, and
+       * a WebGL widget cannot be clicked without a raycaster and a second
+       * camera; the DOM one is computed from the SAME `theta`/`phi` this loop
+       * orbits with, so it cannot disagree with the picture.
+       *
+       * ⚠ CORRECTED 2026-09-11: this comment used to end *"The gizmo scene/camera
+       * are still built (for the pivot triad's shared axisArrow helper) but not
+       * rendered into a scissor box."* **They are not built — `gizmoScene` and
+       * `gizmoCamera` do not exist in this file.** `axisArrow` is shared, the
+       * scene is not, and a reader looking for a disabled render pass would have
+       * gone hunting for code that had already been deleted. */
     };
     tick();
 
@@ -1404,6 +1676,7 @@ export function CadPreview({
        * old one. */
       if (cameraTimer !== null) clearTimeout(cameraTimer);
       ro.disconnect();
+      dom.removeEventListener('dblclick', recentre);
       dom.removeEventListener('pointerdown', down);
       dom.removeEventListener('pointermove', move);
       dom.removeEventListener('pointerup', up);
@@ -1625,6 +1898,7 @@ export function CadPreview({
       key.shadow.camera.updateProjectionMatrix();
     }
 
+    let hueIndex = 0;
     for (const p of result.parts) {
       const geo = track(new THREE.BufferGeometry());
       geo.setAttribute('position', new THREE.BufferAttribute(p.positions, 3));
@@ -1646,7 +1920,10 @@ export function CadPreview({
           depthWrite: !plan.transparent,
         }),
       );
-      if (plan.colour === null) {
+      if (plan.colour === null && partHues && paint === 'solid') {
+        /* Golden-angle hue per solid: neighbours never share a colour. */
+        mat.color = new THREE.Color().setHSL(((hueIndex++ * 137.508) % 360) / 360, 0.55, 0.55);
+      } else if (plan.colour === null) {
         /* Only the theme-driven materials go in these lists. A material whose
          * colour the SOURCE chose must not be re-tinted by `applyPalette` on
          * the next theme change — that is how a red part quietly becomes amber
@@ -1762,7 +2039,7 @@ export function CadPreview({
         kit.current.frameScene?.(kit.current.lastPivot, frame.span);
       }
     }
-  }, [result]);
+  }, [result, partHues]);
 
   /**
    * 🔴 THE TOGGLES, PUSHED INTO THE RENDER LOOP RATHER THAN CLOSED OVER.
@@ -1841,6 +2118,12 @@ export function CadPreview({
       data-gl={gl ? (gl.ok ? 'ok' : 'unavailable') : undefined}
       style={{ position: 'relative', width: '100%', height: '100%', minHeight: 260 }}
     >
+      {/* 🔴 NOT RENDERED WITHOUT A RENDERER. With no WebGL there is no camera
+          to orient, so every end of this widget would be a dead control — the
+          same rule the `Fit` button follows two blocks down, and the reason that
+          slot swaps in a sentence instead of a disabled button. */}
+      {gl?.ok ? <CornerGizmo onPick={pickView} register={registerGizmo} /> : null}
+
       {gl && !gl.ok ? (
         /* 🔴 THE ALARM BLOCK AND THE STALE BANNER STAY. They are ordinary markup
          * and they carry the two facts that matter most when there is no
@@ -1890,8 +2173,8 @@ export function CadPreview({
            * The picture cannot say that for itself, so it is said here and on
            * the `Fit` control — the two places a hand is already going. */
           title={
-            'Drag to orbit · shift-drag or right-drag to pan · wheel to zoom — the same directions as ' +
-            'the CNC tab’s viewport and as OpenSCAD. ' +
+            'Left-drag (or shift-drag) to move · right-drag (or alt-drag) to rotate · wheel to zoom toward the pointer · ' +
+            'DOUBLE-CLICK to re-centre the view on what is under the cursor — the same on every 3D view in this app. ' +
             'The coloured X/Y/Z arrows mark the point all three turn about, NOT [0,0,0] — the plain ' +
             'grey cross with the dashed negative arms is the origin.'
           }
@@ -2074,6 +2357,46 @@ export function CadPreview({
           </div>
         )}
 
+      </div>
+
+      {/* ══════════════════════════════════════════════════════════════════
+          THE BOTTOM STRIP — its own container, and it was inside the column
+          for exactly one test run
+          ══════════════════════════════════════════════════════════════════
+
+          🔴 THE OVERLAY COLUMN IS `top: 8` AND CONTENT-HEIGHT. A bar placed in
+          it renders at the TOP of the pane — so the "bottom bar" the founder
+          asked for appeared under the corner gizmo and, being 72 px of SVG
+          away, the gizmo INTERCEPTED THE CLICK ON `Fit`. Playwright's log named
+          it exactly: *"<svg data-testid="cad-gizmo"> intercepts pointer
+          events"*.
+
+          ⚠ IT LOOKED RIGHT IN EVERY OTHER RESPECT — painted, styled, buttons
+          live — and only a real click found it. That is twice in one change
+          that a control was visibly perfect and functionally dead, once by
+          z-order and once by anchoring.
+
+          ⚠ AND THE COLUMN'S OWN COMMENT SAYS *"Everything here is anchored to
+          the TOP, so no overlay can reach the bottom-left corner at any pane
+          size"* — written when the gizmo lived in the bottom LEFT of the canvas.
+          The gizmo is now top-RIGHT and this strip is bottom-right, so that
+          guarantee is not the one that matters any more; what matters is that
+          the two are at opposite ends of the pane. Stated here rather than
+          deleted there, because the sentence was true when written. */}
+      <div
+        style={{
+          position: 'absolute',
+          left: 8,
+          right: 8,
+          bottom: 8,
+          display: 'flex',
+          justifyContent: 'flex-end',
+          /* Same rule as the column: transparent to the pointer, children opt
+           * back in. A dead band across the foot of a viewport is a viewport
+           * that has stopped orbiting near the bottom edge. */
+          pointerEvents: 'none',
+        }}
+      >
         {/* 🔴 NO DEAD CONTROLS IN THE DEGRADED STATE. With no renderer there is
             no orbit, no pan, no zoom and nothing for `Fit` to fit — `refit` is
             never assigned, so the button would render, look live, and do NOTHING
@@ -2088,7 +2411,52 @@ export function CadPreview({
             Nothing this app has produced has ever been cut.
           </div>
         ) : (
-          <div style={{ alignSelf: 'flex-end', pointerEvents: 'auto' }}>
+          /* ══════════════════════════════════════════════════════════════
+             THE BOTTOM BAR (founder, 2026-09-09: *"menu structure on the
+             bottom"*, pointing at a product-page 3D viewer)
+             ══════════════════════════════════════════════════════════════
+
+             🔴 IT CARRIES THE VIEWPORT'S OWN CAMERA ACTIONS AND NOTHING ELSE.
+             Axes, scale markers and the projection mode are `CadTab`'s menu
+             items, bound to the persisted layout; copying them here would give
+             every one of those settings TWO controls and one of them would
+             eventually stop matching. **A duplicated control is a drift source,
+             not a convenience.** What is here is what did not exist before —
+             named views — plus `Fit`, which moved rather than being copied.
+
+             ⚠ AND `Fit` IS NOT A VIEW. The seven named views move the EYE and
+             leave the zoom and the pan alone; `Fit` re-frames. They are separate
+             requests and the bar keeps them visibly apart, because a "Top" that
+             silently re-framed is the defect `refit` was made explicit to
+             avoid. */
+          <div
+            data-testid="cad-preview-bar"
+            style={{
+              alignSelf: 'stretch',
+              display: 'flex',
+              gap: 6,
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              justifyContent: 'flex-end',
+              pointerEvents: 'auto',
+            }}
+          >
+            {(['iso', 'top', 'front', 'right'] as ViewName[]).map((v) => (
+              <button
+                key={v}
+                type="button"
+                data-testid={`cad-view-${v}`}
+                onClick={() => kit.current.setView?.(v)}
+                title={viewTitle(v)}
+              >
+                {v === 'iso' ? 'Iso' : v[0].toUpperCase() + v.slice(1)}
+              </button>
+            ))}
+            {/* The other three — back, left, bottom — are on the gizmo's
+                unlabelled ends rather than here. Seven buttons in a bar over a
+                400-pixel pane is a wall; the gizmo already offers all six
+                directions and says which is which by pointing. */}
+            <span aria-hidden style={{ width: 1, alignSelf: 'stretch', background: 'var(--line)', margin: '0 2px' }} />
             <button
               type="button"
               data-testid="cad-preview-fit"
@@ -2107,6 +2475,157 @@ export function CadPreview({
         )}
       </div>
     </div>
+  );
+}
+
+
+/**
+ * THE CORNER GIZMO — six clickable axis ends, painted from `theta`/`phi`.
+ *
+ * 🔴 IT IS PAINTED IMPERATIVELY AND HOLDS NO REACT STATE. The camera moves on
+ * every frame of a drag; a `setState` per frame on the one surface whose entire
+ * interaction is dragging is the stutter, not the storage — the same reasoning
+ * that made `onCameraChange` a debounced ref rather than a state setter. So the
+ * render loop calls `paintGizmo`, which writes attributes on nodes it already
+ * holds.
+ *
+ * ⚠ THE NEGATIVE ENDS ARE NOT REORDERED BY DEPTH. In SVG, "behind" means
+ * "earlier in the document", and reordering would mean React and this painter
+ * both owning child order. Depth is carried by OPACITY and RADIUS instead, which
+ * is enough to tell a near end from a far one and cannot fight the reconciler.
+ */
+function CornerGizmo({
+  onPick,
+  register,
+}: {
+  onPick: (v: ViewName) => void;
+  register: (paint: ((theta: number, phi: number) => void) | undefined) => void;
+}) {
+  const ends = useRef(new Map<string, { g: SVGGElement; line: SVGLineElement; dot: SVGCircleElement; text: SVGTextElement | null }>());
+
+  useEffect(() => {
+    const paint = (theta: number, phi: number) => {
+      const R = 26;
+      for (const a of gizmoAxes({ theta, phi })) {
+        const node = ends.current.get(`${a.axis}${a.sign}`);
+        if (!node) continue;
+        const x = a.x * R;
+        /* ⚠ SVG's y runs DOWN and the gizmo's runs UP. One negation, here, at
+         * the single point where the two coordinate systems meet. */
+        const y = -a.y * R;
+        node.line.setAttribute('x2', String(x));
+        node.line.setAttribute('y2', String(y));
+        node.dot.setAttribute('cx', String(x));
+        node.dot.setAttribute('cy', String(y));
+        /* Nearer ends are bigger and more solid. The floor is not 0: an end
+         * pointing straight away still has to be CLICKABLE, and an invisible
+         * control is a dead one. */
+        const near = (a.depth + 1) / 2;
+        node.dot.setAttribute('r', String(a.sign === 1 ? 4 + near * 2 : 3 + near * 1.5));
+        node.g.setAttribute('opacity', String(0.35 + near * 0.65));
+        if (node.text) {
+          node.text.setAttribute('x', String(x));
+          node.text.setAttribute('y', String(y + 3.5));
+        }
+      }
+    };
+    register(paint);
+    return () => register(undefined);
+  }, [register]);
+
+  const put = (key: string) => (g: SVGGElement | null) => {
+    if (!g) {
+      ends.current.delete(key);
+      return;
+    }
+    const line = g.querySelector('line');
+    const dot = g.querySelector('circle');
+    if (line && dot) ends.current.set(key, { g, line, dot, text: g.querySelector('text') });
+  };
+
+  const COLOUR: Record<'x' | 'y' | 'z', string> = { x: '#e5484d', y: '#46a758', z: '#3b82f6' };
+
+  return (
+    <svg
+      data-testid="cad-gizmo"
+      width={72}
+      height={72}
+      viewBox="-36 -36 72 72"
+      role="group"
+      aria-label="View orientation — click an axis to look down it"
+      style={{
+        position: 'absolute',
+        top: 8,
+        right: 8,
+        pointerEvents: 'auto',
+        /* 🔴 ABOVE THE CANVAS, AND THIS WAS A REAL DEFECT FOR ONE RUN. The
+         * gizmo is mounted BEFORE the canvas host in the tree, so without a
+         * stacking context the canvas — `position: absolute; inset: 0` — sits on
+         * top and swallows every click. It looked perfect: painted, tracking the
+         * camera, six coloured ends, and not one of them pressable.
+         *
+         * ⚠ IT PAINTED CORRECTLY THROUGHOUT, which is why only a browser test
+         * could find it. `e2e` caught it on the click and the unit tests could
+         * not have: the geometry was right, the markup was right, and the widget
+         * was six dead controls — the exact failure the degraded-state gate in
+         * `gl-absent.test.ts` exists to prevent, arriving through z-order
+         * instead of through a missing renderer.
+         *
+         * `2` clears the canvas (unstacked) and stays under the overlay column
+         * below, which carries the audit text and must not be covered. */
+        zIndex: 2,
+        /* The canvas behind is dark or light with the theme; the gizmo's own
+         * ground is a token so it stays legible in both without a second
+         * palette. */
+        background: 'color-mix(in srgb, var(--bg) 55%, transparent)',
+        borderRadius: '50%',
+      }}
+    >
+      {(['x', 'y', 'z'] as const).flatMap((axis) =>
+        ([1, -1] as const).map((sign) => {
+          const view = viewForAxis(axis, sign);
+          const key = `${axis}${sign}`;
+          return (
+            <g key={key} ref={put(key)} style={{ cursor: 'pointer' }} onClick={() => onPick(view)}>
+              <title>{viewTitle(view)}</title>
+              {/* Only the positive ends draw a shaft: six lines through one
+                  point is a star, not an orientation. */}
+              <line
+                x1={0}
+                y1={0}
+                x2={0}
+                y2={0}
+                stroke={COLOUR[axis]}
+                strokeWidth={sign === 1 ? 1.6 : 0}
+                strokeLinecap="round"
+              />
+              <circle
+                cx={0}
+                cy={0}
+                r={4}
+                fill={sign === 1 ? COLOUR[axis] : 'var(--bg)'}
+                stroke={COLOUR[axis]}
+                strokeWidth={1.2}
+                data-testid={`cad-gizmo-${view}`}
+              />
+              {sign === 1 ? (
+                <text
+                  x={0}
+                  y={0}
+                  textAnchor="middle"
+                  fontSize={8}
+                  fontWeight={700}
+                  fill="var(--bg)"
+                  style={{ pointerEvents: 'none' }}
+                >
+                  {axis.toUpperCase()}
+                </text>
+              ) : null}
+            </g>
+          );
+        }),
+      )}
+    </svg>
   );
 }
 

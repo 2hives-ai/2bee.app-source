@@ -151,7 +151,15 @@ impl PostResult {
 /// `-0.000` is legal G-code but reads as a defect in a diff; normalise it.
 fn fmt(v: f64, decimals: usize) -> String {
     let v = if v.abs() < 5e-7 { 0.0 } else { v };
-    format!("{v:.decimals$}")
+    let s = format!("{v:.decimals$}");
+    // A small negative that ROUNDS to zero prints as `-0.000` — the 5e-7 snap
+    // above only catches values below the 6th decimal, not the printed one.
+    // Harmless to grblHAL, but it reads as a sign error on a datum, and a diff
+    // between two programs that differ only by it is noise.
+    match s.strip_prefix('-') {
+        Some(rest) if rest.bytes().all(|b| b == b'0' || b == b'.') => rest.to_string(),
+        _ => s,
+    }
 }
 
 fn near_eq(a: f64, b: f64) -> bool {
@@ -165,14 +173,90 @@ fn near_eq(a: f64, b: f64) -> bool {
 /// CODE: a part called `bracket (v2) G0 Z0.stl` emits a silently executed rapid.
 /// Parentheses are replaced rather than dropped so the name stays readable to
 /// the operator.
-fn sanitize(t: &str) -> String {
-    t.chars()
-        .map(|c| match c {
-            '(' | ')' => '_',
-            '\n' | '\r' | '%' => ' ',
-            other => other,
-        })
-        .collect()
+/// Text going into a `( comment )`. 🔴 ASCII ONLY, since 2026-10-14: the
+/// post wrote an em dash (`Z only — this plate…`) and the browser sender
+/// refuses any non-ASCII byte, so NO core-planned program could stream (found
+/// by the 2bee.cnc Jobs page journey). Common typographic characters map to
+/// their ASCII spelling; anything else becomes `_`. A comment is free text, so
+/// transliterating it changes no motion. `setup.rs` reads names through this
+/// same function.
+pub(crate) fn sanitize(t: &str) -> String {
+    let mut out = String::with_capacity(t.len());
+    for c in t.chars() {
+        match c {
+            '(' | ')' => out.push('_'),
+            // 🔴 grblHAL's realtime bytes. The serial layer picks them out of
+            // the stream BEFORE the line parser runs, so a comment does not
+            // protect them: a part named `PANEL~1!` holds the feed (`!`) and
+            // then resumes it (`~`) mid-program. `?` only reports status, and
+            // is stripped anyway — a byte that acts outside its line has no
+            // business in a name. Bytes >= 0x80 never get here as ASCII.
+            '?' | '!' | '~' => out.push('_'),
+            '\n' | '\r' | '%' => out.push(' '),
+            '\u{2014}' | '\u{2013}' | '\u{2212}' => out.push('-'),
+            '\u{00D7}' => out.push('x'),
+            '\u{00D8}' | '\u{2300}' => out.push('D'),
+            '\u{00B0}' => out.push_str("deg"),
+            '\u{2018}' | '\u{2019}' => out.push('\''),
+            '\u{201C}' | '\u{201D}' => out.push('"'),
+            '\u{2192}' => out.push_str("->"),
+            c if c.is_ascii() && !c.is_ascii_control() => out.push(c),
+            c if c == '\t' => out.push(' '),
+            _ => out.push('_'),
+        }
+    }
+    out
+}
+
+/// Maximum sagitta of a chord that stands in for an arc, mm.
+///
+/// ⚠ NOT grblHAL's `$12` default (0.002 mm), deliberately. grblHAL segments its
+/// OWN arcs inside the planner; ours arrive as lines over serial. At 0.002 mm
+/// an R3 corner becomes ~0.22 mm chords — ~270 lines/s at F3600, near what
+/// 115200 baud carries, and a starved planner stops and starts the cutter in
+/// the cut (burn marks, chatter). 0.01 mm gives ~0.49 mm chords (~120/s) and
+/// is far below what ply holds to.
+pub const ARC_FLATTEN_TOL_MM: f64 = 0.01;
+
+/// Points along an arc from `from` to `to` about `centre`, each chord within
+/// [`ARC_FLATTEN_TOL_MM`] of the arc. Z is spread evenly (a helix). The last
+/// point is exactly `to`. A start and end that coincide are a full circle.
+pub(crate) fn flatten_arc(from: Vec3, to: Vec3, centre: Vec2, cw: bool) -> Vec<Vec3> {
+    let r = ((from.x - centre.x).powi(2) + (from.y - centre.y).powi(2)).sqrt();
+    let a0 = (from.y - centre.y).atan2(from.x - centre.x);
+    let a1 = (to.y - centre.y).atan2(to.x - centre.x);
+    let mut sweep = a1 - a0;
+    if cw {
+        while sweep >= -1e-12 {
+            sweep -= std::f64::consts::TAU;
+        }
+    } else {
+        while sweep <= 1e-12 {
+            sweep += std::f64::consts::TAU;
+        }
+    }
+    if r < 1e-9 {
+        return vec![to];
+    }
+    // Chord of angle t has sagitta r(1 - cos(t/2)); solve for t at the tolerance.
+    let max_step = if ARC_FLATTEN_TOL_MM >= r {
+        std::f64::consts::PI
+    } else {
+        2.0 * (1.0 - ARC_FLATTEN_TOL_MM / r).acos()
+    };
+    let n = ((sweep.abs() / max_step).ceil() as usize).max(1);
+    let mut out = Vec::with_capacity(n);
+    for k in 1..n {
+        let f = k as f64 / n as f64;
+        let a = a0 + sweep * f;
+        out.push(Vec3::new(
+            centre.x + r * a.cos(),
+            centre.y + r * a.sin(),
+            from.z + (to.z - from.z) * f,
+        ));
+    }
+    out.push(to);
+    out
 }
 
 /// Every numeric word in a finished program must be a number.
@@ -450,6 +534,12 @@ struct ZProbe {
     /// coordinate. `None` = "probe where the tool already is", which is the
     /// Z-only convention when no plate position is declared.
     station: Option<(f64, f64)>,
+    /// The plate is put ON THE WORK for the touch (a corner plate, or a loose
+    /// plate probed where the tool stands) rather than mounted at a machine
+    /// position. Such a plate is still lying under the cutter when the probe
+    /// ends, so the program must stop for it to be taken off, and must stop
+    /// with the instruction to put it back before any re-reference.
+    on_work: bool,
 }
 
 /// Everything the X/Y half needs, resolved once so the two callers cannot
@@ -473,7 +563,7 @@ struct ProbeGeometry {
 
 impl ProbeGeometry {
     fn z_probe(&self) -> ZProbe {
-        ZProbe { top_mm: self.top_mm, station: Some((self.placement.x, self.placement.y)) }
+        ZProbe { top_mm: self.top_mm, station: Some((self.placement.x, self.placement.y)), on_work: true }
     }
 }
 
@@ -519,6 +609,9 @@ fn fixed_z_probe(machine: &Machine) -> Result<ZProbe, String> {
         // positioning move at all.
         station: (machine.probe_x != 0.0 || machine.probe_y != 0.0)
             .then_some((machine.probe_x, machine.probe_y)),
+        // "Where the tool already is" is wherever the operator jogged to — on
+        // the work. A plate at a declared machine position is mounted there.
+        on_work: machine.probe_x == 0.0 && machine.probe_y == 0.0,
     })
 }
 
@@ -669,9 +762,19 @@ fn emit_probe(
     opts: &PostOptions,
     z: &ZProbe,
     geom: Option<&ProbeGeometry>,
-) {
+) -> f64 {
     let d = opts.decimals;
     let safe_z = stock.z_datum.emit_z(machine.safe_z_mm, stock);
+    // 🔴 SAFE Z IS MEASURED FROM THE WORK, AND THE PLATE STANDS ON IT. A 15 mm
+    // plate under a 5 mm safe Z put its top face ten millimetres ABOVE every
+    // "retract" in this function: after `G10 L20 P1 Z15` the next `G0 Z5` was a
+    // rapid DOWN into the plate, and the corner passes' lateral rapids went
+    // through its wall (2026-11-15, `job multi-tool` with `touch_plate_mm` 15).
+    // So every move in here that has the plate beside or below it travels at
+    // `clear_z`: safe Z, or the probe's own retract distance above the plate's
+    // top, whichever is higher. With a plate thinner than safe Z that is safe
+    // Z, and the program is unchanged.
+    let clear_z = safe_z.max(z.top_mm + machine.probe_retract_mm);
 
     macro_rules! c {
         ($s:expr) => {
@@ -693,7 +796,7 @@ fn emit_probe(
     g.push_str("M5\n");
     // Any tool length offset in force would shift what the probe measures.
     g.push_str("G49\n");
-    g.push_str(&format!("G0 Z{}\n", fmt(safe_z, d)));
+    g.push_str(&format!("G0 Z{}\n", fmt(clear_z, d)));
     // Where the plate IS. For a fixed plate that is a machine position; for a
     // corner plate it is the workpiece's own corner, resolved through the workpiece's
     // placement — so a moved or turned workpiece moves this line with it.
@@ -735,11 +838,44 @@ fn emit_probe(
     ));
     g.push_str("G90\n");
     g.push_str(&format!("G10 L20 P1 Z{}\n", fmt(z.top_mm, d)));
-    g.push_str(&format!("G0 Z{}\n", fmt(safe_z, d)));
+    g.push_str(&format!("G0 Z{}\n", fmt(clear_z, d)));
 
-    let Some(geom) = geom else {
-        return;
-    };
+    if let Some(geom) = geom {
+        emit_probe_xy(g, machine, opts, geom, clear_z);
+    }
+
+    // 🔴 THE PLATE IS STILL ON THE WORK. Nothing told anyone to take it off: the
+    // program went from the last probe straight to `M3` and the first cut, with
+    // an aluminium plate lying where the operator put it — under the cutter for
+    // a probe "where the tool already is", hooked over a corner the profile
+    // runs round for an XY plate. So the program stops, and says why, before
+    // the spindle can start. A plate mounted at a machine position stays put
+    // and needs no stop; `top_mm` 0 is probing the work itself, with no plate.
+    if z.on_work && z.top_mm > 0.0 {
+        c!(&format!(
+            "{}take the touch plate off the work and out of the cutter's way, then resume",
+            crate::setup::PLATE_PREFIX
+        ));
+        g.push_str("M0\n");
+        // Whoever reached in may have jogged and changed the distance mode.
+        // Restate it, and lift Z alone before anything moves in X or Y.
+        g.push_str(&format!("G90 G{}\n", opts.work_offset));
+        g.push_str(&format!("G0 Z{}\n", fmt(clear_z, d)));
+    }
+    clear_z
+}
+
+/// The X and Y passes of an XYZ corner-plate probe, after the Z datum is set.
+/// Split out of [`emit_probe`] only so that function can end on the
+/// plate-removal stop for both kinds of probe; `clear_z` is its clear height.
+fn emit_probe_xy(
+    g: &mut String,
+    machine: &Machine,
+    opts: &PostOptions,
+    geom: &ProbeGeometry,
+    clear_z: f64,
+) {
+    let d = opts.decimals;
 
     // ---- X and Y, from the plate's WALL (side contact, radius term) --------
     //
@@ -777,7 +913,7 @@ fn emit_probe(
             g.push_str(&sanitize(note));
             g.push_str(" )\n");
         }
-        // Stand off outboard, at safe Z, then descend BESIDE the plate.
+        // Stand off outboard, at the clear height, then descend BESIDE the plate.
         g.push_str("G91\n");
         g.push_str(&format!("G0 {axis}{}\n", fmt(sign * reach, d)));
         g.push_str("G90\n");
@@ -822,7 +958,7 @@ fn emit_probe(
         g.push_str("G91\n");
         g.push_str(&format!("G0 {axis}{}\n", fmt(sign * machine.probe_retract_mm, d)));
         g.push_str("G90\n");
-        g.push_str(&format!("G0 Z{}\n", fmt(safe_z, d)));
+        g.push_str(&format!("G0 Z{}\n", fmt(clear_z, d)));
     };
 
     axis_pass(
@@ -1047,6 +1183,9 @@ pub fn post_grblhal(
     // plate — a fallback there would re-zero Z against a thickness nobody
     // declared for this setup.
     let mut z_probe: Option<ZProbe> = None;
+    // Where the preamble probe left Z, as an EMITTED value — above the plate's
+    // top, which can be above safe Z. `None` when no probe was written.
+    let mut probe_clear_z: Option<f64> = None;
     if machine.probe_enabled {
         // 🔴 THE NUMBERS EVERY PROBE BLOCK IS BUILT FROM, CHECKED BEFORE ONE IS
         // WRITTEN — the two distances and the two feeds, and OUTSIDE the plate
@@ -1084,8 +1223,8 @@ pub fn post_grblhal(
             // every later coordinate is taken from.
             ProbePlate::ZOnly => match fixed_z_probe(machine) {
                 Ok(z) => {
-                    comment!("Z zero from touch plate (Z only — this plate references no X or Y)");
-                    emit_probe(&mut g, machine, stock, opts, &z, None);
+                    comment!("Z zero from touch plate (Z only - this plate references no X or Y)");
+                    probe_clear_z = Some(emit_probe(&mut g, machine, stock, opts, &z, None));
                     z_probe = Some(z);
                 }
                 Err(e) => res.errors.push(e),
@@ -1145,7 +1284,7 @@ pub fn post_grblhal(
                         fmt(geom.radius_mm, 3)
                     ));
                     let z = geom.z_probe();
-                    emit_probe(&mut g, machine, stock, opts, &z, Some(&geom));
+                    probe_clear_z = Some(emit_probe(&mut g, machine, stock, opts, &z, Some(&geom)));
                     z_probe = Some(z);
                 }
                 // 🔴 Refused, not degraded to a Z-only probe. Silently dropping
@@ -1175,9 +1314,23 @@ pub fn post_grblhal(
 
     let mut last_feed = -1.0_f64;
     let mut spindle_running = false;
+    // A clamp move whose stop is shared with the cutter change right after it:
+    // the clamp comment is written, its `M0` is not, and the tool change's
+    // single `M0` serves both (`job.rs`, "ONE STOP, NOT TWO").
+    let mut stop_open = false;
     let mut spindle_off_reported = false;
+    let mut arcs_flattened_reported = false;
     let mut spindle_pwm_reported = false;
     let mut cur = Vec3::new(f64::NAN, f64::NAN, f64::NAN);
+    // 🔴 SET AFTER A PROBE: Z is at the plate-clear height and X/Y are wherever
+    // the plate was. The next rapid moves X/Y at that height FIRST and only then
+    // descends — a combined `G0 X Y Z` from there is a diagonal that drops onto
+    // a plate mounted beside the work while it travels away from it.
+    let mut xy_before_descent = false;
+    if let Some(cz) = probe_clear_z {
+        cur = Vec3::new(f64::NAN, f64::NAN, cz - z_off);
+        xy_before_descent = true;
+    }
 
     // Modal suppression: a word equal to the current position is omitted. NaN
     // means "position unknown", which must emit the word rather than assume it.
@@ -1312,10 +1465,25 @@ pub fn post_grblhal(
                 // The spindle is deliberately NOT restarted here. The caller
                 // emits SpindleOn afterwards, so the rpm belongs to the new
                 // tool rather than being inherited from the old one.
-                g.push_str(&format!("G0 Z{}\n", fmt(ez(machine.safe_z_mm), d)));
+                //
+                // When a clamp move opened this stop, the retract and M5 are
+                // already written and nothing may come between the two change
+                // comments and their one `M0` — every reader pairs a change
+                // comment with the `M0` that follows it.
+                if !std::mem::take(&mut stop_open) {
+                    g.push_str(&format!("G0 Z{}\n", fmt(ez(machine.safe_z_mm), d)));
+                }
                 if spindle_running {
                     g.push_str("M5\n");
                     spindle_running = false;
+                }
+                let next = path.moves[mi + 1..].iter().find(|n| n.kind != MoveKind::Comment).map(|n| n.kind);
+                // 🔴 SAID BEFORE THE STOP, NOT AFTER IT. The re-reference probes
+                // the moment Resume is pressed; written after the `M0` (where it
+                // was) the operator reads it only once the cutter is already
+                // descending onto wherever the plate is not.
+                if next == Some(MoveKind::Probe) && z_probe.as_ref().is_some_and(|z| z.on_work && z.top_mm > 0.0) {
+                    comment!("then put the touch plate back under the cutter - Z is probed from it as soon as you resume");
                 }
                 comment!(&format!("TOOL CHANGE -> {}", m.text));
                 g.push_str("M0\n");
@@ -1324,6 +1492,20 @@ pub fn post_grblhal(
                 // rather than assuming the machine is where it was.
                 cur = Vec3::new(f64::NAN, f64::NAN, f64::NAN);
                 last_feed = -1.0;
+                // 🔴 NO PROBE AND NO HAND-ZERO STOP AFTER THIS ONE: the program
+                // tells the person to set Z zero for the new cutter before
+                // resuming, which they do with the cutter TOUCHING the work. The
+                // next blocks were `M3` and a combined `G0 X Y Z` — the spindle
+                // started against the work and the lift dragged it across the
+                // top. So: absolute mode and the work offset restated (they had
+                // the controller), and a Z-only rapid to safe Z before the
+                // spindle or anything in X/Y. The probe and hand-zero paths
+                // already lift Z first and must keep their own next block.
+                if !matches!(next, Some(MoveKind::Probe) | Some(MoveKind::ManualZero)) {
+                    g.push_str(&format!("G90 G{}\n", opts.work_offset));
+                    g.push_str(&format!("G0 Z{}\n", fmt(ez(machine.safe_z_mm), d)));
+                    cur = Vec3::new(f64::NAN, f64::NAN, machine.safe_z_mm);
+                }
             }
 
             MoveKind::ClampChange => {
@@ -1345,8 +1527,22 @@ pub fn post_grblhal(
                     g.push_str("M5\n");
                     spindle_running = false;
                 }
+                // ONE stop for a clamp move and the cutter change that follows
+                // it (comments in between are prose, not motion).
+                let next = path.moves[mi + 1..].iter().find(|n| n.kind != MoveKind::Comment);
+                // Same reason as the tool change: a probe straight after this
+                // stop needs the plate back on the work BEFORE Resume.
+                if next.map(|n| n.kind) == Some(MoveKind::Probe)
+                    && z_probe.as_ref().is_some_and(|z| z.on_work && z.top_mm > 0.0)
+                {
+                    comment!("then put the touch plate back under the cutter - Z is probed from it as soon as you resume");
+                }
                 comment!(&format!("CLAMP CHANGE -> {}", m.text));
-                g.push_str("M0\n");
+                if next.map(|n| n.kind) == Some(MoveKind::ToolChange) {
+                    stop_open = true;
+                } else {
+                    g.push_str("M0\n");
+                }
                 // Z and XY are now unknown: the work-holding changed and the
                 // part may have moved. Invalidate everything.
                 cur = Vec3::new(f64::NAN, f64::NAN, f64::NAN);
@@ -1381,12 +1577,48 @@ pub fn post_grblhal(
                 // right and re-probing them would measure the new tool's radius
                 // against a datum that already holds.
                 comment!("re-reference Z from the touch plate (Z only: a new tool is a new LENGTH)");
-                emit_probe(&mut g, machine, stock, opts, z, None);
+                let cz = emit_probe(&mut g, machine, stock, opts, z, None);
                 // The probe emitted M5. If the caller does not restart the
                 // spindle, the next cutting move trips the "spindle is off"
                 // error below — which is the correct loud failure, not silence.
                 spindle_running = false;
+                cur = Vec3::new(f64::NAN, f64::NAN, cz - z_off);
+                xy_before_descent = true;
+            }
+
+            MoveKind::ManualZero => {
+                // 🔴 The cutter-change re-reference on a machine with NO probe
+                // (founder 2026-10-16). Only ever straight after a cutter
+                // change: anywhere else there is no stop for it to belong to,
+                // and a stray "set Z zero" mid-cut is refused, not written.
+                let prev = path.moves[..mi].iter().rev().find(|n| n.kind != MoveKind::Comment);
+                if prev.map(|n| n.kind) != Some(MoveKind::ToolChange) {
+                    res.errors.push(
+                        "a set-Z-zero-by-hand stop that does not follow a cutter change — \
+                         there is no stop for it to belong to"
+                            .into(),
+                    );
+                    break 'emit;
+                }
+                // The tool change above already retracted and stopped the
+                // spindle; this says so again rather than relying on it.
+                if spindle_running {
+                    g.push_str("M5\n");
+                    spindle_running = false;
+                }
+                comment!(&format!("{}{}", crate::setup::ZERO_PREFIX, m.text));
+                g.push_str("M0\n");
+                // 🔴 RESUME FROM THE NEW ZERO, Z FIRST. The person zeroed Z with
+                // the cutter TOUCHING the work, and may have jogged X/Y to do it
+                // and changed the distance mode doing so. So: absolute mode and
+                // the work offset restated, then a Z-ONLY rapid to safe Z,
+                // before any X/Y word. A combined `G0 X Y Z` from here would
+                // drag the cutter across the top of the work while it lifts.
+                // `rezero_lift_errors` re-checks this on the finished text.
+                g.push_str(&format!("G90 G{}\n", opts.work_offset));
+                g.push_str(&format!("G0 Z{}\n", fmt(ez(machine.safe_z_mm), d)));
                 cur = Vec3::new(f64::NAN, f64::NAN, machine.safe_z_mm);
+                last_feed = -1.0;
             }
 
             MoveKind::Dwell => {
@@ -1394,6 +1626,16 @@ pub fn post_grblhal(
             }
 
             MoveKind::Rapid => {
+                if std::mem::take(&mut xy_before_descent) && cur.z.is_finite() && m.to.z < cur.z {
+                    let over = Vec3::new(m.to.x, m.to.y, cur.z);
+                    let w = axis_words(&cur, &over, d, z_off);
+                    if !w.is_empty() {
+                        g.push_str("G0");
+                        g.push_str(&w);
+                        g.push('\n');
+                    }
+                    cur = over;
+                }
                 let w = axis_words(&cur, &m.to, d, z_off);
                 if !w.is_empty() {
                     g.push_str("G0");
@@ -1439,20 +1681,40 @@ pub fn post_grblhal(
 
             MoveKind::ArcCW | MoveKind::ArcCCW => {
                 if !machine.supports_arcs || !opts.emit_arcs {
-                    // Degrade to a straight move rather than emit an unsupported
-                    // code. Chord error is the caller's problem to avoid; say so
-                    // loudly.
-                    res.warnings
-                        .push("arc degraded to linear move (arcs disabled or unsupported)".into());
-                    let w = axis_words(&cur, &m.to, d, z_off);
-                    if !w.is_empty() {
-                        g.push_str("G1");
-                        g.push_str(&w);
-                        if m.feed > 0.0 && !near_eq(m.feed, last_feed) {
-                            g.push_str(&format!(" F{}", fmt(m.feed, 1)));
-                            last_feed = m.feed;
+                    // 🔴 FLATTENED TO A TOLERANCE, not to one chord. This used
+                    // to replace the whole arc with ONE straight G1 to its end
+                    // point and warn — the chord of an R11 outside corner cuts
+                    // ~3.2 mm into the part, and the program exited 0. The arc
+                    // is now walked in chords whose sagitta is at most
+                    // ARC_FLATTEN_TOL_MM (grblHAL's own `$12` default), with a
+                    // helix's Z spread evenly along it.
+                    if cur.x.is_nan() {
+                        res.errors.push("arc emitted before any positioning move".into());
+                        break 'emit;
+                    }
+                    let pts = flatten_arc(cur, m.to, m.centre, m.kind == MoveKind::ArcCW);
+                    let mut first = true;
+                    let mut prev = cur;
+                    for p in pts {
+                        let w = axis_words(&prev, &p, d, z_off);
+                        if !w.is_empty() {
+                            g.push_str("G1");
+                            g.push_str(&w);
+                            if first && m.feed > 0.0 && !near_eq(m.feed, last_feed) {
+                                g.push_str(&format!(" F{}", fmt(m.feed, 1)));
+                                last_feed = m.feed;
+                            }
+                            first = false;
+                            g.push('\n');
                         }
-                        g.push('\n');
+                        prev = p;
+                    }
+                    if !arcs_flattened_reported {
+                        res.warnings.push(format!(
+                            "arc degraded: flattened to G1 chords within {ARC_FLATTEN_TOL_MM} mm \
+                             (arcs disabled or unsupported)"
+                        ));
+                        arcs_flattened_reported = true;
                     }
                     cur = m.to;
                     block_feed = if m.feed > 0.0 {
@@ -1605,6 +1867,11 @@ pub fn post_grblhal(
     // check on the enum would have been green for a program that probed after
     // the first cut.
     res.errors.extend(audit_probe_program(&g));
+    res.errors.extend(rezero_lift_errors(&g, ez(machine.safe_z_mm)));
+    let (fitted, long) = fit_line_buffer(&g);
+    g = fitted;
+    res.errors.extend(long.errors);
+    res.warnings.extend(long.warnings);
 
     // 🔴 AND THE LAST THING ANY PROGRAM PASSES: every numeric word is a number.
     // The plan-side check at the top of this function reads `path.moves`; this
@@ -1621,6 +1888,60 @@ pub fn post_grblhal(
     res.gcode = g;
     res.blocks = blocks;
     res
+}
+
+/// grblHAL's line buffer: `LINE_BUFFER_SIZE` 257 = 256 characters + the
+/// terminator (`protocol.h`). 🔴 COMMENT BYTES COUNT. `protocol.c` stores every
+/// character of a `( … )` comment in the line buffer (it keeps them for
+/// `(MSG, …)` handling) and sets `overflow` past 256, so the controller answers
+/// `error:11` and a sender halts — on a comment, usually the one naming the
+/// clamp to move or the cutter to fit. Measured upstream 2026-11-15.
+pub(crate) const GRBLHAL_LINE_MAX: usize = 256;
+
+#[derive(Default)]
+struct LineFit {
+    errors: Vec<String>,
+    warnings: Vec<String>,
+}
+
+/// Every line of the finished program fits the controller's line buffer.
+///
+/// A whole-line comment that does not fit is CUT to fit and ends in `...`, so
+/// the line count — and every block's line span — is unchanged, and the stop it
+/// names still pairs with its `M0`. Cutting loses words the operator was meant
+/// to read, so it is SAID, line by line, in the warnings. A line carrying
+/// G-code that does not fit is refused: there is nothing to drop from it.
+fn fit_line_buffer(g: &str) -> (String, LineFit) {
+    let mut out = String::with_capacity(g.len());
+    let mut fit = LineFit::default();
+    for (i, line) in g.lines().enumerate() {
+        if line.len() <= GRBLHAL_LINE_MAX {
+            out.push_str(line);
+        } else if line.starts_with("( ") && line.ends_with(" )") && line.matches('(').count() == 1 {
+            // ASCII only by now (`sanitize`), so a byte index is a char index.
+            let keep = GRBLHAL_LINE_MAX - "... )".len();
+            out.push_str(&line[..keep]);
+            out.push_str("... )");
+            fit.warnings.push(format!(
+                "program line {}: a {}-character comment was cut to {GRBLHAL_LINE_MAX} — grblHAL \
+                 stores comment text in its 256-character line buffer and stops the program with \
+                 error:11 past it. The full text was: {}",
+                i + 1,
+                line.len(),
+                &line[2..line.len() - 2]
+            ));
+        } else {
+            out.push_str(line);
+            fit.errors.push(format!(
+                "program line {}: {} characters of G-code — grblHAL's line buffer holds {GRBLHAL_LINE_MAX} \
+                 and the controller would answer error:11 there",
+                i + 1,
+                line.len()
+            ));
+        }
+        out.push('\n');
+    }
+    (out, fit)
 }
 
 /// The code words of one line, uppercased, with `( … )` comments removed.
@@ -1708,6 +2029,94 @@ fn probe_distance_modes(gcode: &str) -> Vec<(usize, bool)> {
 ///     a `G38.2` is a travel; grblHAL applies the distance mode to probing
 ///     motion like any other motion, so an absolute one is a seek to a
 ///     coordinate in the very datum the probe is there to set.
+/// 🔴 After a set-Z-zero-by-hand stop the cutter is TOUCHING the work, and
+/// the person may have changed the distance mode while jogging. So the first
+/// block that moves anything after that `M0` must be a `G0` carrying ONLY a Z
+/// word, at or above safe Z, in absolute mode RE-STATED after the stop — never
+/// an X/Y move, never a combined move, never a cut. Read off the FINISHED
+/// text: the arm that writes the lift is a promise, this is the check.
+///
+/// `safe_z_emit` is safe Z as the post writes it (the datum offset applied).
+pub(crate) fn rezero_lift_errors(gcode: &str, safe_z_emit: f64) -> Vec<String> {
+    let lines: Vec<&str> = gcode.lines().collect();
+    let mut out = Vec::new();
+    let prefix = format!("( {}", crate::setup::ZERO_PREFIX.trim_end());
+    let mut i = 0;
+    while i < lines.len() {
+        if !lines[i].trim_start().starts_with(&prefix) {
+            i += 1;
+            continue;
+        }
+        let at = i + 1;
+        // The stop itself: the very next block.
+        let m0 = lines.get(i + 1).map(|l| code_words(l)) == Some(vec!["M0".to_string()]);
+        if !m0 {
+            out.push(format!("line {at}: a set-Z-zero comment not followed by `M0` — the program would not stop for it"));
+            i += 1;
+            continue;
+        }
+        // Modal state after a person has had the controller is UNKNOWN until
+        // the program states it.
+        let mut absolute: Option<bool> = None;
+        let mut verdict: Option<String> = None;
+        for (k, raw) in lines.iter().enumerate().skip(i + 2) {
+            let w = code_words(raw);
+            if w.is_empty() {
+                continue;
+            }
+            for t in &w {
+                match t.as_str() {
+                    "G90" => absolute = Some(true),
+                    "G91" => absolute = Some(false),
+                    _ => {}
+                }
+            }
+            let axis = |c: char| w.iter().find(|t| t.starts_with(c)).and_then(|t| t[1..].parse::<f64>().ok());
+            let moves_xy = w.iter().any(|t| t.starts_with('X') || t.starts_with('Y'));
+            let has_z = w.iter().any(|t| t.starts_with('Z'));
+            let motion = w.iter().any(|t| {
+                matches!(t.as_str(), "G1" | "G01" | "G2" | "G02" | "G3" | "G03" | "G38.2" | "G38.3" | "G81" | "G82" | "G83")
+            });
+            if !(moves_xy || has_z || motion) {
+                continue;
+            }
+            let line = k + 1;
+            let is_g0 = w.iter().any(|t| t == "G0" || t == "G00");
+            verdict = Some(if moves_xy || motion || !is_g0 {
+                format!(
+                    "line {line}: the first move after the set-Z-zero stop at line {at} is `{}` — \
+                     the cutter is touching the work there, and it must lift Z ALONE to safe Z \
+                     before any X/Y move or cut",
+                    raw.trim()
+                )
+            } else if absolute != Some(true) {
+                format!(
+                    "line {line}: the lift after the set-Z-zero stop at line {at} runs without \
+                     `G90` re-stated after the stop — the person may have left the controller \
+                     in incremental mode, and `G0 Z..` would then be a distance, not a height"
+                )
+            } else {
+                match axis('Z') {
+                    Some(z) if z + 1e-6 >= safe_z_emit => String::new(),
+                    _ => format!(
+                        "line {line}: the lift after the set-Z-zero stop at line {at} goes to \
+                         `{}`, below safe Z {safe_z_emit:.3}",
+                        raw.trim()
+                    ),
+                }
+            });
+            break;
+        }
+        match verdict {
+            None => out.push(format!("line {at}: a set-Z-zero stop with no lift after it")),
+            Some(v) if !v.is_empty() => out.push(v),
+            Some(_) => {}
+        }
+        i += 2;
+    }
+    out
+}
+
 fn audit_probe_program(gcode: &str) -> Vec<String> {
     let mut errs = Vec::new();
     let mut spindle_on_since: Option<usize> = None;
@@ -1797,8 +2206,13 @@ mod probe_tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// `target/probe-gate`, unless gate PROBE says otherwise: SPLNT runs gate
+    /// children in parallel and gives each its own scratch dir, so two children
+    /// do not rewrite the same dump while the other is reading it.
     fn dump_dir() -> PathBuf {
-        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/probe-gate"))
+        std::env::var_os("PROBE_GATE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/probe-gate")))
     }
 
     /// A machine that owns an XYZ plate. 🔴 The PLATE itself is not here — it is
@@ -2548,6 +2962,191 @@ mod probe_tests {
         skew.rotation_deg = 37.0;
         write("refuse-not-square.nc", render(&program_on(&xyz_machine(), &skew, tool(6.0))));
     }
+
+    /// The absolute `G0 Z` values between the `G10 L20 P1 Z` and the
+    /// plate-removal stop, or the first `M3` when there is no stop (G91
+    /// travels excluded: they are distances).
+    fn abs_lifts_after_touch(g: &str) -> (Vec<f64>, usize, Option<usize>) {
+        let lines: Vec<&str> = g.lines().map(str::trim).collect();
+        let g10 = lines.iter().position(|l| l.starts_with("G10 L20 P1 Z")).expect("no Z touch");
+        let stop = lines.iter().position(|l| l.starts_with("( TOUCH PLATE ->"));
+        let mut absolute = true;
+        let mut zs = Vec::new();
+        let m3 = lines.iter().position(|l| l.starts_with("M3")).unwrap_or(lines.len());
+        for l in &lines[g10..stop.unwrap_or(m3).min(m3)] {
+            match *l {
+                "G91" => absolute = false,
+                "G90" => absolute = true,
+                _ if absolute && l.starts_with("G0 Z") => zs.push(l[4..].parse().unwrap()),
+                _ => {}
+            }
+        }
+        (zs, g10, stop)
+    }
+
+    /// 🔴 2026-11-15: a 15 mm plate under a 5 mm safe Z. After `G10 L20 P1 Z15`
+    /// the program rapided to Z5 — ten millimetres DOWN into the plate it had
+    /// just touched — and then went straight to `M3` with the plate still on
+    /// the work, because nothing ever told anyone to take it off.
+    #[test]
+    fn a_plate_taller_than_safe_z_is_cleared_and_then_taken_off_before_the_spindle_starts() {
+        let z_only = Machine { probe_enabled: true, touch_plate_mm: Some(15.0), ..Machine::default() };
+        let r = z_only_program(&z_only, tool(6.0));
+        assert!(r.ok(), "{:?}", r.errors);
+        let (zs, _, stop) = abs_lifts_after_touch(&r.gcode);
+        assert!(!zs.is_empty() && zs.iter().all(|z| *z > 15.0), "a lift below the plate top: {zs:?}\n{}", r.gcode);
+        let lines: Vec<&str> = r.gcode.lines().map(str::trim).collect();
+        let stop = stop.expect("no plate-removal stop for a plate on the work");
+        assert_eq!(lines[stop + 1], "M0");
+        let m3 = lines.iter().position(|l| l.starts_with("M3")).unwrap();
+        assert!(stop < m3, "the spindle starts before the plate is off");
+        // After the stop: absolute mode restated and Z alone before X/Y, and
+        // the first X/Y rapid at the clear height, not a diagonal down.
+        assert!(lines[stop + 2].starts_with("G90"));
+        assert!(lines[stop + 3].starts_with("G0 Z") && !lines[stop + 3].contains('X'));
+        let first_xy = lines.iter().skip(m3).find(|l| l.starts_with("G0 X")).unwrap();
+        assert!(!first_xy.contains('Z'), "a combined XYZ rapid down from the plate height: {first_xy}");
+
+        // The XYZ corner plate: every absolute lift is above the plate top
+        // except the side descents (beside the plate, at top - xy_depth).
+        let mut stock = xyz_stock(ProbeCorner::FrontLeft);
+        stock.corner_plate.as_mut().unwrap().plate.top_mm = 15.0;
+        let x = program_on(&xyz_machine(), &stock, tool(6.0));
+        assert!(x.ok(), "{:?}", x.errors);
+        let (zs, _, stop) = abs_lifts_after_touch(&x.gcode);
+        assert!(stop.is_some(), "a corner plate on the work, and no stop to take it off");
+        let side = 15.0 - 3.0;
+        assert!(zs.iter().all(|z| (*z - side).abs() < 1e-9 || *z > 15.0), "{zs:?}\n{}", x.gcode);
+        assert_eq!(zs.iter().filter(|z| (**z - side).abs() < 1e-9).count(), 2, "{zs:?}");
+    }
+
+    /// The plate-removal stop is for a plate ON THE WORK, and only that.
+    #[test]
+    fn a_plate_mounted_on_the_machine_or_no_plate_at_all_needs_no_removal_stop() {
+        let mounted = Machine {
+            probe_enabled: true,
+            touch_plate_mm: Some(15.0),
+            probe_x: 25.0,
+            probe_y: 30.0,
+            ..Machine::default()
+        };
+        let r = z_only_program(&mounted, tool(6.0));
+        assert!(!r.gcode.contains("TOUCH PLATE"), "{}", r.gcode);
+        assert!(!r.gcode.lines().any(|l| l.trim() == "M0"));
+        // Still cleared on the way out, and the first XY rapid stays high.
+        let (zs, _, _) = abs_lifts_after_touch(&r.gcode);
+        assert!(zs.iter().all(|z| *z > 15.0), "{zs:?}");
+        let lines: Vec<&str> = r.gcode.lines().map(str::trim).collect();
+        let m3 = lines.iter().position(|l| l.starts_with("M3")).unwrap();
+        let first_xy = lines.iter().skip(m3).find(|l| l.starts_with("G0 X")).unwrap();
+        assert!(!first_xy.contains('Z'), "{first_xy}");
+
+        let bare = Machine { probe_enabled: true, touch_plate_mm: Some(0.0), ..Machine::default() };
+        assert!(!z_only_program(&bare, tool(6.0)).gcode.contains("TOUCH PLATE"));
+
+        // A thin plate on the work: same clear height as before (safe Z), plus the stop.
+        let thin = Machine { probe_enabled: true, touch_plate_mm: Some(1.6), ..Machine::default() };
+        let t = z_only_program(&thin, tool(6.0));
+        let (zs, _, stop) = abs_lifts_after_touch(&t.gcode);
+        assert!(zs.iter().all(|z| (*z - 5.0).abs() < 1e-9), "{zs:?}");
+        assert!(stop.is_some());
+    }
+
+    /// 🔴 2026-11-15: comment bytes count against grblHAL's 256-character line
+    /// buffer, and a long clamp or cutter name pushed a stop's own comment past
+    /// it (error:11 at the stop). Cut to fit, said in a warning, still paired.
+    #[test]
+    fn every_emitted_line_fits_the_grblhal_line_buffer() {
+        let s = Machine::default().safe_z_mm;
+        let name = format!("End Mill {}", "x".repeat(300));
+        let mut path = Toolpath {
+            moves: vec![
+                Move::spindle_on(18_000.0),
+                Move::rapid(Vec3::new(10.0, 10.0, s)),
+                Move::feed_to(Vec3::new(60.0, 10.0, -3.0), 1200.0),
+                Move::tool_change(name.clone()),
+                Move::spindle_on(18_000.0),
+                Move::rapid(Vec3::new(20.0, 20.0, s)),
+                Move::feed_to(Vec3::new(30.0, 20.0, -1.0), 1200.0),
+                Move::spindle_off(),
+            ],
+            tool: tool(6.0),
+            ..Default::default()
+        };
+        path.recompute_bounds();
+        let r = post_grblhal(&path, &Machine::default(), &Stock::default(), &OperationParams::default(), &PostOptions::default());
+        assert!(r.ok(), "{:?}", r.errors);
+        let long: Vec<usize> = r.gcode.lines().map(str::len).filter(|n| *n > GRBLHAL_LINE_MAX).collect();
+        assert!(long.is_empty(), "lines over {GRBLHAL_LINE_MAX}: {long:?}");
+        let lines: Vec<&str> = r.gcode.lines().collect();
+        let m0 = lines.iter().position(|l| l.trim() == "M0").unwrap();
+        assert!(lines[m0 - 1].starts_with("( TOOL CHANGE -> End Mill xxx") && lines[m0 - 1].ends_with("... )"), "{}", lines[m0 - 1]);
+        assert!(r.warnings.iter().any(|w| w.contains("error:11") && w.contains(&name)), "{:?}", r.warnings);
+        // Spans still describe the text: no block points past the end.
+        assert!(r.blocks.iter().all(|b| b.first_line + b.lines - 1 <= lines.len()));
+    }
+
+    /// A cutter change with or without a re-reference after it.
+    fn changed(machine: &Machine, after: Option<Move>) -> PostResult {
+        let s = machine.safe_z_mm;
+        let mut moves = vec![
+            Move::spindle_on(18_000.0),
+            Move::rapid(Vec3::new(10.0, 10.0, s)),
+            Move::feed_to(Vec3::new(60.0, 10.0, -3.0), 1200.0),
+            Move::rapid(Vec3::new(60.0, 10.0, s)),
+            Move::tool_change("End Mill 3mm"),
+        ];
+        moves.extend(after);
+        moves.extend([
+            Move::spindle_on(18_000.0),
+            Move::rapid(Vec3::new(20.0, 20.0, s)),
+            Move::feed_to(Vec3::new(30.0, 20.0, -1.0), 1200.0),
+            Move::spindle_off(),
+        ]);
+        let mut path = Toolpath { moves, tool: tool(6.0), ..Default::default() };
+        path.recompute_bounds();
+        post_grblhal(&path, machine, &Stock::default(), &OperationParams::default(), &PostOptions::default())
+    }
+
+    /// 🔴 2026-11-15: a cutter change with no probe and no hand-zero stop tells
+    /// the person to set Z zero before resuming — cutter TOUCHING the work —
+    /// and the next blocks were `M3` and a combined `G0 X Y Z`.
+    #[test]
+    fn after_an_unreferenced_cutter_change_z_lifts_alone_before_the_spindle() {
+        let r = changed(&Machine::default(), None);
+        assert!(r.ok(), "{:?}", r.errors);
+        let lines: Vec<&str> = r.gcode.lines().map(str::trim).collect();
+        let m0 = lines.iter().position(|l| *l == "M0").unwrap();
+        let code: Vec<&str> = lines[m0 + 1..].iter().copied().filter(|l| !l.starts_with('(')).take(3).collect();
+        assert_eq!(code[0], "G90 G54", "{}", r.gcode);
+        assert_eq!(code[1], "G0 Z5.000", "{}", r.gcode);
+        assert!(code[2].starts_with("M3"), "{}", r.gcode);
+        // The hand-zero path keeps its own next block (the second stop).
+        let z = changed(&Machine::default(), Some(Move::manual_zero("touch off")));
+        let zl: Vec<&str> = z.gcode.lines().map(str::trim).collect();
+        let first = zl.iter().position(|l| *l == "M0").unwrap();
+        assert!(zl[first + 1].starts_with("( SET Z ZERO"), "{}", z.gcode);
+    }
+
+    /// 🔴 2026-11-15: the re-reference's "put the plate under the cutter" was
+    /// written AFTER the `M0`, so the person read it only once the probe was
+    /// already descending. It goes before the stop.
+    #[test]
+    fn the_plate_goes_back_before_the_stop_that_precedes_a_re_reference() {
+        let m = Machine { probe_enabled: true, touch_plate_mm: Some(1.6), ..Machine::default() };
+        let r = changed(&m, Some(Move::probe()));
+        assert!(r.ok(), "{:?}", r.errors);
+        let lines: Vec<&str> = r.gcode.lines().map(str::trim).collect();
+        let change = lines.iter().position(|l| l.starts_with("( TOOL CHANGE ->")).unwrap();
+        assert!(lines[change - 1].contains("put the touch plate back under the cutter"), "{}", r.gcode);
+        assert_eq!(lines[change + 1], "M0");
+        // Two probes, two plate-removal stops, and the change M0 is NOT one.
+        assert_eq!(lines.iter().filter(|l| l.starts_with("( TOUCH PLATE ->")).count(), 2);
+        // A mounted plate never leaves its place: no instruction.
+        let mounted = Machine { probe_x: 25.0, probe_y: 30.0, ..m };
+        assert!(!changed(&mounted, Some(Move::probe())).gcode.contains("put the touch plate back"));
+    }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -2925,6 +3524,30 @@ mod attribution_tests {
     /// one that has not been announced. It is called out here because it is
     /// exactly the case a host parsing the program with a regex gets wrong, and
     /// because an unasserted exception is where a real off-by-one would hide.
+    /// 🔴 Every emitted program is pure printable ASCII (2026-10-14): the browser
+    /// sender refuses non-ASCII, so one stray character stops the stream.
+    #[test]
+    fn every_reference_program_is_ascii_and_names_are_transliterated() {
+        for name in ["plate", "pocket", "multi-tool", "socket", "clamped", "two-part"] {
+            let (p, _) = posted(name);
+            assert!(!p.gcode.is_empty(), "{name}: no program");
+            for (i, line) in p.gcode.lines().enumerate() {
+                assert!(
+                    line.bytes().all(|b| b == b'\t' || (0x20..0x7f).contains(&b)),
+                    "{name} line {}: non-ASCII or control byte in {line:?}",
+                    i + 1
+                );
+            }
+        }
+        assert_eq!(sanitize("\u{00D8}6 \u{2014} 3\u{00D7}2 (v2) 90\u{00B0} \u{263A}"), "D6 - 3x2 _v2_ 90deg _");
+        // A negative that rounds to zero is zero, not `-0.000`.
+        assert_eq!(fmt(-0.0003, 3), "0.000");
+        assert_eq!(fmt(-0.0006, 3), "-0.001");
+        assert_eq!(fmt(-1.5, 1), "-1.5");
+        // Realtime bytes act inside a comment: a filename must not carry them.
+        assert_eq!(sanitize("PANEL~1!.dxf?"), "PANEL_1_.dxf_");
+    }
+
     #[test]
     fn the_operation_a_block_reports_is_the_one_in_force_in_the_program_text() {
         for name in ["plate", "pocket", "multi-tool"] {

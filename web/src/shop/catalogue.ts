@@ -14,6 +14,8 @@
 //
 // That is why {@link CatalogueState} has a `kind` and not just an array.
 
+import type { Resolution } from '../cad/resolution';
+
 export interface ShopEntry {
   id: string;
   /** Path inside `hardware/cad/`, e.g. `2bee_hive/2bee_hive_quilt.scad`. */
@@ -49,6 +51,12 @@ export interface ShopEntry {
    */
   trust: 'nothing' | 'trusted' | 'suspect' | 'untrusted';
   trustDetail: string;
+  /**
+   * The machine build's resolution-ladder tier (`cad/machine.ts`): `print` is the fine render; anything else means
+   * the render only fit the in-browser kernel with coarser curves, and `parts`/`trust`/`sizeMm` are from THAT build.
+   * Absent in a catalogue built before 2026-11-13.
+   */
+  resolution?: Resolution;
   /** Bounding size in mm, or `null` when the mesher produced no bounds. */
   sizeMm: [number, number, number] | null;
   /** Files in the import closure that travels with this design. */
@@ -56,6 +64,18 @@ export interface ShopEntry {
   bytes: number;
   /** Path under `public/shop/`, or `null` when nothing could be rendered. */
   thumb: string | null;
+  /**
+   * cad's functional specification for this design, copied by the build (founder
+   * 2026-10-16). `file` is under `public/shop/`. OPTIONAL: an index built before it
+   * existed has no field, and that must not read as "cad wrote none".
+   */
+  spec?: {
+    kind: 'per-file' | 'directory' | 'none' | 'withheld';
+    path: string | null;
+    file: string | null;
+    tracked: boolean | null;
+    why?: string;
+  };
 }
 
 export interface ShopIndex {
@@ -101,9 +121,22 @@ export async function loadCatalogue(
         `time and is not in git — run \`npm run shop\` in web/.`,
     };
   }
+  /* 🔴 A DEV SERVER ANSWERS A MISSING PUBLIC FILE WITH THE APP'S OWN HTML AND STATUS 200
+   * (Vite's SPA fallback), so `!r.ok` never fires for "not built". The founder saw the raw
+   * "Unexpected token '<'" parse error instead of the build instruction (2026-10-15). An
+   * HTML body is read as what it is: the file is not there. */
+  const body = await r.text();
+  if (/^\s*</.test(body)) {
+    return {
+      kind: 'absent',
+      why:
+        `${SHOP_BASE}/index.json is not there (the server answered with a web page instead). ` +
+        'The catalogue is generated at build time and is not in git — run `npm run shop` in web/.',
+    };
+  }
   let index: ShopIndex;
   try {
-    index = (await r.json()) as ShopIndex;
+    index = JSON.parse(body) as ShopIndex;
   } catch (e) {
     return { kind: 'absent', why: `the catalogue is not readable JSON: ${String(e)}` };
   }
@@ -164,4 +197,25 @@ export function byFamily(entries: ShopEntry[]): { family: string; blurb: string;
 export function trustLine(e: ShopEntry): string {
   if (e.trust === 'trusted') return 'Every solid closed and manifold; nothing refused, nothing altered.';
   return e.trustDetail || 'This picture is not the whole model.';
+}
+
+/**
+ * The card's visible line: an EXCERPT of {@link trustLine}, never a paraphrase
+ * (the reason is in trustLine's header). The full sentence stays in the card's
+ * tooltip. Founder 2026-10-12, *"too many words"*: the Designs tab printed 7,230
+ * visible words, and most of them were this line repeated on every card.
+ *
+ * The excerpt is the mesher's first sentence, minus the shared "the mesh is
+ * closed — but" preamble, and cut at a colon. A cause the mesher adds later is
+ * still quoted in its own words. `''` for `trusted`, because the badge already
+ * says it.
+ */
+export function trustShort(e: ShopEntry): string {
+  if (e.trust === 'trusted') return '';
+  const full = trustLine(e);
+  const afterBut = full.replace(/^Every solid drawn is watertight and manifold[^—]*—\s*but\s+/, '');
+  const first = afterBut.match(/^.*?[.!?](?=\s|$)/)?.[0] ?? afterBut;
+  // The parser/kernel split is for whoever debugs the mesher; it stays in the tooltip.
+  const short = first.split(':')[0].replace(/\s*\(\d+ by the parser, \d+ by the kernel\)/, '').trim();
+  return short.length > 0 ? short : full;
 }

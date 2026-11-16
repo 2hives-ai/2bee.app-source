@@ -1,0 +1,21 @@
+/* The design page with its assistant column (founder 2026-10-16). The 320px
+ * column and spacing match `.cad-simple` in styles.css; the catalogue scrolls
+ * on the right while the chat stays in view. */
+.shop-ai {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 16px;
+  padding: 16px;
+  height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  background: var(--color-bg, var(--bg));
+}
+.shop-ai > .cad-chat { min-height: 0; }
+.shop-ai > .shop-ai-main { min-width: 0; min-height: 0; overflow-y: auto; }
+.shop-ai > .shop-ai-main > .shop { padding-top: 0; }
+@media (max-width: 760px) {
+  .shop-ai { grid-template-columns: 1fr; height: auto; padding: 12px; gap: 12px; }
+  .shop-ai > .cad-chat { max-height: 70vh; }
+  .shop-ai > .shop-ai-main { overflow: visible; }
+}

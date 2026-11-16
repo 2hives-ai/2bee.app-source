@@ -308,7 +308,7 @@ test('the three-sentence footer is gone from the drawn viewport', () => {
 
 test('the drag directions moved onto the viewport itself, not into nothing', () => {
   const html = render(CLEAN, false);
-  assert.match(html, /title="[^"]*Drag to orbit[^"]*pan[^"]*zoom/);
+  assert.match(html, /title="[^"]*Left-drag[^"]*to move[^"]*right-drag[^"]*to rotate[^"]*zoom/);
 });
 
 test('“top-level shapes are NOT unioned” survives, in the report Help → About prints', () => {

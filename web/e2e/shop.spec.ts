@@ -27,15 +27,26 @@
 // stored choice would erase the thing under test.
 
 import { expect, test } from '@playwright/test';
+import { seedTab, seedCadCode } from './tab';
+
+/* 2bee.cad opens on the chat view since 2026-10-15; these tests drive its code view. */
+test.beforeEach(async ({ page }) => seedCadCode(page));
 
 test.describe('the Designs tab', () => {
-  test('is what a first visit opens on', async ({ page }) => {
+  /* 🔴 CHANGED 2026-10-14: a first visit opens on the three steps (founder
+   * product scope), and Designs is where the ONE Expert-tools link lands. This
+   * test is now that link. Unseeded on purpose, so it watches the real landing. */
+  test('is where the Expert tools link lands from the first screen', async ({ page }) => {
     await page.goto('/');
+    await expect(page.getByTestId('make-flow')).toBeVisible();
+    await expect(page.getByTestId('tabbar')).toHaveCount(0);
+    await page.getByTestId('make-expert').click();
     await expect(page.getByTestId('shop')).toBeVisible();
     await expect(page.getByTestId('tab-shop')).toHaveAttribute('aria-selected', 'true');
   });
 
   test('lists designs, and the catalogue actually shipped', async ({ page }) => {
+    await seedTab(page, 'shop');
     await page.goto('/');
     const cards = page.getByTestId('shop-card');
     // 🔴 NOT `> 0`. An asset that half-shipped, or a filter that silently
@@ -48,6 +59,7 @@ test.describe('the Designs tab', () => {
   });
 
   test('a card carries the mesher’s trust verdict, not just a picture', async ({ page }) => {
+    await seedTab(page, 'shop');
     await page.goto('/');
     const first = page.getByTestId('shop-card').first();
     await expect(first.locator('.shop-badge')).toBeVisible();
@@ -68,6 +80,7 @@ test.describe('the Designs tab', () => {
      * This asserts the case where right and wrong DISAGREE: a card whose mesh
      * is suspect or untrusted must say so in words, not merely carry a badge.
      */
+    await seedTab(page, 'shop');
     await page.goto('/');
     const bad = page.locator('.shop-card:not(.shop-trust-trusted)').first();
     await expect(bad).toBeVisible();
@@ -97,7 +110,11 @@ test.describe('the Designs tab', () => {
      * first, so a check on `.first()` samples exactly the cards most likely to
      * carry an endorsement and would miss one reintroduced further down.
      */
+    await seedTab(page, 'shop');
     await page.goto('/');
+    // Wait for the grid: counting before it renders reads 0 (a race measured
+    // 2026-10-12 against the dev server, which renders slower than preview).
+    await expect(page.getByTestId('shop-grid')).toBeVisible();
     const badges = page.locator('.shop-badge');
     const texts = await badges.allInnerTexts();
     expect(texts.length).toBeGreaterThan(40);
@@ -111,8 +128,11 @@ test.describe('the Designs tab', () => {
   });
 
   test('search narrows the grid', async ({ page }) => {
+    await seedTab(page, 'shop');
     await page.goto('/');
+    await expect(page.getByTestId('shop-grid')).toBeVisible(); // same race as above
     const before = await page.getByTestId('shop-card').count();
+    expect(before).toBeGreaterThan(0);
     await page.getByTestId('shop-search').fill('zzzzzzzz-no-such-design');
     await expect(page.getByTestId('shop-no-match')).toBeVisible();
     await page.getByTestId('shop-search').fill('');
@@ -120,12 +140,13 @@ test.describe('the Designs tab', () => {
   });
 
   test('PICKING A DESIGN OPENS IT IN 2bee.cad — the whole feature', async ({ page }) => {
+    await seedTab(page, 'shop');
     await page.goto('/');
 
     const card = page.getByTestId('shop-card').first();
     const title = (await card.locator('.shop-card-title').innerText()).trim();
     const path = (await card.locator('.shop-card-path').innerText()).trim();
-    await card.locator('button').click();
+    await card.getByRole('button', { name: 'Open in cad' }).click(); // the card has cad · cnc · 3d actions since 2026-10-15
 
     // 1. It went to the CAD tab.
     await expect(page.getByTestId('tabpanel-cad')).toBeVisible();
@@ -148,13 +169,14 @@ test.describe('the Designs tab', () => {
   });
 
   test('the opened design’s imports RESOLVE — the closure travelled with it', async ({ page }) => {
+    await seedTab(page, 'shop');
     await page.goto('/');
     // Pick a design whose card says it carries more than one file, so this
     // asserts about a real import graph rather than a single self-contained
     // model that would pass whether or not the closure shipped.
     await page.getByTestId('shop-search').fill('assembly');
     const card = page.getByTestId('shop-card').first();
-    await card.locator('button').click();
+    await card.getByRole('button', { name: 'Open in cad' }).click();
     await expect(page.getByTestId('tabpanel-cad')).toBeVisible();
 
     // The CAD console names an unresolved import. Nothing here may say a path

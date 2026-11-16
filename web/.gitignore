@@ -3,3 +3,34 @@
 # Deliberately NOT committed: a copy of cad's designs in this lane's git would
 # be a second source of truth and would drift silently. See that file's header.
 public/shop/
+public/shop.building-*/
+.shop-building-*/
+public/shop.old-*/
+
+# The external design shelf: metadata about OTHER PEOPLE'S openly-licensed
+# designs, plus a scratch cache of sources fetched to test them.
+# Deliberately NOT committed, for two reasons that are not the same:
+#   1. like public/shop/, a checked-in index of someone else's tree drifts;
+#   2. the fetched sources are third-party work under their own licences, and
+#      committing them would republish them from our repository — which is the
+#      one thing this pipeline is built not to do.
+# SEPARATE from public/shop/ because build-shop-catalogue.ts wipes its own
+# output directory, and a shared one silently deleted this shelf.
+public/designs/
+
+# Third-party design sources fetched to TEST them. Deliberately OUTSIDE public/:
+# Vite copies public/ into dist/ verbatim, so a cache under it would be SERVED
+# from our origin — republishing other people's work as a side effect of a
+# directory choice, and invisibly, because the cards link out.
+.design-src/
+
+# The PnP 3D view's board render, generated from pcb's gerbers by
+# scripts/build-pnp-stackup.ts. Not committed for the same reason as public/shop/:
+# a rendered copy of another lane's fab files drifts the day they re-export.
+public/pnp-stackup/
+public/pnp-stackup.building-*/
+
+# The pcb tab's gate records, collected from pcb's tree by
+# scripts/build-pcb-gates.ts. Not committed: a copy of another lane's gate
+# results drifts the moment pcb re-runs a gate.
+public/pcb-gates/

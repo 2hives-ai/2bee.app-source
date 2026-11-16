@@ -22,7 +22,7 @@ import type { Page } from '@playwright/test';
 /** Must match `TAB_KEY` in `src/Tabs.tsx`. */
 export const TAB_KEY = '2bee.app.tab';
 
-export type SeedableTab = 'shop' | 'cad' | 'cnc' | 'run';
+export type SeedableTab = 'shop' | 'cad' | 'cnc' | 'run' | 'pnp' | 'tools';
 
 /** Make the app open on `id`, as a returning user would. */
 export async function seedTab(page: Page, id: SeedableTab): Promise<void> {
@@ -38,4 +38,22 @@ export async function seedTab(page: Page, id: SeedableTab): Promise<void> {
     },
     [TAB_KEY, id] as const,
   );
+}
+
+/** Must match `CAD_VIEW_KEY` in `src/cad/CadTab.tsx`. */
+export const CAD_VIEW_KEY = '2bee.app.cad.view';
+
+/**
+ * Open 2bee.cad on its CODE view (menus, editor, console) rather than the chat
+ * view that has been the default since 2026-10-15. Specs that drive the editor
+ * call this; the chat view is not where those controls live any more.
+ */
+export async function seedCadCode(page: Page): Promise<void> {
+  await page.addInitScript((key) => {
+    try {
+      window.localStorage.setItem(key, 'code');
+    } catch {
+      /* see seedTab */
+    }
+  }, CAD_VIEW_KEY);
 }

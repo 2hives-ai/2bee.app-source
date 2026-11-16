@@ -112,6 +112,7 @@ pub fn clearing_loops(
         islands.iter().flat_map(|i| i.offset(tool_r + finish_allowance_mm)).collect();
 
     let mut out: Vec<Contour> = Vec::new();
+    let mut island_laps: Vec<Contour> = Vec::new();
     let mut guard = 0;
     while !frontier.is_empty() {
         guard += 1;
@@ -125,9 +126,26 @@ pub fn clearing_loops(
         for f in &frontier {
             let pieces = if grown.is_empty() { vec![f.clone()] } else { subtract(f, &grown) };
             for p in pieces {
-                if p.verts.len() >= 2 {
-                    kept.push(p);
+                if p.verts.len() < 2 {
+                    continue;
                 }
+                // 🔴 A HOLE LOOP IS THE ISLAND'S OWN OUTLINE (grown by the tool
+                // radius), the same every pass. It used to be re-emitted AND
+                // stepped every pass — 159,944 loops for a 60x60 pocket with a
+                // 10x10 island, the same lap re-traced until the guard (bughunt
+                // 2026-11-15). It is cut ONCE and never stepped: the outer rings
+                // close in on it.
+                if p.signed_area() < 0.0 {
+                    let fresh = !island_laps.iter().any(|q: &Contour| {
+                        (q.signed_area() - p.signed_area()).abs() < 1e-6 && q.bounds() == p.bounds()
+                    });
+                    if fresh {
+                        island_laps.push(p.clone());
+                        out.push(p);
+                    }
+                    continue;
+                }
+                kept.push(p);
             }
         }
         if kept.is_empty() {
@@ -139,12 +157,20 @@ pub fn clearing_loops(
         // we just cut. A ring whose smallest dimension is <= one tool diameter
         // is fully swept by the tool travelling it; anything wider still has
         // material in the middle.
-        let smallest = kept
-            .iter()
-            .filter_map(|c| c.bounds())
-            .map(|(x0, y0, x1, y1)| (x1 - x0).min(y1 - y0))
-            .fold(f64::INFINITY, f64::min);
-        if smallest <= tool_r * 2.0 + 1e-9 {
+        //
+        // 🔴 PER RING, not over all of them. This used to take the smallest
+        // dimension over EVERY ring and stop when that one was swept, so an
+        // island that splits a pocket into a narrow and a wide region ended
+        // the wide one after its first lap — the middle left standing in a
+        // program that looked finished. A ring that is swept drops out; the
+        // others keep stepping inward.
+        let swept = |c: &Contour| {
+            c.bounds()
+                .map(|(x0, y0, x1, y1)| (x1 - x0).min(y1 - y0) <= tool_r * 2.0 + 1e-9)
+                .unwrap_or(true)
+        };
+        kept.retain(|c| !swept(c));
+        if kept.is_empty() {
             break;
         }
 
@@ -221,6 +247,21 @@ mod tests {
     }
 
     #[test]
+    fn an_island_does_not_make_the_clearing_run_away() {
+        // bughunt 2026-11-15: the island's own hole loop was re-emitted and
+        // stepped every pass until the 10,000-pass guard — 159,944 loops for a
+        // 60x60 pocket with a 10x10 island, the same lap re-traced for hours.
+        let pocket = Contour::rect(0.0, 0.0, 60.0, 60.0);
+        let island = Contour::rect(25.0, 25.0, 10.0, 10.0);
+        let loops = clearing_loops(&pocket, &[island.clone()], 3.0, 2.7, 0.0);
+        assert!(loops.len() < 50, "{} clearing loops for a 60x60 pocket", loops.len());
+        // And the ring round the island is still cleared: the region between the
+        // island's loop and the wall has a pass at most one diameter from each.
+        let near_island = loops.iter().any(|c| c.bounds().is_some_and(|b| (b.0 - 22.0).abs() < 0.5));
+        assert!(near_island, "no pass round the island");
+    }
+
+    #[test]
     fn an_island_is_left_standing() {
         // A pocket with a boss in the middle: the boss must survive, and the
         // ring around it must still be cleared.
@@ -236,6 +277,28 @@ mod tests {
                 assert!(!inside_island, "a pass at ({}, {}) cuts into the island", v.x, v.y);
             }
         }
+    }
+
+    #[test]
+    fn a_narrow_region_does_not_stop_the_clearing_of_a_wide_one() {
+        // 🔴 An island bar across the pocket splits it into a 14 mm region and
+        // a 100 mm one. The stop rule took the smallest ring over BOTH, so the
+        // narrow one being swept ended the wide one after one lap.
+        let pocket = Contour::rect(0.0, 0.0, 120.0, 60.0);
+        let bar = Contour::rect(14.0, -5.0, 6.0, 70.0);
+        let loops = clearing_loops(&pocket, &[bar], 3.0, 4.0, 0.0);
+        let innermost_right = loops
+            .iter()
+            .filter_map(|c| c.bounds())
+            .filter(|b| b.0 > 20.0)
+            .map(|(x0, y0, x1, y1)| (x1 - x0).min(y1 - y0))
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            innermost_right <= 6.0 + 1e-9,
+            "the wide region stopped at a ring {innermost_right:.2} mm across — its middle \
+             was never cut ({} loops in all)",
+            loops.len()
+        );
     }
 
     /// Does a LEGITIMATE island read as residual? It does — and both halves of

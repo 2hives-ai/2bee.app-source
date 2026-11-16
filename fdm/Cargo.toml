@@ -1,0 +1,21 @@
+[package]
+name = "twobee-fdm"
+description = "FDM slicer core (Bambu X2D target) — parity-tested against OrcaSlicer G-code"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Scope note: this crate is a SEPARATE workspace member on purpose. It does not touch twobee-cam
+# (CNC) and does not flip `Technology::Fdm` in core/src/tech.rs; wiring into the app is the
+# `2bee_app` lane's decision (see handover ticket fdm-slicer-in-rust-scope-ruling...).
+# Dependency policy matches core: pure Rust, must build for wasm32-unknown-unknown.
+[dependencies]
+i_overlay = "9.0.1"   # polygon booleans + offset (pure Rust, deterministic)
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+boostvoronoi = "0.11"  # lane 2 (walls/Arachne): medial axis + skeletal trapezoidation. Pure Rust, BSL-1.0 (AGPL-compatible).
+
+# boostvoronoi -> ahash -> getrandom: wasm32 needs the js backend (also build with RUSTFLAGS='--cfg getrandom_backend="wasm_js"').
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }

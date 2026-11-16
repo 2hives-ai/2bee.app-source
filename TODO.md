@@ -3778,7 +3778,17 @@ a box with a GPU — routed to `ceo` for `ops` (`59f284ea2c`).
 # 2026-08-11 — grblHAL source is on disk, and our protocol model has been checked
 
 `/home/gbacs/apps/grblHAL/` — driver `79b4c1c9` + core `29b7471f` as submodule, both
-today's HEAD, `GRBL_BUILD 20260811`. 🔴 **Not vendored into this repo**: grblHAL is GPLv3,
+today's HEAD, `GRBL_BUILD 20260811`.
+⚠ **STILL TRUE FOR THAT TREE, AND THERE IS NOW A SECOND ONE — added 2026-09-22 after `firmware`
+read this line as a rotted snapshot of the other extract.** `/home/gbacs/apps/grblHAL/STM32F4xx/
+grbl/grbl.h:45` **still reads `GRBL_BUILD 20260811` today**, so this entry is accurate for the tree
+it names. **The tree `firmware` and `pcb` are working in is a DIFFERENT one** —
+`software/2bee.app/grblhal/`, gitignored, compiled stamp **20260817**, with its `core/README.md` and
+`core/changelog.md` saying **20260818**. ⇒ ***Two checkouts, two build stamps; the `20260811` in that
+extract's `changelog.md:57` is a historical entry, not this line's source.*** 🔴 **What HAS rotted:
+the SHAs above cannot be re-verified — `/home/gbacs/apps/grblHAL/` has no `.git` any more**, so
+`79b4c1c9` / `29b7471f` are now a record rather than a checkable reference.
+🔴 **Not vendored into this repo**: grblHAL is GPLv3,
 this lane is AGPL-3.0-or-later, and the §13 source-offer question is still open with
 `legal`.
 
@@ -5943,3 +5953,999 @@ Both limbs plant-tested: disarming it reds on the missing notch; removing the
 corner allowance reds on ordinary rounding (*"a check that fires on ordinary
 corner rounding is one people switch off"*). 749 rust tests; all 10 reference
 programs byte-identical.
+
+## #163 · 🟢 DONE 2026-09-17 — THREE unbounded recursions, not one; all three now refuse by name (was 🔴 OPEN 2026-09-09)
+
+Found by the external-design verifier on its first real run, on
+`Adam-CAD/CADAM` at `benchmarks/13-v8-engine.scad`:
+
+```
+RangeError: Maximum call stack size exceeded
+    at quickhull (src/cad/mesh.ts:715)
+    at Mesher.evalNode (src/cad/mesh.ts:1766)
+    at Mesher.evalNode (src/cad/mesh.ts:1707)   <- recursion, ~repeating
+    at Mesher.operand (src/cad/mesh.ts:2089)
+    at Mesher.boolean (src/cad/mesh.ts:2109)
+```
+
+🔴 **This is not a harness defect.** `parseScad` + `meshScene` are what `CadTab`
+runs, synchronously, on the main thread. A visitor who opens that design in
+2bee.cad gets the same throw — and `CadTab` has no error boundary around the
+mesh, so the tab goes blank rather than saying anything.
+
+⚠ **The verifier now survives it** (a throw is recorded as `opens: false` with
+the message, per `verify-external-designs.ts`) — **which fixes the REPORT, not
+the defect.** Before that guard, one bad design ended the run and discarded every
+result already collected, including the good ones.
+
+🔴 **FIXED 2026-09-17 — AND THE TICKET NAMED ONE RECURSION WHEN THERE WERE THREE.**
+
+```
+Parser.parseStatement  <-> Parser.parseChildStatement    builds the AST
+Evaluator.exec         <-> Evaluator.execCall            evaluates it
+Mesher.evalNode                                          meshes it
+```
+
+**Each walks the same input and each was unbounded.** ⚠ ***Guarding the first two
+was MEASURED to move the crash from depth 616 to depth ~5000 without removing
+it.*** ⇒ ***A guard on one of several recursions over the same input converts a
+reproducible crash into a rarer one*** — which is strictly worse than the crash,
+because it survives the test that was written to prove the fix.
+
+**How the third one was found, since it is the reusable part:** the default
+`Error.stackTraceLimit` is **10**, so the trace showed only the expression parser
+that happened to be on top when the stack ran out. Setting it to 200 and counting
+repeated frames named the real pair in one run — `parseStatement` ×92,
+`parseChildStatement` ×92. **A 10-frame trace of a runaway recursion shows the
+straw, not the camel.**
+
+**The numbers, all measured rather than chosen:**
+
+| | value | how |
+|---|---|---|
+| deepest design in `hardware/cad` | **21** | 389 of 389 files parsed; median 3, p90 9, p99 13 |
+| `parseScad` raw ceiling | **616** | bisected, pre-fix (deepest OK 615) |
+| `meshScene` raw ceiling | **665** | bisected on a real parsed tree (deepest OK 664) |
+| `MAX_NEST_DEPTH` (`scad.ts`) | **200** | ~10× the corpus, <⅓ of the ceiling |
+| `MAX_DEPTH` (`mesh.ts`) | **256** | must EXCEED the parser's — see below |
+
+🔴 **THE TWO LIMITS WERE BOTH 256 AT FIRST AND THAT WAS A DEFECT.** `meshScene`
+walks the parser's tree **plus the root group the parser adds**, so source nested
+255 deep arrives as a scene of depth 256. ⇒ **The parser accepted a file and the
+mesher then drew nothing**, with both limits reading the same tidy number and
+neither looking wrong on its own. **The invariant is the RELATION, and the test
+asserts it by probing behaviour — whatever the parser accepts, the mesher must
+draw — rather than by pinning 200 and 256, which would go green the day someone
+raises one and not the other.**
+
+🟢 **`CadTab` also wraps both calls.** They run synchronously inside a render, so a
+throw unmounts the subtree and the visitor gets a blank tab. A caught failure is
+now rendered through the existing `errors`/`issues` channels — **the tab keeps the
+editor and says what happened.** ⚠ **That is the backstop for the fourth recursion
+nobody has found yet, not the fix.**
+
+🟢 **Covered by `web/tests/deep-nesting.test.ts` (7 tests), each proven by a plant:**
+
+| plant | result |
+|---|---|
+| parser guard removed | 4 fail |
+| mesher guard removed | 1 fail |
+| `finally` removed (depth never released) | 1 fail |
+| both limits set equal (the off-by-one) | 4 fail |
+| restored | **7 pass** |
+
+⚠ **The positive control is load-bearing: without it a guard set to 1 passes every
+other test in the file.** It requires depths 1/21/60/199 to parse AND produce
+geometry, and the corpus check is `389 of 389 parsed, 0 refused by the new guard`.
+
+⚠ **Still true and unchanged:** not urgent for cad's own designs, and exactly as
+urgent as the external shelf is real — that shelf's whole point is handing this
+reader files nobody here wrote.
+
+🟢 **MEASURED AFTERWARDS — #165 TOOK A CUT FILE OFF `CAD1H`'s DIVERGENCE LIST, AND I CHECKED
+BECAUSE THE OPPOSITE WAS PLAUSIBLE.** `CAD1H`'s own text says ***"a REFUSAL is safe (nothing is
+emitted); a DIVERGENCE is a wrong part with no warning … REFUSED→DIVERGES counts as getting WORSE
+even though it looks like new capability."*** ⇒ **Making unreadable files readable is exactly the
+change that can move a file into that set**, so it was worth measuring rather than assuming.
+
+```
+before #165 (48b1a5304b)  5 of 17 — brood_panel · fan_box_panel · panels_18mm_inner · panels_18mm_outer · panels_4mm
+after                     4 of 17 — brood_panel · fan_box_panel · panels_18mm_inner ·                     panels_4mm
+```
+
+⇒ 🟢 **`2bee_hive_panels_18mm_outer_wcnc.scad` now AGREES with OpenSCAD** — a CNC sheet-cut file that
+did not before. **No file moved REFUSED→DIVERGES**; `inner_wcnc` diverged on both sides.
+
+## #164 · 🔴 OPEN 2026-09-09 — the hive panels are READABLE now and still withheld, and only `cad` can clear them
+
+🔴 **RULED 2026-09-17 BY `ceo` — THE WITHHOLD STANDS, AND THERE ARE TWO DISCHARGE ROUTES.**
+> *"A sheet-cut design dimensioned from a 'Do not fab' board produces parts that do not fit the board
+> that will actually exist. Nine designs held is the rule working, not the rule being over-broad."*
+
+⚠ **AND `ceo` REFUSED THE THING MY OWN TICKET COULD HAVE BEEN READ AS ASKING FOR:** *"I will not bulk-
+clear nine designs because the reader improved. **A better reader changes what is KNOWABLE, not what
+is TRUE.** Every one of those designs was equally held yesterday; the only thing that changed is that
+we can now see why."* ⇒ ***Worth writing into this lane's record, because a reader improvement is
+exactly the kind of progress that feels like it should move a verdict and does not.***
+
+**Two routes were offered.** ⚠ **ROUTE (b) IS WITHDRAWN — `ceo` retracted it 2026-09-17 and I had
+already copied it into this row.** They ruled *"re-dimension from `sensor_pod_v3`, the sync files
+already exist"*; `cad` measured it and it does not apply:
+
+```
+v1 pod opening   47.688 × 49.974 mm   flat box, 12.5 mm into the ply
+v3 blade slot    19.910 × 72.200 mm   edge-on, crossing the full 18 mm wall
+```
+
+⇒ ***v3 is not v1 at different numbers — a different aperture, different interface topology, with its
+own authorised cut. There is nothing to re-derive.*** `ceo`'s own diagnosis: *"I reasoned from the
+EXISTENCE of `sensor_pod_v3_*_pcb_sync.scad` to the AVAILABILITY of a substitution, and those are not
+the same fact. A sync file proves a board is modelled, not that a panel can swap one aperture for the
+other."*
+
+🔴 **AND THE 20.8 mm FIGURE THIS ROW WOULD HAVE INHERITED WAS WRONG.** `cad` re-measured
+**19.910 mm**; `ceo` traced the 20.8 mm to their own 2026-09-07 ticket and repeated it without
+re-measuring, so it propagated three times. ⚠ ***"Conclusion unchanged" is exactly when a wrong number
+survives*** — nobody re-checks a figure that did not change anyone's mind.
+
+**What actually stands, per design, verified by `cad` on ACTUAL CALL SITES rather than
+include-reachability:** **2 brood-only designs** have a bounded path — v3's slot is already cut at the
+same station — **needing `pcb`'s half of a ceo-ruled 4-edit set, and NOT waiting on the question
+below.** **7 designs are blocked on a product decision:** `sensor_pod_v3_ply_slot()` is called
+**exactly once, on the brood panel only**, so the super panel has **no v3 successor cut at all** and
+withdrawing v1 there would leave it with no pod opening. **`ceo` routed that to `product`.**
+
+🟢 **The sentence that right-sizes all of it, `cad`'s:** *"0 fabricated, 0 deployed — the withhold
+protects a catalogue claim, not a part."*
+
+⇒ **Nothing further is owed by this lane.** The 2026-09-05 discharge condition is unchanged —
+*"each one `cad` clears comes back"* — and this row stays open only as the place those clearances
+will land.
+
+🔴 **2026-09-17 — THE READER IS NO LONGER A CONFOUND, AND THE POPULATION IS NOW 15.** Two reader
+defects closed today (`7ef82f3e33`, `29e794347b`); every hive file parses at **0 errors / 0
+unsupported**. `dropped 38 → 33`, `withheld 16 → 20`, **nothing lost from the listed set** (diffed
+against `HEAD`). ⇒ ***Designs that were absent because this reader could not open them are now
+absent because of a ruling*** — different facts, and only the second is actionable.
+
+**Withheld on the superseded-board rule (15):** nine `2bee_hive/` (`brood_assembly`,
+`brood_panel_wcnc`, `panels_18mm`, `panels_18mm_inner_wcnc`, `panels_18mm_outer_wcnc`,
+`super_assembly`, `super_panel_wcnc`, `cnc_nest/cut_outline`, `cnc_nest/nest_flat`), three
+`2bee_sensor_pod_v1/`, two `2bee_sensor_pod_v3/`, plus `inwall_decommission_plug_3d` (two boards).
+
+**The chain is real and was traced, not assumed:** `inwall_panel_cut.scad` →
+`sensor_pod_v1_enclosure_3d.scad` → `sensor_pod_pcb_sync.scad` → `pcb/sensor_pod/`
+(*"SUPERSEDED 2026-08-17 … Do not fab."*), which `cad`'s own comment at `inwall_panel_cut.scad:586-591`
+already documents. **The withhold is correct and is now the only thing holding nine sheet-cut
+designs.** Filed to `cad` + `ceo` `2026-09-17-15-12-58`.
+
+⚠ **A DEFECT I ALMOST REPORTED IN MY OWN DETECTOR, AND DID NOT, BECAUSE IT DOES NOT EXIST.**
+`SYNC_BOARD` is a regex over file CONTENT, and `inwall_panel_cut.scad` contains
+`"AUTO-GENERATED from pcb/sensor_pod/"` **inside a comment** — a withhold reached through prose would
+be right by luck. **The line above it is `if (!f.endsWith('_pcb_sync.scad')) continue;`**: only
+generated sync files are ever read. ⇒ ***I had read the pattern and not the guard over it***, and was
+one message from sending another lane a defect that is not there.
+
+The reader fix for circular `use` (see `scad.ts`, `parseIncludeLike`) took the
+hive family from *"not a function this subset knows"* to a clean parse:
+`2bee_hive_super_panel_wcnc.scad` and `2bee_hive_brood_panel_wcnc.scad` now
+report **0 errors, 0 unsupported**. Catalogue drops fell **51 → 40**.
+
+🔴 **They still do not appear on the Designs tab**, and the reason is no longer a
+reader limit — it is `ceo`'s ruling of 2026-09-05, which withholds any design
+whose source closure references a board carrying `_SUPERSEDED.md`:
+
+> *"source closure references sensor_pod … Do not fab. … Not a deletion: the
+> design stays in cad's tree, and this is a REFERENCE in the source closure, not
+> proof the geometry depends on that board — **each one cad clears comes back**."*
+
+⇒ **17 designs sit in `withheld` on that rule**, including every hive panel and
+both `cnc_nest` files. **The ruling names its own discharge condition and this
+lane must not self-serve it:** clearing the reference is `cad`'s call, and
+overruling the withhold is `ceo`'s. Filed to both.
+
+⚠ **Do not "fix" this here by weakening the withhold check.** The check is right:
+a card offers a design to make, and the board under it is one we have said we
+will not fabricate.
+
+## #165 · 🟢 DONE 2026-09-17 — the budget counted MENTIONS, and a cycled file lost its own variables (was OPEN 2026-09-09)
+
+The circular-`use` fix re-reads the cycled file for DEFINITIONS ONLY and does not
+follow that file's own imports. Measured alternative, so this is a choice and not
+an oversight: following them multiplied the re-reads, burned the 128-file import
+budget, and made `2bee_hive_panels_18mm.scad` refuse its own
+`use <2bee_hive_floor_wcnc.scad>` — reporting `bb_floor_flat()` as an unknown
+module while it is defined one file away. Raising `MAX_IMPORTS` to remove that
+symptom produced **154 evaluation errors** on the same file: the fan-out was the
+disease and the budget was the only thing containing it.
+
+**Still dropped for this reason:** `2bee_hive_panels_18mm_inner_wcnc.scad`,
+`..._outer_wcnc.scad`, `cnc_nest/nest_flat.scad`, `cnc_nest/cut_outline.scad`.
+⚠ **THAT LIST WAS WRONG ABOUT ONE OF ITS FOUR, AND HAD BEEN SINCE IT WAS WRITTEN:**
+`cnc_nest/cut_outline.scad` is **WITHHELD**, not dropped — *"source closure references sensor_pod —
+a board carrying `_SUPERSEDED.md`"*, which is **#164's ruling, not this defect**. A file listed under
+the wrong blocker is one nobody re-checks against the right one.
+
+---
+
+🟢 **2026-09-17 — THE CAUSE WAS NOT WHERE THIS TICKET SAID IT WAS.**
+
+The ticket blamed the definitions-only re-read not following its own imports. **Measured on
+`2bee_hive_panels_18mm_inner_wcnc.scad`:**
+
+```
+146 host reads · 33 DISTINCT files · MAX_IMPORTS 128 · 2bee_hive_floor_wcnc.scad NEVER READ
+```
+
+🔴 **`MAX_IMPORTS` is documented as *"files pulled into one parse"* and was charged PER ENCOUNTER.**
+A file imported by ten siblings cost ten. The budget was exhausted by re-encounters of the same 33
+files before `2bee_hive_floor_wcnc.scad` was reached even once — so `bb_floor_flat()` came back as
+*"not a module this subset knows"* while the source names that file on **line 18**. ⇒ ***The
+defs-only re-read was never on this path; I built a memo for it first and it changed nothing.***
+
+**The fix charges the budget once per resolved path.** ⚠ **`MAX_IMPORTS` is UNCHANGED at 128** —
+raising it was tried and produced 154 evaluation errors, so the fan-out was the disease. Only the
+quantity being charged moved, onto the one the constant always described.
+
+⚠ **NOT A PARSE CACHE, and that distinction is why this one held.** A file's parse depends on
+`openPaths` — the same file is a cycle from one importer and not another — and reusing one caller's
+tree for another is exactly what regressed `2bee_hive_super_panel_wcnc.scad` from clean to 26 errors
+when a memo was last attempted. **Only the ACCOUNTING is shared.** `super_panel` is **still clean**
+(0 errors, 0 unsupported).
+
+⚠ **ONE BEHAVIOURAL CHANGE, STATED RATHER THAN HIDDEN:** the charge happens AFTER resolution,
+because the resolved path is not known before it, so a file past the ceiling is still READ and then
+refused. **Host reads are no longer bounded by this constant; parsed and bound files are.**
+
+**Measured effect on the catalogue — and a swap would have been invisible, so both sets were
+diffed against `HEAD`:**
+
+```
+before   scanned 389 · listed 89 · dropped 38 · withheld 16
+after    scanned 389 · listed 90 · dropped 36 · withheld 17
+LOST: (none)      GAINED: 2bee_feeder/feeder_box.scad
+```
+
+🟢 `..._outer_wcnc.scad` **now parses clean** (0/0, 676 primitives) and moved dropped → **withheld**,
+under **#164's** superseded-board ruling — its blocker is now the one it should always have had.
+⚠ **`inner_wcnc` and `nest_flat` now report 38 and 19 ERRORS** where they reported unsupported names:
+reading further reaches `inwall_panel_cut.scad:291`, `variable inwall_cut_pilots_default is not
+defined`. **Still dropped — a real defect that was previously hidden behind an import the budget had
+refused.** That is why this is **PART-DONE**, not done.
+
+🟢 **`web/tests/import-budget.test.ts`, 3 tests, and the plants found two defects IN THE TESTS:**
+
+| plant | result |
+|---|---|
+| revert to per-encounter charging | 1 fail |
+| budget removed (`>= 100000`) | 2 fail |
+| restored | **3 pass** |
+
+⚠ **The first version of test 1 stayed GREEN under plant A.** It put 200 `use <shared.scad>` lines in
+ONE file: the first binds the name and later refusals take nothing away. **Rewritten to the shape
+`hardware/cad` actually has** — many different files importing one library, with the name needed by
+the last of them. ⚠ **Its second version then failed on CORRECT code** — 202 distinct files genuinely
+exceed a 128 budget, so it was measuring the limit doing its job and calling that the bug. **Sized at
+100 siblings: 102 files per-file, 202 per-encounter.** ⚠ **And test 2 first asserted on
+`host.served.size`, which counts reads including ones refused after resolution — it would have sent
+me to "fix" a limit that was working.**
+
+**What it probably needs:** memoise the definitions-only re-read per resolved
+path for the life of one parse, so following imports costs one read per file
+instead of one per encounter. A first attempt at that regressed
+`2bee_hive_super_panel_wcnc.scad` from clean to 26 errors and was reverted rather
+than shipped — the interaction with `use` scoping is not understood yet.
+
+⚠ **And one reporting gap rides with it:** the refusal the re-read emits is
+INVISIBLE, because `execUse` binds a `use` body's scope and never executes its
+statements. Surfacing it means teaching `execUse` to walk for refusals, which
+would newly redden every design whose `use`d files refuse anything.
+
+🔴 **2026-09-17, SECOND HALF: BUILT, MEASURED, REVERTED — because a working control refused it.**
+
+The remaining defect is that a cycled file's module cannot see its **own** file-level variables:
+
+```
+inwall_cut_pilots_default = false;                                       // line 249
+module inwall_node_wall_cut(..., cnc_pilots = inwall_cut_pilots_default,  // line 291
+```
+
+The defs-only re-read keeps `module`/`function` and drops top-level assignments, so the default
+resolves to nothing.
+
+🟢 **Keeping `assign` too WORKED on the real tree:** all five hive files reached **0 errors / 0
+unsupported** (`inner_wcnc` 1626 prims, `nest_flat` 1224); `dropped 36 → 33`, `withheld 17 → 20`;
+**nothing lost and nothing gained in the listed set**, both diffed against `HEAD`. ⇒ **Three designs
+moved from *"the reader cannot read it"* to *"held by #164's ruling"*** — the reader stops being
+their blocker.
+
+🔴 **AND IT BROKE `tests/scad-circular-use.test.ts`.** Its fixture is
+`a.scad: use <b.scad>; x = b_zbot();` / `b.scad: use <a.scad>; function b_zbot() = 118;`. With
+assignments kept, `a`'s own `x = b_zbot()` is evaluated inside the defs-only re-read of `a`, where
+`b_zbot` does not exist yet — so **a function that IS defined became an unsupported construct.**
+⇒ ***The exact failure the circular-`use` fix was written to remove, reintroduced by a change meant
+to extend it.***
+
+⚠ **Making that test green by suppressing its diagnostics wholesale would have been silencing a
+working control to ship a change it was correctly refusing.**
+
+🟢 **RESOLVED the same day, by the narrow version that paragraph named.** The `use` node produced by
+a cycled read now carries `defsOnly: true`; `bindScope` binds THAT body's top-level assignments with
+the diagnostic arrays snapshotted and restored around each evaluation. ⇒ **The bindings exist and the
+diagnostics do not** — and ⚠ **nothing that was previously reported became silent, because those
+assignments were not evaluated at all before, so there was never a report to lose.**
+
+**Result:** all five hive files at **0 errors / 0 unsupported** (`inner_wcnc` 1626 prims, `nest_flat`
+1224); `dropped 36 → 33`, `withheld 17 → 20`, `conservation 90+33+20+246=389`; **nothing lost and
+nothing gained in the listed set**, diffed against `HEAD`. ⇒ **Three designs move from *"the reader
+cannot read it"* to *"held by #164's ruling"* — the reader is no longer their blocker, and clearing
+the ruling is `cad`/`ceo`'s call.**
+
+| plant | result |
+|---|---|
+| drop the assignments again | 1 fail |
+| report the quiet binds (attempt one's defect) | 1 fail here **+ 1 in `scad-circular-use`** |
+| suppression made global | 1 fail |
+| `seenRefusal` snapshot removed | **could not be made to fire — see below** |
+
+⚠ **THE SCOPING TEST WAS VACUOUS ON ITS FIRST WRITING.** It put an undefined module CALL in the root
+and asserted it still reported — but the quiet window only ever wraps ASSIGNMENT evaluation, so
+forcing `quiet` on for every `use` left that call as loud as before. ⇒ ***A scoping test has to
+exercise something inside the WIDENED scope, not something the scope never covered.*** Rewritten
+against a non-cycled `use`d file whose own top-level assignment fails.
+
+🔴 **AND ONE CLAIM OF MINE IS WITHDRAWN RATHER THAN DEFENDED.** The comment asserted the
+`seenRefusal` snapshot stops a later genuine refusal of the same name and line being swallowed.
+**I could not construct a case where it matters** — the dedupe key is built from `this.origin`, so a
+quiet refusal inside the cycled re-read and the outer parse's refusal of the same source line get
+DIFFERENT keys. **Removing the snapshot changed no test and no measured output.** It is kept because
+restoring state you truncated is cheap, and the comment now says it guards a hazard nobody has
+demonstrated.
+
+## #167 · 🟢 DONE 2026-09-17 — `scanned` can fall 40% and every downstream number holds
+
+```
+09-13   scanned 635 · listed 89 · dropped 40 · withheld 19 · described 28/89
+today   scanned 389 · listed 89 · dropped 38 · withheld 16 · described 28/89
+```
+
+`cad` removed `hardware/cad/archive/` — **302 of the 304 files that left**, verified with
+`git ls-tree` at both commits and against the filesystem. Benign: `archive/` was never a product
+surface, so `FAMILIES` never offered it and `listed` did not move by one.
+
+🔴 **The defect is that nothing could tell that apart from a scanner whose walk had narrowed.** A
+`continue` added by mistake, a rename, an unreadable directory — each moves `scanned` exactly like
+this, and `index.json` publishes `scanned` and `listed` side by side while asserting no relation
+between them. ⇒ ***A number that can move 40% while every number downstream of it holds is not a
+number anyone is reading.***
+
+⚠ **NOT a ratchet on `scanned`.** A floor on an input count reds every time `cad` legitimately
+reorganises, which is precisely what happened here, and a check that fires on correct work is one
+people disarm — `ceo` and `legal` have both ruled that shape out.
+
+**What to build instead is the RELATION:** every scanned file that reached the filter must land in
+exactly one of `listed` / `dropped` / `withheld` / a named skip, and the sum must account for the
+population. That is conservation, not a level: green through `cad`'s archive move, red on a
+narrowing walk. ⚠ The skip reasons are the hard part — files are excluded before the filter (not
+under a `FAMILIES` directory, vendored libs) and those exclusions are currently uncounted, so the
+first version of this has to COUNT the skips before it can balance anything.
+
+---
+
+🔴 **2026-09-17 — THE SAME DEFECT BIT AT THE TEST LAYER, AND THE TEST ACCUSED THE WRONG COMPONENT.**
+
+`cad` deleted `2bee_sensor_pod_v2/` (`470c198dfe`: *"superseded by v3, zero live importers, verified
+byte-identical renders before deletion"*) — correct work by the lane that owns the tree.
+`tests/shop-descriptions.test.ts` named its three designs as **withheld** and went red with:
+
+```
+2bee_sensor_pod_v2/pod_v2_carrier.scad is absent from the catalogue but not RECORDED as withheld
+```
+
+⚠ **That sentence points a reader at the generator, which was fine — it cannot withhold a file that
+is not there.** ⇒ ***A control with two states for a three-state world reports the nearest wrong one,
+confidently.*** The states are `withheld` (a live decision about a live design), `retired` (the
+source is gone upstream) and `missing` (the reader lost it) — and only the third is a defect here.
+
+🔴 **AND DELETING THE THREE NAMES WOULD HAVE BEEN THE WORSE FIX.** That test exists so a design
+cannot leave the catalogue silently; removing a name to make it green *is* the silent departure,
+performed by hand. **The names stayed and changed CLASS**, carrying the upstream commit that moved
+them, with a **bidirectional** assertion: the source must be gone from `cad`'s tree AND absent from
+the catalogue, so a restored design goes red and has to be re-examined rather than quietly
+reappearing. **Both directions proven by a plant** — restoring the file: red with *"is BACK in cad's
+tree … must return to the withheld list"*; a withheld row with no source: red with *"a withholding
+outlives its design and becomes a permanent unexplained absence"*.
+
+⚠ **A pinned count of a deleted group was also retired** (`2bee_sensor_pod_v2/ === 3`) and replaced
+by the property it was standing in for: **nothing may be withheld whose source is not in `cad`'s
+tree.** A count of a group that no longer exists can only ever be wrong.
+
+🟢 **`npm run test:node` 1347/1347.** ⚠ **#167 STAYS OPEN** — this hardened the consumer, and the
+generator still publishes `scanned` and `listed` with no relation asserted between them.
+
+---
+
+🟢 **BUILT 2026-09-17 — AND THE FIRST VERSION DID NOT CATCH THE DEFECT THIS TICKET NAMED.**
+
+**Two checks, because one was measured to be insufficient.**
+
+**1. Conservation.** Every scanned file must land in exactly one of `listed` / `dropped` /
+`withheld` / a NAMED skip, refused at build time:
+
+```
+conservation: 89+38+16+246=389
+skipped: { archiveOrLib: 84, notOffered: 120, looseAtRoot: 5, noPrimitives: 37 }
+```
+
+🔴 **IT FOUND A SILENT SKIP ON ITS FIRST RUN — 37 FILES.** `if (parsed.counts.primitives === 0)
+continue;` inside the family loop: params files, `*_pcb_sync.scad`, animation helpers — a legitimate
+exclusion that appeared in **no bucket, no count and no reason list**. ⚠ **Named and counted, NOT
+added to `dropped`:** a drop means *this reader could not open a design*, and filing 37 module
+libraries there would overstate the reader's shortfall every build.
+
+🔴 **2. THE WALK, AGAINST `git ls-files` — AND THIS IS THE ONE THE TICKET ACTUALLY ASKED FOR.**
+⚠ **MEASURED, not reasoned:** planting a narrowing walk (one `continue` dropping `metal_nest/`)
+produced `scanned 386 · listed 87 · dropped 38 · withheld 16` and the build **PASSED**. ⇒ ***Files
+that never enter `files` reduce `scanned` and every bucket together, so the sum balances perfectly
+while the page has silently narrowed.*** ***A conservation check can only balance the population it
+was given; it has nothing to say about the population it was denied.***
+
+So the walk is compared against `TRACKED` (`git ls-files`) — **a derivation sharing no code with
+`readdirSync`**. A directory the walk stops descending into is still in git's index and is named.
+**One direction only, deliberately:** files in the walk but not in git are someone's uncommitted
+work on a tree thirty lanes share, and demanding set equality would red on that and get this
+disarmed inside a week.
+
+🟢 **Green through `cad`'s archive move by construction** — a deleted file leaves both derivations —
+which is why this is not the `scanned` ratchet the ticket ruled out.
+
+**Plants, all three red, and plant 1 is the one that matters:**
+
+| plant | before | after |
+|---|---|---|
+| narrowing walk (`metal_nest`) | **PASSED** — `scanned 386 · listed 87` | `the walk did not reach 3 .scad file(s) that git tracks` |
+| silent skip re-armed | — | `reached no bucket — neither listed, dropped, withheld, nor a NAMED skip` |
+| one path in two buckets | — | `is in TWO buckets — 'listed' and 'dropped'` |
+
+⚠ **The earlier `2bee_entrance` plant was caught by `CANCELLED_EXEMPT`, a NAME-PINNED guard**, which
+is why the second plant used a family no hardcoded list mentions. **A plant that fires because some
+other check happens to name your test subject has proven nothing about the check you are testing.**
+
+⚠ **Both checks publish a witness** (`conservation`, `walkVsGit`) — a check whose PASS emits nothing
+cannot prove it ran.
+
+## #169 · 🟡 HALF CLOSED 2026-09-21 — `offset(delta=…)` was SILENTLY DISCARDED (fixed); the cut file is still 9% wrong (open)
+
+🟢 **THE DISCARD IS FIXED, 2026-09-21, AND IT IS THE SMALLER HALF.** `offset(delta = k)` now offsets
+by `k` with a **mitred** corner, `offset()` with no arguments is `r = 1` rounded rather than a no-op,
+`r` wins over `delta` with OpenSCAD's own warning, and `chamfer = true` is **refused by name** instead
+of being drawn as a mitre. Every rule was put to the binary (openscad 2026.08.07) before it was coded
+— the twelve measured rows are in the comment at the call site and re-measured by the test's last
+limb, which SKIPS where the binary is absent.
+
+🔴 **AND IT CHANGES NOTHING IN THE CATALOGUE TODAY — say this before the fix is read as a recovery.**
+The two files that use `delta` are `2bee_hive/2bee_hive_joinery.scad:69`, behind `fj_fillet` which
+**defaults to `false`** (founder 2026-07-12, back to dogbone), and
+`2bee_sensor_pod_v3/sensor_pod_v3_enclosure_3d.scad:124`, which is **withheld**. So `npm run shop` is
+byte-identical — **0 of 92 entries change** — and the value of the fix is entirely in what happens the
+moment either condition flips: a `-D fj_fillet=true` run, or that design being unblocked. ⇒ ***A fix
+whose blast radius is zero today is still the difference between a correct part and a 2 mm-oversize
+one tomorrow, and it is worth exactly that — no more.***
+
+**Negative controls, both run:** re-planting the old `??` chain turns **4** of the 11 tests red
+(including the fillet idiom); making the kernel ignore `join` and always round turns **2** red. A test
+that cannot go red for the defect it names is not a test.
+
+### The original report, kept because the 9% half is still live
+
+**#169 (original) — 2026-09-17**
+
+```
+2bee_hive/2bee_hive_panels_18mm_inner_wcnc.scad:231
+  openscad  offset(delta=-0.8, chamfer=false, $fn=0, $fa=12, $fs=2)
+  ours      offset(r=0,                       $fn=0, $fa=12, $fs=2)
+  volume    47,404,590.94  vs  43,133,846.08     — 9.0% LOW
+```
+
+🔴 **The argument is not refused, not warned about, and not applied — it is DROPPED.** In `scad.ts`'s
+`offset` handler:
+
+```js
+const rVal     = toNum(eval(named.get('r') ?? pos[0]?.value ?? {v: 0}));   // 0, not null
+const deltaVal = toNum(eval(named.get('delta')             ?? {v: 0}));    // -0.8
+const r = rVal ?? deltaVal ?? 0;                                           // 0 ?? -0.8 → 0
+```
+
+⚠ **The `{v: 0}` default defeats its own `??` chain**: absent `r` yields `0`, which is not nullish, so
+`delta` is discarded. ⇒ ***A 0.8 mm inward offset vanishes and the part still meshes, still posts and
+still draws a plausible picture*** — the exact failure class this lane's mission names.
+
+**Two files use it, both via the fillet idiom `offset(r=k) offset(delta=-k)`:**
+`2bee_hive/2bee_hive_joinery.scad:69` (included by the whole hive family) and
+`2bee_sensor_pod_v3/sensor_pod_v3_enclosure_3d.scad:124`.
+
+⚠ **A FIX WAS BUILT, MEASURED AND BACKED OUT — recorded so the next attempt starts here.**
+`offsetOutline` inserts arc segments only inside `if (r > 0 && cross > 0.01)`; its `else` branch
+already intersects the two offset edges, **which is exactly the mitred corner `delta` asks for**. So
+`delta` is one flag, and it worked: `ours` became `offset(r=-0.8)` with mitred corners.
+🔴 **IT DID NOT CLOSE THE DIVERGENCE.** Volume rel went **0.0901 → 0.0911** — slightly *worse* — and
+the reference is ~10% above both readings, so the dominant error is elsewhere. The case notes name
+`refused: text() [kernel], difference() [kernel]`. ⇒ ***A change that is more correct in the abstract
+and does not fix the thing it was aimed at is not a fix; shipping it would have spent the finding.***
+
+🔴 **A SECOND CAUSE WAS FOUND AND MEASURED — 2026-09-17. ⚠ I CALLED IT "THE DOMINANT CAUSE" AND
+THAT WAS WRONG; THE RETRACTION IS BELOW, NOT IN A LATER ENTRY.**
+
+```
+REFUSED difference() @104 :: the operation exceeded 200,000 polygons.
+                             The operation was abandoned and NOTHING is drawn for this node
+ours 237,056 triangles          openscad 84,482          — 2.8x
+```
+
+⇒ ***An entire `difference()` subtree is abandoned, which is the ~10% of missing volume.*** That much
+holds. The budget is not wrong; the polygon count feeding it is inflated — and one named source of
+inflation is real:
+
+```ts
+// mesh.ts:3185
+const outline = offsetOutline(flat.outline, r);        // fn defaults to 16
+function offsetOutline(outline: V3[], r: number, fn: number = 16) …
+  const arcSegments = Math.max(2, Math.ceil((sweep / Math.PI) * fn));
+```
+
+⚠ **`offsetOutline` ignored `$fn`/`$fa`/`$fs` entirely and hardcoded 16 segments per half-turn**,
+while `fragmentsRequested(r, f)` in the same file already implemented OpenSCAD's rule correctly and
+was never called for an offset. **Worked for this file's `r = 0.8`, `$fn=0 $fa=12 $fs=2`:**
+
+| | fragments per full circle | per 90° corner |
+|---|---|---|
+| OpenSCAD | `max(5, ceil(min(360/12, 0.8·2π/2)))` = **5** | ~2 |
+| ours | effectively **32** (16 per half-turn) | **8** |
+
+🔴 **RETRACTED 2026-09-18 — "the dominant cause" was an INFERENCE, and counting the geometry
+disproves it.** `2bee_hive_panels_18mm_inner_wcnc.scad` instantiates **~920 cylinders, 766 of them at
+`$fn = 24`**. Its polygon count is **fastener holes**, not offset arcs. ⇒ ***I reasoned "4× at every
+convex corner" → "therefore the dominant term" without ever asking what fraction of the geometry is
+offset arcs.*** The 4× is measured and true; the causal weight attached to it was not measured at all.
+
+🟢 **THE FIX IS SHIPPED ANYWAY, ON ITS OWN MERIT — 2026-09-18.** `facets()` is lifted out of
+`Parser.primitive()` into `Evaluator.facetsFrom(named, env, line)` (a **move**, body unchanged),
+`GroupNode.offset` carries `f: Facets`, and `mesh.ts` passes `arcFn(|r|, f)`. **The reader now honours
+the tessellation the source asked for instead of a constant** — that is a correctness defect closed
+regardless of what it does to any ledger.
+
+**What it did and did NOT do, measured both sides:**
+
+| | HEAD | with the fix |
+|---|---|---|
+| `npm run test:node` | 1353/1353 | **1353/1353, 0 skipped** |
+| `npm run shop` | `listed 92 · dropped 33 · withheld 18` | **identical**, and the listed/withheld SETS diff empty |
+| `inner_wcnc` triangles | 237,056 | **218,864** (−7.7%) |
+| `inner_wcnc` `difference() @104` | REFUSED > `MAX_POLYS` | **STILL REFUSED** |
+| oracle ledger | `SAME 86 · DIVERGES 7 · STRICTER 4 (2 solid) · REFUSED-BOTH 2 · PENDING 5` | **byte-identical, same four diverging files** |
+
+⇒ ***This closes NOTHING in the oracle and must never be reported as closing #169.*** 21 of 92
+catalogue entries change triangle count (most down, three UP — the source asked for finer), no entry
+changes `parts` or `trust`, nothing entered or left `withheld`.
+
+🔴 **AND THE FIRST ATTEMPT AT IT SHIPPED A UNIT BUG THAT LOOKED LIKE PROGRESS.** `offsetOutline`'s
+`fn` is **per half-turn**; `fragments(r, f)` returns OpenSCAD's count **per full circle**. Passing one
+into the other **doubled** the density everywhere `fragments ≥ 16` — hence `arcFn()`, which halves.
+⚠ **The file I was aiming at could not see the error**: `inner_wcnc`'s radii are small (5 fragments),
+so its count still fell and the change read as correct. It was
+`2bee_hive_fan_box_panel_wcnc.scad` — `offset(r = 3, $fn = 32)` → 64 per circle — that crossed
+`MAX_POLYS` and had its `difference()` abandoned. ⇒ ***Its verdict went `DIVERGES → STRICTER`, and in
+the ledger that reads as a WIN: `DIVERGES 7 → 6`.*** The file had stopped being drawn at all. **A
+capability loss presented itself as a one-line improvement in the score I was optimising**, and the
+only reason it did not reach a commit message is that the ledger rule already says
+*REFUSED→DIVERGES counts as getting WORSE* and I went to look at which file moved.
+
+**STILL OPEN, and the original defect: `offset(delta=…)` is discarded.** The `{v: 0}` default above
+still defeats its own `??` chain. The mitre fix (one flag on `offsetOutline`'s `else` branch) was
+built, measured at `0.0901 → 0.0911` rel volume and backed out — it is *more correct in the abstract*
+and does not move the file it was aimed at, because the missing volume is the abandoned boolean. It
+should land when it can be justified as correctness rather than as a fix for the 9%.
+
+🟢 **THE BLOCKING QUESTION IS ANSWERED — 2026-09-24, measured on openscad 2026.08.07.** *"Is
+OpenSCAD's 84,482 a POST-UNION count against our summed-per-solid one?"* **Yes, and two further
+things fall out of the same six probes:**
+
+```
+case                                   openscad   ours    ratio
+cylinder(h=10,r=4,$fn=24)                    92     92     1.00
+sphere(r=5,$fn=16)                          252    252     1.00
+union(){cube(10); translate cube(10);}       36     56     1.56
+difference(){cube(20); cube(10);}            28     52     1.86
+difference(){cyl(r=4); cyl(r=2);}           192    284     1.48
+cube(10); translate cube(10);   (siblings)   36     24     0.67
+```
+
+🔴 **1. PRIMITIVES MATCH EXACTLY (1.00).** ⇒ ***The 2.8× is NOT "we tessellate primitives too
+finely"*** — the facets work landed 09-18 was correct and is not where the excess lives.
+🔴 **2. OUR BOOLEAN OUTPUT IS 1.5–1.9× DENSER than OpenSCAD's for the SAME result solid.** Three
+cases, so the range is indicative and not a law — **but the inflation is in the CSG kernel's output,
+not the input.**
+🔴 **3. THE LAST ROW IS THE ONE THAT SETTLES THE COMPARISON.** Two overlapping top-level siblings:
+OpenSCAD reports **36** — it implicitly *unions* them — and we report **24**, the plain sum of two
+independent cubes. ⇒ ***OpenSCAD's number is always POST-boolean. Ours, when a boolean is refused, is
+a PRE-boolean SUM.***
+
+⇒ 🔴 ***`inner_wcnc`'s 237,056 vs 84,482 was never a like-for-like comparison, in two independent
+ways at once:*** our count sums solids whose `difference()` was abandoned, and our booleans emit
+~1.5–1.9× where they do run. **Neither number is wrong; they are answers to different questions.**
+
+⇒ 🔴 ***AND `MAX_POLYS` IS APPLIED TO THE PRE-BOOLEAN SUM.*** A design whose booleans would *remove*
+most of their input is refused on a polygon count **that would never have existed in the output**.
+**That is the real shape of #169's remainder, and it is not "delete geometry":** it is either a
+budget measured against what the kernel actually emits, or a CSG output that does not inflate.
+⚠ **Not attempted yet, and not to be attempted on this measurement alone** — three boolean cases are
+enough to disprove the like-for-like reading, not enough to size a budget.
+
+🟢 **THE MECHANISM IS FOUND AND IT IS EXACTLY 2× ON BOOLEAN-CREATED BOUNDARY — 2026-09-25.**
+Same plate, one hole, `$fn` swept:
+
+```
+$fn        6     12     24     48        closed form
+openscad  40     64    112    208        4N + 16
+ours      64    112    208    400        8N + 16          ⇒ ours(N) == openscad(2N), exactly
+```
+
+⇒ ***Our count is OpenSCAD's with the cutting cylinder at twice the facets.*** **Both are linear in
+the cutting-plane count; the excess is precisely `4N` per hole, and the ratio tends to 2.0.**
+
+🔴 **WHY, and it is structural rather than a bug:** `mesh.ts:2140-2200` is a **BSP CSG** (`splitPolygon`,
+`COPLANAR/FRONT/BACK/SPANNING`, `csgUnion`/`csgSubtract`/`csgIntersect` at `:2337-2363`). **A BSP
+splits every polygon against every plane it meets**, so an `$fn = 24` hole cuts the cap face with 24
+planes and leaves fragments that each triangulate separately. **OpenSCAD's kernel computes the
+intersection curve and re-triangulates the cap ONCE with the hole as an inner boundary.** ⇒ ***The
+excess is the algorithm's, not the model's, and it scales with `$fn` × number of holes — which is
+`inner_wcnc` exactly (766 cylinders, 766 × `$fn = 24`).***
+
+**Predicted from the closed form:** `4 × 24 × 766 ≈ 73,500` excess triangles from hole boundaries
+alone, against a measured gap of `237,056 − 84,482 = 152,574`. ⚠ **The rest is the OTHER half already
+recorded above** — our number is a PRE-boolean sum because the `difference()` was abandoned, so the
+two effects are additive and neither is an error in the geometry.
+
+**Where that leaves the remainder, and what it is NOT:**
+- 🔴 **NOT "delete geometry".** The part is correct; the count is an artefact of how it is reached.
+- **Either** the budget is measured against what this kernel emits (BSP output, not OpenSCAD's),
+  **or** the CSG gains a coplanar-fragment merge pass so the count stops being ~2× on every hole.
+- ⚠ **A merge pass is a change to the most safety-critical function in the mesher** and must not be
+  attempted off this measurement alone. **Six shapes and one `$fn` sweep is enough to explain the
+  number; it is not enough to license a kernel change.**
+- 🟢 **Measured ratios by operation, for whoever sizes it:** `intersection` **1.00** ·
+  `union` (stacked) **1.08** · `union` (overlapping) **1.56** · `difference` (ring) **1.49** ·
+  `difference` (plate + 4 holes) **2.09** · `difference` (plate + 6 holes) **2.27**. ***Holes in a
+  flat face are the expensive case; unions and intersections are nearly free.***
+
+**What it needs:** the facets fix LANDED 2026-09-18 and moved the divergence **not at all**; `delta`
+LANDED 2026-09-21 with a test that asserts the mitred corner by area, and it moves the catalogue **not
+at all** either (both its call sites are dormant — see the top of this item). **So the 9% is now the
+WHOLE of what is left, and neither landed fix touched it.** ⚠ **And a re-measure of where `inner_wcnc`'s polygons actually come from:**
+766 cylinders at `$fn = 24` is the count to attack if the abandoned `difference()` is to be recovered,
+and nobody has yet checked whether OpenSCAD's 84,482 is a POST-union count against our summed-per-solid
+one — if it is, the 2.8× is partly an accounting difference and not all of it is ours to remove. ⚠ **Refusing
+`offset(delta=…)` outright was also measured: `listed 90 → 83`, seven designs dropped.** That is the
+safe direction per `CAD1H` and it is a real cost — take it only with the divergence understood.
+
+## #168 · ⚠ OPEN 2026-09-17 — the e2e runner ran twice today after two lanes freed ~1.8 GB, and nobody measured the boundary
+
+🔴 **2026-09-17 19:04 — THE FAILING SIDE IS MEASURED. FIVE OF THIS SESSION'S TASKS WERE KILLED FOR
+LOW MEMORY AND THE MINUTE WAS CAPTURED.**
+
+```
+MemFree         4,059,236 kB   (3.87 G — 9–10 G all day until then)
+MemAvailable   58,783,052 kB   (56.1 G)
+SwapFree               76 kB   ← seventy-six kilobytes
+Shmem          14,559,236 kB   (13.9 G tmpfs; /tmp 20 G used)
+oom_kill                    0  ← /proc/vmstat — the KERNEL OOM KILLER NEVER FIRED
+```
+
+**Stable, not a spike:** three samples over 30 s, `SwapFree` 76 → 116 → 140 kB, `MemFree` ~3.7 G.
+
+🟢 **`oom_kill 0` eliminates the kernel OOM killer with a POSITIVE READING rather than by
+inference** — the harness reaper did this. ⇒ **One of the six hypotheses is now closed on evidence.**
+
+🔴 **AND IT IS THE `MemAvailable` TRAP CAUGHT IN THE ACT: 56 G "available" beside `SwapFree` of
+76 kB.** ⚠ **This lane asserted exactly that on 2026-09-17 morning, was refuted by `cyber`, and
+withdrew it for lack of a failing-side reading.** **13.9 G of `Shmem` is RAM that cannot be
+reclaimed, paged out or evicted, and `MemAvailable` counts none of that constraint.** ⇒ ***A reaper
+reading `MemAvailable` sees 56 G and should not fire; one reading `MemFree` sees 3.87 G and should —
+both of the same instant.***
+
+⚠ **WHAT IT DOES NOT SETTLE, and the ticket stays open for it:** this is a reading from **a**
+failure, not from **the** 09-13 / 09-16 runner failures, which nobody measured and which were four
+days earlier. **The correlation stays a correlation.** ⚠ **Nor does it identify which field the
+reaper reads — two numbers from one instant are not a mechanism, and the harness is fleet infra.**
+Filed to `ceo` + `cyber` `19-05-48`.
+
+🟢 **`cyber` SAMPLED AGAIN AND THE NUMBERS MOVED — re-verified here independently at 19:07:42.**
+🔴 ***CORRECTED 2026-09-17 19:11 BY `ceo`: I CALLED THIS "THE BOX RECOVERED". IT DID NOT.*** **That
+reading IS the crash.** `webauto` filed at `19-06-53` that the shared CDP-9334 Chrome — **195 tabs**
+— died and restarted; their post-crash `4.8Gi free` matches `cyber`'s `SwapFree 4.77 GB` to the
+gigabyte. ⚠ **I adopted the word from `cyber` after independently verifying the NUMBERS** — the
+figures were right and the word was wrong, which is the harder half to catch. ⇒ ***The condition that
+silenced the alarm is the condition it was warning about, arriving.*** **Confirmed here: 115 Chrome
+processes alive** ~~youngest 76 s old — a restart wave~~ 🔴 **— and THAT age-derived timing was wrong,
+mine as much as `cyber`'s.** `ceo` timestamped the sequence: `19:06:00 SwapFree still 116 kB` →
+**`19:06:17` Chrome 9334 main-process restart (PID 1582022)** → `19:06:53 webauto files`.
+⚠ **`--restore-last-session` forks a renderer per tab, so with ~100 tabs restoring the youngest
+process is constantly refreshed: an age dates THE LAST TAB THAT LOADED, not the restart.** ⇒ ***An age
+is only the age of the thing you sampled.***
+
+🔴 **AND THE ORDER, WHICH IS WHAT THE CORRELATION WAS MISSING (`ceo`, 19:18):**
+
+```
+19:04:42  2bee_app  SwapFree      76 kB   5 tasks killed        oom_kill 0
+19:06:00  ceo       SwapFree     116 kB   still exhausted
+19:06:17  CHROME 9334 MAIN PROCESS RESTART   PID 1582022, --restore-last-session
+19:06:53  webauto files the crash report
+```
+
+⇒ ***The five kills PRECEDE the browser crash by 95 seconds.*** **The reaper fired while swap was
+still exhausted; the crash did not cause them.** Both are downstream of one exhaustion, in order:
+**tabs fill swap → reaper kills idle tasks → 95 s later Chrome dies.** 🟢 **For THIS failure the
+sequence is evidence rather than inference.** ⚠ **It still does not reach 09-13 / 09-16 — #168 stays
+open.** ⚠ **`ceo` marks one link unconfirmed unprompted:** *which lane's activity drove swap to 76 kB
+is not measured* — the mechanism is confirmed, that link is not.
+⚠ **`cyber` THEN CORRECTED THEIR OWN INTERVAL TOO, AND IT MATTERS TO THE SHAPE OF THE ERROR.** They
+said *"sampled again ~30 minutes later"*; **they never timestamped the read.** Bounded from a later
+clock check, it sits in **(19:05, 19:12)** — **4–7 minutes**, not 30. ⇒ ***"~30 minutes later,
+recovered" reads as gradual; "~5 minutes later, 4.8 G free" reads as a release, which is what it
+was.*** **A bad number propped up a bad conclusion, in that order.**
+🔴 **AND THEY DECLINE TO CONFIRM `ceo`'s ATTRIBUTION RATHER THAN AGREE WITH IT:** youngest Chrome is
+~~**126–128 s**, putting the restart at **≈19:10:26**~~ **(superseded — see the timestamped sequence
+above)**, and **without a timestamp they cannot say
+whether they sampled before or after it.** **The 4.77 / 4.8 GB match is strong and they can add
+nothing to it** — *"I destroyed my own ability to correlate by not recording the time."* **What their
+read still supports is `oom_kill 0`, which is time-independent.**
+🟢 **My own 19:04:42 and 19:07:42 readings are unaffected — both carry their clock.** ⚠ **The standing
+action said *"in the same minute"*, and that clause turns out to be the entire value of the
+capture.**
+
+| | 19:04:42 (failing) | 19:07:42 (post-crash — NOT recovered) |
+|---|---|---|
+| `MemFree` | 3.87 G | 8.83 G |
+| `MemAvailable` | 56.1 G | 64.2 G |
+| `SwapFree` | **76 kB** | 5.00 G *(still 80.1% used of 24.0 G)* |
+| `Shmem` | 13.9 G | 14.0 G |
+| `oom_kill` | **0** | **0** |
+
+⇒ ***`oom_kill 0` now holds across the five kills AND a later quiet sample*** — **the kernel OOM
+killer has not fired on this box at all today, so every "low memory" stop today was the harness.**
+**Stronger than the single reading: the elimination rests on a positive result twice.**
+
+🔴 **AND THE `MemAvailable` DISPUTE RESOLVES INTO TWO SEPARATE CLAIMS, BOTH SURVIVING** — worth
+pinning because it would otherwise be mis-remembered as one side losing. **`cyber`'s formulation:**
+*"you were right about the trap and I was right about the argument."* **The TRAP is real** — 56 G
+beside 76 kB, with 13.9 G of `Shmem` that can be neither dropped nor paged. **What was refuted was
+using `MemAvailable` as evidence that the box was FINE and the reaper therefore misread a field.**
+⇒ ***At `SwapFree 76 kB` the box was not fine, so a reaper firing there may be conservative and
+CORRECT.*** **Two answers to two different questions.**
+
+🟢 **And it inverts the tmpfs lever.** `cyber` had corrected `ceo`'s *"every GB freed from `/tmp`
+raises `MemFree` 1:1"* down to **~57%**, because ~10.7 of ~27 G of tmpfs content was swapped out.
+⚠ **At `SwapFree 76 kB` that correction cuts the OTHER WAY and makes the lever MORE valuable:**
+deleting a swapped-out tmpfs page frees the **swap slot**, and swap headroom was the exhausted
+resource. ⇒ **Under that condition every GB of tmpfs deleted returns either RAM or swap, and there is
+no third place for it to go.**
+
+**The fact.** Three Playwright runs completed on this box today — `e2e/dev-server.spec.ts` (`1
+passed (1.2m)`), `e2e/designs-multi-open.spec.ts` (`8 passed (1.5m)`), and then **the WHOLE SUITE**:
+
+```
+npx playwright test --reporter=line
+  116 passed (4.2m)
+```
+
+**Before today, every attempt relaunched before reaching an assertion**, across every launch shape
+tried: `elapsed 38 s` with a 0-byte log on 2026-09-13 and 2026-09-16, and `elapsed 10 s` earlier on
+2026-09-17.
+
+⚠ **The 116-test run makes the correlation stronger and still does not make it a cause.** It is a
+third success on the same side of the same boundary; **no measurement was taken on the failing side
+by anyone**, and three passes after a change are what both a real cause and a coincidence look like.
+🟢 **What it DOES settle is a different question that was open:** the suite is not merely capable of
+starting — **it runs to completion under a 4.2-minute load with no flake and no failure**, which is
+the thing a single-spec pass could not show.
+
+**What changed in the same hour, by two different lanes:** `cad` killed four orphaned `openscad`
+renders (1.61 GB, pids 1431364 / 3354790 / 2321361 / 2663735) and this lane killed two orphaned
+`vite` dev servers (+161 MB, elapsed 1,800,911 s ≈ 20.8 days).
+
+🔴 **THIS IS A CORRELATION AND IT IS BEING FILED AS ONE.** Six hypotheses were eliminated with
+evidence over three days — session teardown, cron/systemd/repo killers, `webServer.timeout`, kernel
+OOM, launch shape, and memory pressure as it was then framed. ⚠ **Memory pressure survives as a
+candidate, not as the answer.** Nobody took a measurement on the failing side and nobody took one
+on the passing side; the record has two successes after a change and three failures before it,
+which is the shape of both a real cause and a coincidence.
+
+**What would settle it, and what would NOT.** Re-running the suite now and watching it pass proves
+nothing — it samples only the current state. The test is to **reproduce the failure**: occupy
+comparable memory deliberately, run the same suite, and see whether it relaunches at the same
+elapsed. ⚠ **Until that runs, do not write "the orphans were the cause" into any lane's record.**
+
+🟢 **UPDATED 2026-09-17 — `cad`'s SELF-CORRECTION HANDS ME A TEST THAT NEEDS NO DELIBERATE HARM.**
+They re-ran their gate uncapped and found it **slow-but-finite, not stalled**, and in doing so
+measured the thing I needed: `pnp_drive_drum_assembly` renders for **~300 s**, growing **4.9 GB @ 97
+s → 11.3 GB @ 230 s → 13.1 GB @ 287 s, linear at ~46 MB/s**, bounded by an existing
+`RENDER_TIMEOUT=300`. ⇒ ***A multi-GB memory spike is a ROUTINE, RECURRING event on this box, not
+the one-off leak the orphan story implied.***
+
+**So the experiment does not have to be run by me at all.** The load arrives on its own: **run this
+suite while `cad`'s gate is rendering, and record `/proc/meminfo` and the runner's `elapsed` in the
+same minute.** ⚠ **That is observation, not injection** — it costs no other lane anything, because
+the memory would have been consumed whether I watched or not. **It is also a better test than mine
+was**, since it reproduces the actual condition rather than a synthetic imitation of it.
+⚠ **What it still cannot do is prove a negative:** if the suite passes during a render, memory
+pressure is weakened as a candidate but not eliminated, because I would not know the pressure
+reached the level that was present on the failing days. **Record the level, not just the outcome.**
+
+🔴 **AND THIS LANE IS STILL NOT RUNNING THE INJECTION VERSION, WHICH IS WHY #168 STAYS OPEN RATHER
+THAN BEING CLOSED WITH A VERDICT.** The box is shared by 30 lanes, `SwapFree` is **57,704 kB of 24 G** — effectively
+zero — and the proposed experiment is *deliberately consuming several GB of RAM until something
+breaks*. **The thing it would break is another lane's work**, and the ticket that started this
+sequence exists because exactly that happened to mine. ⇒ ***A diagnostic that reproduces the harm it
+is diagnosing is not a diagnostic this lane may run unilaterally.*** It needs either a quiet box or
+a founder/`ceo` decision to accept the disruption. **Recorded as a REFUSAL with its reason, not as a
+step still pending** — an unexplained gap in a plan reads as an oversight and gets "helpfully"
+filled in by whoever picks this up next.
+Standing action from the memory work still applies: capture `/proc/meminfo` including `SwapFree` in
+the same minute as the next relaunch, which is the one reading that separates a harness defect from
+a capacity fact.
+
+🟢 **2026-09-17 — EVERY RUN NOW RECORDS THE BOX ITSELF.** `e2e/memory-witness.ts`, wired as
+`globalSetup`/`globalTeardown`:
+
+```
+[mem] suite start  MemTotal=123.23G MemFree=9.54G MemAvailable=55.71G SwapTotal=24.00G SwapFree=1.26G Shmem=13.88G
+[mem] suite end    MemTotal=123.23G MemFree=9.11G MemAvailable=55.28G SwapTotal=24.00G SwapFree=1.26G Shmem=13.88G
+  1 passed (1.4m)
+```
+
+🔴 **BECAUSE THE MANUAL VERSION NEVER HAPPENED.** *"Capture `/proc/meminfo` in the same minute as the
+next failure"* was written into this lane's record **three times** across four days and performed
+**zero** times. ⇒ ***A step that depends on someone being present at the moment of failure is a hope,
+not a measurement.***
+
+⚠ **`SwapFree` is why this is not `free -m`.** With swap exhausted, the page cache `MemAvailable`
+counts is the only reclaimable thing and tmpfs cannot move — so a large `MemAvailable` beside a zero
+`SwapFree` is not the headroom it looks like. **This lane published *"50 G available"* on 2026-09-17
+and withdrew it for exactly that.**
+
+⚠ **IT EXPLAINS NOTHING AND MUST NEVER BE READ AS HAVING DONE SO** — two timestamped readings in a
+log. **And a PASS carries its level too**, which is the half that gets forgotten: a green says
+nothing about headroom unless you know what the headroom was.
+
+🟢 **Negative control:** pointed at a non-existent file, the suite still reports
+`1 passed`, `rc=0`, with `[mem] could not read /proc/meminfo: ENOENT …` on both lines. **A witness
+that could red the suite would make the coverage it is trying to explain even scarcer.**
+
+⚠ **And the coverage question is now decoupled from the mechanism.** #166's browser half is proven
+(above) regardless of how this resolves. **The risk that remains is a suite that runs today and
+silently stops running again**, which reads exactly like a suite nobody happened to run — so a
+PENDING that cannot distinguish the two is the thing to guard against, not the relaunch itself.
+
+## #166 · 🟢 DONE 2026-09-17 — mouse half PROVEN IN A BROWSER (was PART-DONE 2026-09-13)
+
+**2026-09-13, the second half.** Two behaviours, both of which decide whether a 3D view feels right:
+
+- **Zoom toward the pointer.** `zoomTowardCursor` in `src/projection.ts` — ONE definition, called
+  with identical text by both viewports, which already import that module. 🔴 **The four guarded
+  sign conventions are untouched**: `radius * (deltaY > 0 ? 1.12 : 0.9)` is byte-identical in both
+  files and still matches OpenSCAD. What is added is a LATERAL shift of the orbit centre, which
+  OpenSCAD does **not** do — a deliberate divergence, recorded as one, because zooming toward the
+  middle of the screen while the part is in a corner is what makes a viewer feel like it is
+  fighting you. A fifth parity needle covers the CALL, since the maths cannot drift but the
+  arguments can.
+- **Double-click re-centres on what is under the pointer.** Raycast the part meshes; on a miss, the
+  horizontal plane through the current pivot; on an edge-on ray, nothing. `data-pivot-from`
+  publishes which of the three, so a hit and a fallback are distinguishable rather than both
+  reading as success. It moves `target` ONLY — angles and radius are untouched, so it re-anchors
+  rather than re-framing, and `Fit` stays the thing that re-frames.
+
+**12 new unit tests** assert the property an operator would see — the world point under the cursor
+stays under the cursor — across four cameras and both directions, by projecting through the
+viewport's own basis. Not the algebra: a test that re-derived the formula would agree with the
+implementation by construction and still pass if both were rotated 90°.
+
+🟢 **RESOLVED 2026-09-17 — THE SUITE RAN AND THE TWO GESTURES ARE NOW EXERCISED IN A BROWSER.**
+
+```
+npx playwright test e2e/designs-multi-open.spec.ts --reporter=line
+  8 passed (1.5m)
+```
+
+Both seams the unit tests could not reach are green: `[7/8] the wheel zooms toward the pointer, not
+toward the middle` and `[8/8] double-click re-centres on what is under the pointer, and says which`.
+The wheel test reads the saved camera before and after a notch taken at 80% / 25% of the canvas and
+requires `target` to have moved more than 0.01 — zoom-to-centre changes `radius` only, so it is the
+exact behaviour this change replaced that the assertion is written against. The re-centre test
+requires `data-pivot-from` to be `part` or `plane` and `radius`/`theta`/`phi` to be unchanged to six
+places, so a gesture that had quietly become `Fit` would fail rather than pass.
+
+⚠ **TWO STALE CLAIMS IN THE PARAGRAPH THIS REPLACES, BOTH WRITTEN BY ME, BOTH NOW WITHDRAWN:**
+
+1. ***"each restart re-runs the ~10-minute webServer build"*** — **FALSE, and it was false when
+   written.** Measured: `real 0m59.810s` for the cargo/wasm step plus `vite build` at 3.10 s ≈ **64
+   s**, against a 180 s cap. The figure came from timing `npm run build`, a different command, and
+   had aged. `ceo` built a config defect on top of it; both the number and the defect are withdrawn.
+2. ***"the two gestures have never been exercised in a browser"*** — true on 2026-09-13, retired
+   today. **A stale 🔴 costs as much as a stale ✅ and is harder to find**, because nobody re-tests a
+   blocker that names a reason.
+
+🔴 **WHAT MADE IT RUN IS NOT ESTABLISHED, AND THE HONEST ANSWER IS A CORRELATION WITH n=2.** In the
+same hour, `cad` killed four orphaned `openscad` renders (1.61 GB) and this lane killed two orphaned
+`vite` dev servers 20.8 days old (+161 MB). Two suites completed immediately afterwards — the first
+on this box after three documented failures (2026-09-13, 2026-09-16, and 2026-09-17 at elapsed 10
+s). ⚠ **That is consistent with memory pressure and does not prove it.** No measurement was taken
+across the boundary in either direction, so the mechanism stays a candidate. See #168.
+
+## #166a · ⚠ 2026-09-11 — gizmo and bar SHIPPED; the mouse/pivot half was untouched
+
+**Done:** a top-right orientation gizmo with six clickable axis ends, and a bottom bar carrying
+Iso/Top/Front/Right + `Fit`. Geometry in `src/cad/gizmo.ts` (pure, 9 unit tests), painted from the
+orbit's own `theta`/`phi` so it cannot disagree with the camera. `parseScad`-free, DOM not WebGL,
+because the ask is click-to-orient and a scissored GL widget cannot be clicked without a raycaster.
+
+🔴 **It reverses an earlier founder ruling and BOTH are recorded** — the WebGL corner gizmo was
+removed when the arrows were wanted near the object. They answer different questions: the pivot
+triad is in the WORLD and says what the view turns about; the corner widget is on the SCREEN and
+says which way the camera points. Neither is deleted from the record.
+
+⚠ **TWO DEAD-CONTROL DEFECTS, BOTH FOUND BY A REAL CLICK AND NEITHER BY A UNIT TEST:**
+1. the canvas out-stacked the gizmo, so all six ends were unclickable — perfect paint, no `zIndex`;
+2. the "bottom" bar was put in the TOP-anchored overlay column, so it rendered under the gizmo and
+   the gizmo intercepted every click on `Fit`.
+⇒ ***Markup and geometry can both be right while every control is dead.*** `e2e` named the
+interceptor by testid in each case; `tests/cad-camera-parity.test.ts` now asserts the two live at
+opposite anchors and that the gizmo out-stacks the canvas.
+
+🔴 **STILL OPEN — the harder half, and the one the founder named first:** *"2bee.cad mouse
+interaction, mouse, center of view"*. Orbit still turns about `target` (the framed pivot), not about
+what is under the cursor, and there is no click-to-set-pivot. An orbit that pivots about the wrong
+point is what actually makes a viewer feel wrong, and none of it is addressed here.
+
+⚠ **And still not copied:** the referenced page's visual design. The CONVENTION (corner gizmo,
+bottom bar) is not the same thing as its look, which is a trade-dress question and `brand`'s call.
+
+## #166a · ⚠ SUPERSEDED HEADER — the original entry, kept for its reasoning
+
+Founder, 2026-09-09, pointing at a jlcmc product-page 3D viewer: *"I like the top
+right corner xyz, and menu structure on the bottom (if we have menus)"*.
+
+**Not started.** What it means concretely: a corner axis/orientation widget that
+also acts as a click-to-orient control (top/front/right/iso), and moving the
+viewport's controls into a bottom bar instead of wherever they are now. Mouse
+interaction and the centre-of-view/orbit-pivot behaviour were named in the same
+breath and are the harder half — an orbit that pivots about the wrong point is
+the thing that actually makes a viewer feel wrong.
+
+⚠ **Do not copy the referenced page's visual design.** Reproducing a specific
+site's look on a served product is a trade-dress question and an outward-facing
+brand decision, neither of which is this lane's; the CONVENTION (corner gizmo,
+bottom control bar) is not.
+
+## #170 · ⚠ OPEN 2026-09-26 — the hardware oracle is a serial loop over 318 independent files, and the reasons it is serial are real but not measured
+
+**From the ceo gate audit (`handover/2bee_app/2026-09-26-13-21-23-…`), parallelism half.** Founder
+ruling 2026-09-23: parallel is the default and the serial case states its reason.
+
+`tools/scad_oracle/oracle.mjs:1133` walks every case in one `for` loop, one `openscad` spawn plus one
+in-process evaluation per file. The files are independent — no case reads another's output — so the
+work is shardable. The full `--hardware` leg is ~25 min and is the one CAD1H cannot score under
+`--quick`.
+
+**Why it is still serial — two reasons that would change the RESULT, not habit:**
+1. **Memory.** One case can hold up to 512 MB of STL triangles (`oracleFor`), and this loop has
+   already OOM'd once (2026-09-04, the zero-hit cache). N shards is up to N × that.
+2. **Wall-clock timeouts decide verdicts.** `openscad.mjs` spawns with `DEFAULT_TIMEOUT_MS`; under
+   CPU contention a case that answers today can time out and land as ERROR, which CAD1H counts.
+
+**What would make it parallel with the same quality:** shard by process (`--shard i/N`), cap N and
+print it, run one shard set against a serial run on the same input tree, and require byte-identical
+verdict tables before switching. Not done today — no measured contention budget exists.
+
+⚠ **And the leg has no scheduled runner at all** (measured 2026-09-26: no cron, no hook, no
+`fleet_gate_check.py` row runs `slicer_gate_check.mjs`), so speeding it up changes nothing until
+something runs it. Raised with `ceo` in the audit reply.

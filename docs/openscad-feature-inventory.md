@@ -27,6 +27,26 @@
 >   *"The honest headline"* still stands: finishing Tier 0 does not make this an
 >   OpenSCAD-alike.
 >
+> 🔴 **CORRECTED 2026-09-21 — §2's table still prints `REFUSED` for constructs
+> this reader IMPLEMENTS, and the row for `offset()` is the one I can vouch for
+> today.** `offset(r | delta, chamfer)` is **implemented**: `r` rounds, `delta`
+> mitres (landed 2026-09-21, TODO #169 — before that `delta` was silently
+> discarded and read as `offset(r = 0)`), and **only `chamfer = true` is refused**,
+> by name, with the three measured areas in its message.
+>
+> ⚠ **And the staleness is not confined to that row, which is why it is flagged
+> here rather than edited row by row.** `KNOWN_REFUSED_MODULES` in `scad.ts:971`
+> — the parser's refusal list — now holds **exactly one entry, `hulls`, "not an
+> OpenSCAD module"**; every other name in it has been replaced by a comment
+> saying the construct is handled (`hull`, `minkowski`, `offset`,
+> `linear_extrude`, `rotate_extrude`, `polygon`, `polyhedron`, `mirror`,
+> `multmatrix`, `resize`, `import`, `surface`, `text`, `projection`, `echo`,
+> `assert`, `intersection_for`). ⇒ ***A `REFUSED` verdict in §2 is evidence of
+> the date it was written, not of what the code does.*** I have re-verified only
+> the `offset` row; the rest are named as suspect, not as corrected, because
+> asserting sixteen rows I did not run would replace one stale table with a
+> confident one.
+
 > ⚠ **The one number in §5 that has now been measured:** *"how much of
 > `hardware/cad`'s real corpus this subset parses"*. `tools/scad_oracle
 > --hardware`, over its 68-file selection, run before and after:
@@ -386,7 +406,7 @@ trusting `KNOWN_REFUSED_MODULES`. One 18-line file containing `linear_extrude`, 
 |---|---|---|---|
 | `hull()` | convex hull of the children *(cheatsheet)* | refused, `scad.ts:318`; subtree dropped | REFUSED |
 | `minkowski(convexity)` | Minkowski sum *(binary-resolved)* | refused, `scad.ts:317` | REFUSED |
-| `offset(r \| delta, chamfer)` | 2D outward/inward offset *(binary-resolved)* | refused, `scad.ts:319` | REFUSED |
+| `offset(r \| delta, chamfer)` | 2D outward/inward offset *(binary-resolved)* | **implemented** — `r` rounds, `delta` mitres (2026-09-21); `chamfer = true` refused by name | **PARTIAL** |
 | `linear_extrude(...)` | §1.4 | refused, `scad.ts:320` | REFUSED |
 | `rotate_extrude(...)` | §1.4 | refused, `scad.ts:321` | REFUSED |
 | `projection(cut)` | 3D → 2D | refused, `scad.ts:331` | REFUSED |
@@ -417,7 +437,7 @@ trusting `KNOWN_REFUSED_MODULES`. One 18-line file containing `linear_extrude`, 
 | function **literals** `f = function(x) …` | §1.7 — probed, works | probed ours → `expected ";", found "x"`. The user is stopped, but the message names the wrong token and never says "function literals are not implemented". | REFUSED *(weakly — misattributed)* |
 | `$t`, `$preview`, `$vpr/$vpt/$vpd/$vpf`, `$children` **read** | §1.8 | probed ours → `variable $t is not defined here; it evaluates to undef`, then `cannot apply + to undef and a number`. Diagnosed as a missing variable, not as a missing feature. | REFUSED *(weakly)* |
 | `roof`, `textmetrics`, `fontmetrics`, `object()`, `import()`-as-function, `.xy`/`.zyx` swizzle | **experimental**, `--enable` only (§1.14) | all refused generically. Correctly out of scope — these are not the language. | REFUSED |
-| Customizer annotations (§1.13) | drive a parameter UI, `-p`/`-P`/`-D`, `param` export | `/* [Section] */` and `// [10:50]` are **comments**, so they are stripped by the tokenizer and nothing is built from them. No parameter UI exists. Not a silent wrong shape — the model still evaluates with its literal defaults. | REFUSED *(by omission)* |
+| Customizer annotations (§1.13) | drive a parameter UI, `-p`/`-P`/`-D`, `param` export | `/* [Section] */` and `// [10:50]` are **comments**, so they are stripped by the tokenizer and nothing is built from them. ⚠ **Corrected 2026-11-13:** `cad/params.ts` now reads top-level literal variables, `/* [Section] */`, `[Hidden]` and `// [a:b]` / `// [a, b]` hints from the source TEXT (not the tokenizer) and `cad/ParamsPanel.tsx` shows them in cad, the design preview and 3d; a change rewrites that one literal. Parameter sets (JSON), `-D`/`-p`/`-P` and `param` export are still absent. | PARTIAL |
 
 ### 2.4 `SAME` — implemented, and the semantics were checked
 

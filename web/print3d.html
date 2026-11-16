@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- DEV-ONLY TEST HARNESS for the 2bee.3d tab (web/src/print3d/). `vite dev`
+         serves it at /print3d.html; `vite build` never sees it (only index.html
+         is an entry), so it is not part of the shipped app. It exists so
+         e2e/print3d.spec.ts can mount Print3dTab before the tab is wired into
+         App.tsx, which another session owns. -->
+    <title>2bee.3d harness</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/print3d/harness.tsx"></script>
+  </body>
+</html>

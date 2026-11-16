@@ -212,6 +212,9 @@ fn flags_for(cmd: &str) -> Option<FlagSpec> {
             ],
             boolean: &["--json"],
         },
+        // `setup` reads `--config` (the same JobConfig the browser sends) and
+        // nothing else: it answers a question and emits no G-code.
+        "setup" => FlagSpec { value: &["--config", "--sim-cell"], boolean: &[] },
         "fit" => FlagSpec {
             value: &[
                 "--tool", "--tool-radius", "--machine-x", "--machine-y", "--collet",
@@ -623,7 +626,11 @@ fn load_drawing(
                     }
                 },
             };
-            twobee_cam::mesh::section(&mesh, z, IMPORT_TOL_MM)
+            // 🔴 Through the 3MF door, not bare `section`: that wrote the STL
+            // note ("STL carries no units — millimetres ASSUMED") on a 3MF whose
+            // declared unit had just been applied — an operator trusting it and
+            // rescaling an inch part by hand cut it 25.4x too big (bughunt 2026-11-15).
+            twobee_cam::mesh::parse_3mf_section(&data, z, IMPORT_TOL_MM)
         // OBJ: parse as OBJ mesh
         } else if is_obj {
             let text = std::str::from_utf8(&data)
@@ -652,7 +659,7 @@ fn load_drawing(
                     }
                 },
             };
-            twobee_cam::mesh::section(&mesh, z, IMPORT_TOL_MM)
+            twobee_cam::mesh::parse_obj_section(text, z, IMPORT_TOL_MM)
         } else if is_step {
             // 🔴 REFUSED, and refused HARD: exit 1 with zero bytes on stdout.
             //
@@ -1122,6 +1129,7 @@ fn main() -> ExitCode {
         "recommend" => run_recommend(&args),
         "route" => run_route(&args),
         "fit" => run_fit(&args),
+        "setup" => run_setup(&args),
         "layout" => run_layout(&args),
         "nest" => run_nest(&args),
         _ => {
@@ -1134,6 +1142,8 @@ fn main() -> ExitCode {
             eprintln!("  recommend <file>      which cutter per feature, with the REASON and every rejection");
             eprintln!("  route <job|file>      reorder the cuts; prints link travel WITH its basis");
             eprintln!("  fit <file>            already inside / shift by X,Y / will-not-fit + the axis");
+            eprintln!("  setup <job> [--config f] the physical setup READ OFF THE EMITTED PROGRAM: tools in order,");
+            eprintln!("                        pauses, work offset, Z datum, depth vs workpiece, rpm, feeds (JSON)");
             eprintln!("  nest [<file>] [--drawing <f> [--offset <dx>,<dy>] [--rot <deg>] [--id <s>]]… [--config f]");
             eprintln!("  nest EMITS a program from N placed drawings and REFUSES the workpiece with no");
             eprintln!("  G-code if any pair of parts shares material or is closer than the cutter.");
@@ -1146,6 +1156,60 @@ fn main() -> ExitCode {
             eprintln!("  G-code — recommend, route, fit and layout answer a question. `nest` DOES emit.");
             ExitCode::from(2)
         }
+    }
+}
+
+/// `setup <job>` — what the human must do at the machine before this program
+/// runs, derived by the core (`twobee_cam::setup`) from the EMITTED PROGRAM and
+/// cross-checked against the job. The browser calls the same core function
+/// (`setup_facts_json` in the wasm), so the two hosts cannot disagree.
+///
+/// Exit `0` answered (facts clean) · `1` REFUSED — the job emitted no program
+/// that may be sent, or the program disagrees with the job (`mismatches`) or a
+/// fact could not be read (`pending`); the JSON is still printed so the reason
+/// can be read · `2` bad invocation / unknown job.
+///
+/// ⚠ Names are the core's reference jobs (`2bee-slice jobs`), NOT the CLI-local
+/// `fixture` generators (`rect-*`, `drill-peck`): those build no `Job`, so there
+/// is no declared tool list to cross-check the program against, and a setup
+/// checklist with nothing to cross-check is the guess this replaces.
+fn run_setup(args: &[String]) -> ExitCode {
+    let Some(name) = args.get(1).filter(|a| !a.starts_with("--")) else {
+        return bad_invocation("setup: a job name is required (see `2bee-slice jobs`)");
+    };
+    let cfg = match config_from(args) {
+        Ok(c) => c,
+        Err(e) => return bad_invocation(e),
+    };
+    let cell = match sim_cell_from(args) {
+        Ok(v) => v,
+        Err(e) => return bad_invocation(e),
+    };
+    let Some(answer) =
+        twobee_cam::setup::setup_for_reference_job(name, jobs::JobPlant::None, &cfg, cell)
+    else {
+        if FIXTURES.iter().any(|(n, _)| n == name) {
+            return bad_invocation(format!(
+                "setup: `{name}` is a CLI-local `fixture` generator with no Job behind it, so \
+                 there is no declared tool list to cross-check its program against. `setup` \
+                 takes a reference job: see `2bee-slice jobs`"
+            ));
+        }
+        return bad_invocation(format!("setup: unknown job '{name}'. run `2bee-slice jobs`"));
+    };
+    println!("{}", serde_json::to_string(&answer).unwrap());
+    if answer.ok {
+        ExitCode::SUCCESS
+    } else {
+        if !answer.refused.is_empty() {
+            eprintln!("refused: {name} — no program that may be sent, so no setup: {}", answer.refused.join("; "));
+        } else if let Some(f) = &answer.facts {
+            eprintln!(
+                "refused: {name} — the setup read off the program does not agree with the job: {}",
+                f.mismatches.iter().chain(f.pending.iter()).cloned().collect::<Vec<_>>().join("; ")
+            );
+        }
+        ExitCode::from(1)
     }
 }
 
@@ -3022,6 +3086,22 @@ fn run_layout(args: &[String]) -> ExitCode {
     }
 
     let findings = layout.check(&clearance);
+    // 🔴 A PLACEMENT OFF THE DECLARED SHEET IS NOT CLEAR. This grader took
+    // `--sheet-x/--sheet-y` and never compared a placement with them, so a part
+    // at (500, 300) on a 600x400 sheet printed CLEAR, exit 0 — half of it then
+    // cut in air or into the spoilboard. The PART outline must sit on the sheet;
+    // the cutter running just outside an edge is normal and not asked here.
+    //
+    // ⚠ ONLY AGAINST A SHEET THE CALLER DECLARED. `Stock::default()` is 600x900,
+    // and the sheet basis is an open question in this repo (three live numbers);
+    // grading against a default would settle it silently. No sheet, no check —
+    // and the output says so.
+    let sheet_declared = flag_value(args, "--sheet-x").is_some() && flag_value(args, "--sheet-y").is_some();
+    let placed: Vec<(String, twobee_cam::placement::Extent)> = loaded
+        .iter()
+        .filter_map(|(id, _)| Some((id.clone(), layout.get(id)?.placed_extent()?)))
+        .collect();
+    let off_sheet = off_sheet_findings(&placed, &stock, sheet_declared);
     let notes = layout.notes();
     // The travel question is asked of the UNION extent grown by the tool radius,
     // exactly as `fit` does. The radius is printed with the answer, because a
@@ -3058,7 +3138,9 @@ fn run_layout(args: &[String]) -> ExitCode {
                 "parts": layout.laid_out().iter().map(|l| l.part_ref().qualified()).collect::<Vec<_>>(),
                 "notes": notes,
                 "placement": placement,
-                "clear": findings.is_empty(),
+                "clear": findings.is_empty() && off_sheet.is_empty(),
+                "off_sheet": off_sheet,
+                "sheet_checked": sheet_declared,
                 "findings": findings.iter().map(|f| serde_json::json!({
                     "finding": f,
                     "describe": f.describe(),
@@ -3101,12 +3183,20 @@ fn run_layout(args: &[String]) -> ExitCode {
             None => println!("workpiece inside travel: nothing placed, so there is no extent to check"),
         }
         println!();
-        if findings.is_empty() {
+        if !sheet_declared {
+            println!("sheet: not declared (--sheet-x and --sheet-y), so placements were NOT checked against one");
+        }
+        for o in &off_sheet {
+            println!("OFF THE SHEET — {o}");
+        }
+        if findings.is_empty() && off_sheet.is_empty() {
             println!(
                 "CLEAR — every pair was examined and no pair shares material or is closer than \
                  {:.3}mm",
                 clearance.required_mm()
             );
+        } else if findings.is_empty() {
+            println!("REFUSED — {} drawing(s) off the declared sheet", off_sheet.len());
         } else {
             println!("REFUSED — {} interference finding(s):", findings.len());
             for f in &findings {
@@ -3120,7 +3210,7 @@ fn run_layout(args: &[String]) -> ExitCode {
         }
     }
 
-    if findings.is_empty() {
+    if findings.is_empty() && off_sheet.is_empty() {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
@@ -3135,8 +3225,48 @@ fn run_layout(args: &[String]) -> ExitCode {
 // test that only checks a bad value is refused, and it would take the CLI down
 // while looking green. So every case here is a PAIR: the bad value is refused
 // AND the good value still arrives, unchanged, at the field it sets.
+/// Every placed drawing whose PART extent leaves the declared sheet, as a
+/// sentence. Empty when no sheet was declared — see the caller.
+fn off_sheet_findings(
+    placed: &[(String, twobee_cam::placement::Extent)],
+    stock: &twobee_cam::types::Stock,
+    sheet_declared: bool,
+) -> Vec<String> {
+    if !sheet_declared {
+        return Vec::new();
+    }
+    let (sx0, sy0) = (stock.origin_x_mm, stock.origin_y_mm);
+    let (sx1, sy1) = (sx0 + stock.size_x_mm, sy0 + stock.size_y_mm);
+    let eps = 1e-6;
+    placed
+        .iter()
+        .filter(|(_, e)| e.min_x < sx0 - eps || e.min_y < sy0 - eps || e.max_x > sx1 + eps || e.max_y > sy1 + eps)
+        .map(|(id, e)| {
+            format!(
+                "`{id}` spans X {:.3} .. {:.3}, Y {:.3} .. {:.3} — the declared sheet is \
+                 X {sx0:.3} .. {sx1:.3}, Y {sy0:.3} .. {sy1:.3}; part of it would be cut off the material",
+                e.min_x, e.max_x, e.min_y, e.max_y
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_placement_off_the_declared_sheet_is_named_and_an_undeclared_sheet_is_not_graded() {
+        // 🔴 `layout` took --sheet-x/--sheet-y and never compared a placement
+        // with them: a part at (500,300) on a 600x400 sheet printed CLEAR.
+        use twobee_cam::placement::Extent;
+        let stock = twobee_cam::types::Stock { size_x_mm: 600.0, size_y_mm: 400.0, ..Default::default() };
+        let off = vec![("plate".to_string(), Extent { min_x: 500.0, min_y: 300.0, max_x: 700.0, max_y: 420.0 })];
+        let on = vec![("plate".to_string(), Extent { min_x: 10.0, min_y: 10.0, max_x: 210.0, max_y: 130.0 })];
+        assert_eq!(super::off_sheet_findings(&off, &stock, true).len(), 1, "off the sheet and not named");
+        assert!(super::off_sheet_findings(&on, &stock, true).is_empty(), "on the sheet and refused");
+        // The sheet basis is an open question here: no declared sheet, no grade.
+        assert!(super::off_sheet_findings(&off, &stock, false).is_empty());
+    }
 
     #[test]
     fn the_feed_backstop_sees_the_syntaxes_grblhal_accepts() {
@@ -3815,6 +3945,7 @@ mod tests {
         let body = format!("{}{}", &src[..table_start], &src[table_end..]);
         for cmd in [
             "job", "report", "import", "fixture", "recommend", "route", "fit", "layout", "nest",
+            "setup",
         ] {
             let spec = flags_for(cmd).unwrap();
             for f in spec.value.iter().chain(spec.boolean.iter()) {

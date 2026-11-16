@@ -70,7 +70,8 @@
 // tokens.css` (gate G-THEME). Cutting geometry is `--accent`; the shank, which
 // cuts nothing, is `--muted`. No hex literal appears in this file.
 
-import { useId } from 'react';
+import { lazy, Suspense, useId } from 'react';
+import { webglAvailable } from './tool3d/webgl';
 
 /** The library's largest cutter (25mm surfacing). The default shared scale. */
 export const LIBRARY_MAX_DIAMETER_MM = 25;
@@ -100,6 +101,13 @@ export interface ToolShapeTool {
    * IMPORTED tool file rather than for the whole library.
    */
   flute_type?: string | null;
+  /**
+   * Tip to back end, mm — cnc.tools' `overall_length_mm`. The core's tool JSON
+   * does not carry it, so the library rows leave it absent. Only the 3D view
+   * reads it (it builds the shank to length when it is stated); this flat
+   * drawing still breaks the shank, as its header says.
+   */
+  overall_length_mm?: number | null;
 }
 
 /** `row` sits in a 24px list row. `pane` is the properties view. Same drawing. */
@@ -434,7 +442,33 @@ function hatch(
   return out;
 }
 
-export function ToolShape({
+/* ── The preview: a 3D solid, with this drawing as its fallback ──────────── */
+
+// Founder 2026-10-15: *"in the tool list show the preview not a drawing but a
+// 3d object"*. The `'pane'` size — the property view of the tool picker and of
+// cnc.tools — is now a 3D solid built from the SAME `readToolShape()` fields
+// (`tool3d/geometry.ts`). The flat drawing below stays, and is what renders:
+//   * at `'row'` size (22x24 px — a solid that small shows nothing, and a list
+//     can hold dozens),
+//   * while the 3D chunk loads (it is lazy, so three.js is not pulled into
+//     this module's importers, nor into the Node tests that import them),
+//   * where WebGL is unavailable or the context is lost.
+const Tool3D = lazy(() => import('./tool3d/Tool3D').then((m) => ({ default: m.Tool3D })));
+
+export function ToolShape(props: ToolShapeProps) {
+  if (props.size === 'pane' && webglAvailable()) {
+    const flat = <ToolShape2D {...props} />;
+    return (
+      <Suspense fallback={flat}>
+        <Tool3D tool={props.tool} className={props.className} fallback={flat} />
+      </Suspense>
+    );
+  }
+  return <ToolShape2D {...props} />;
+}
+
+/** The flat, to-scale drawing. The `'row'` icon, and the 3D view's fallback. */
+export function ToolShape2D({
   tool,
   size = 'row',
   maxDiameterMm = LIBRARY_MAX_DIAMETER_MM,

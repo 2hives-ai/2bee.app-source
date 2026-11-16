@@ -20,11 +20,27 @@ function getStringFromWasm0(ptr, len) {
 /**
  * @returns {string}
  */
-export function tools() {
+export function plants() {
     let deferred1_0;
     let deferred1_1;
     try {
-        const ret = wasm.tools();
+        const ret = wasm.plants();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * @returns {string}
+ */
+export function jobs() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.jobs();
         deferred1_0 = ret[0];
         deferred1_1 = ret[1];
         return getStringFromWasm0(ret[0], ret[1]);
@@ -88,6 +104,31 @@ function passStringToWasm0(arg, malloc, realloc) {
     WASM_VECTOR_LEN = offset;
     return ptr;
 }
+/**
+ * The tool library WITH a fit verdict per tool for this machine's collets.
+ *
+ * Kept separate from `tools()` rather than replacing it: a caller that has no
+ * machine yet still needs the catalogue, and a library that silently reported
+ * every tool as unfittable because no collet was declared would be worse than
+ * one that does not answer the question at all.
+ * @param {number} collet_mm
+ * @param {string} spares_json
+ * @returns {string}
+ */
+export function tools_for_machine(collet_mm, spares_json) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(spares_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.tools_for_machine(collet_mm, ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
 
 function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
@@ -150,14 +191,13 @@ export function plan_import_many(drawings_json, blobs, config_json, sim_cell_mm,
 }
 
 /**
- * Version of the core and of the G-code contract it emits.
  * @returns {string}
  */
-export function version() {
+export function tools() {
     let deferred1_0;
     let deferred1_1;
     try {
-        const ret = wasm.version();
+        const ret = wasm.tools();
         deferred1_0 = ret[0];
         deferred1_1 = ret[1];
         return getStringFromWasm0(ret[0], ret[1]);
@@ -222,111 +262,6 @@ export function drawing_verdicts(config_json, drawings_json) {
 }
 
 /**
- * @returns {string}
- */
-export function jobs() {
-    let deferred1_0;
-    let deferred1_1;
-    try {
-        const ret = wasm.jobs();
-        deferred1_0 = ret[0];
-        deferred1_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-    }
-}
-
-/**
- * Can this machine hold this workpiece, and if not, would a quarter turn fix it?
- *
- * The UI asks; it does not re-derive. The last time a fit rule was written a
- * second time in TypeScript it was orientation-blind and refused a workpiece that
- * fits turned.
- * @param {number} size_x_mm
- * @param {number} size_y_mm
- * @param {number} rotation_deg
- * @param {number} travel_x_mm
- * @param {number} travel_y_mm
- * @returns {string}
- */
-export function stock_fit(size_x_mm, size_y_mm, rotation_deg, travel_x_mm, travel_y_mm) {
-    let deferred1_0;
-    let deferred1_1;
-    try {
-        const ret = wasm.stock_fit(size_x_mm, size_y_mm, rotation_deg, travel_x_mm, travel_y_mm);
-        deferred1_0 = ret[0];
-        deferred1_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-    }
-}
-
-/**
- * 🔴 **The UNION extent of everything on the workpiece** — the question a per-pair
- * check cannot ask.
- *
- * `drawings_json` is the same `PlacedDrawingIn[]` [`check_layout`] takes, so a
- * caller sends back exactly what it was given. Nothing is held between calls
- * and there is no layout handle: the caller already knows where its drawings
- * sit, and a second copy on this side of the wire would be a second source of
- * truth about where parts are.
- *
- * # Two extents come back and they are NOT interchangeable
- *
- * * `extent` — the placed GEOMETRY, outer boundaries only, exactly as drawn.
- * * `cut_extent` — that window grown by `tool_radius_mm` on every side: where
- *   the tool CENTRE goes. This is the one to compare against a workpiece when the
- *   outer profile is cut on the outside. Comparing `extent` instead is wrong by
- *   a whole cutter diameter, and wrong in the direction that says a job fits
- *   when it does not.
- *
- * `tool_radius_mm` is a **parameter with no default** — see [`NO_TOOL_RADIUS`].
- * Pass `0.0` deliberately when the coordinates already carry the offset.
- *
- * ⚠ **This does not answer workpiece fit and must not be read as doing so.** It
- * hands back a window; the caller compares it against whichever workpiece it holds.
- * See [`SHEET_FIT_IS_A_DIFFERENT_QUESTION`] — the sheet basis is contested in
- * this repo and belongs to bom + ops, so nothing here picks one.
- *
- * An empty workpiece is a **refusal**, not a zero extent — see [`EMPTY_SHEET`].
- * @param {string} drawings_json
- * @param {number} tool_radius_mm
- * @returns {string}
- */
-export function layout_extent(drawings_json, tool_radius_mm) {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const ptr0 = passStringToWasm0(drawings_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.layout_extent(ptr0, len0, tool_radius_mm);
-        deferred2_0 = ret[0];
-        deferred2_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-    }
-}
-
-/**
- * @returns {string}
- */
-export function plants() {
-    let deferred1_0;
-    let deferred1_1;
-    try {
-        const ret = wasm.plants();
-        deferred1_0 = ret[0];
-        deferred1_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-    }
-}
-
-/**
  * 🔴 **Does the whole set fit the machine's travel — and if not, what would?**
  *
  * The union extent from [`layout_extent`], handed to
@@ -374,6 +309,127 @@ export function plan_placement(drawings_json, tool_radius_mm, margin_mm, travel_
         return getStringFromWasm0(ret[0], ret[1]);
     } finally {
         wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Can this machine hold this workpiece, and if not, would a quarter turn fix it?
+ *
+ * The UI asks; it does not re-derive. The last time a fit rule was written a
+ * second time in TypeScript it was orientation-blind and refused a workpiece that
+ * fits turned.
+ * @param {number} size_x_mm
+ * @param {number} size_y_mm
+ * @param {number} rotation_deg
+ * @param {number} travel_x_mm
+ * @param {number} travel_y_mm
+ * @returns {string}
+ */
+export function stock_fit(size_x_mm, size_y_mm, rotation_deg, travel_x_mm, travel_y_mm) {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.stock_fit(size_x_mm, size_y_mm, rotation_deg, travel_x_mm, travel_y_mm);
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * How much clear material two parts must have between them, for this cutter.
+ *
+ * 🔴 **Returns the refusal, never a fallback number.** A clearance that cannot
+ * be built is `{ ok: false, why }` with no `required_mm` at all — a check that
+ * cannot run is not a check that passed, and a caller reading a plausible
+ * number off a failed call would place parts against it.
+ *
+ * This is the export that exists so nobody adds a cutter diameter to a margin
+ * in TypeScript. The sum is [`Clearance::required_mm`]'s, in the core, where
+ * the gates can see it.
+ * @param {number} cutter_diameter_mm
+ * @param {number} margin_mm
+ * @returns {string}
+ */
+export function clearance_for(cutter_diameter_mm, margin_mm) {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.clearance_for(cutter_diameter_mm, margin_mm);
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * Plan a job from a drawing the user supplied, as TEXT.
+ *
+ * `format` is `"dxf"` or `"svg"`. Everything the importer could not read comes
+ * back in `notes`, and a drawing that yields nothing cuttable comes back with
+ * `ok: false` and a reason — never as an empty program that looks finished.
+ *
+ * ⚠ Text only. A mesh must go through [`plan_import_bytes`]; an STL forced
+ * through here is either rejected or silently corrupted by the UTF-8 decode
+ * that happened before it ever reached this function.
+ *
+ * ⚠ And so there is deliberately **no `mesh_budget_tris` here**. A DXF or an
+ * SVG contains no 3D object — that is what the format is, not a gap — so a
+ * parameter asking for one would be a setting that can be turned on and does
+ * nothing, which reads to the next person as a broken feature. `loaded_mesh`
+ * comes back `null` from this export, always.
+ * @param {string} text
+ * @param {string} format
+ * @param {string} config_json
+ * @param {number} sim_cell_mm
+ * @param {number | null} [surface_cell_mm]
+ * @returns {string}
+ */
+export function plan_import(text, format, config_json, sim_cell_mm, surface_cell_mm) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(config_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.plan_import(ptr0, len0, ptr1, len1, ptr2, len2, sim_cell_mm, !isLikeNone(surface_cell_mm), isLikeNone(surface_cell_mm) ? 0 : surface_cell_mm);
+        deferred4_0 = ret[0];
+        deferred4_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Fingerprint of the `core/src` this wasm was compiled from — 12 hex chars.
+ *
+ * 🔴 This is the ONE export whose value must NOT be produced here. It is
+ * `twobee_cam::BUILD_ID`, baked in at compile time by the core's `build.rs`, so
+ * a wasm built from an older core keeps saying the older id no matter how new
+ * the page around it is. Gate K3 compares it against `2bee-slice buildid`.
+ *
+ * Prints bare, with nothing wrapped around it: the gate compares strings, and a
+ * JSON envelope invites a future "helpful" field that changes the comparison.
+ * @returns {string}
+ */
+export function build_id() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.build_id();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
     }
 }
 
@@ -436,95 +492,52 @@ export function tool_verdicts(config_json, parts_json) {
 }
 
 /**
- * Plan a job from a drawing the user supplied, as TEXT.
+ * Plan a job and return the full report as JSON.
  *
- * `format` is `"dxf"` or `"svg"`. Everything the importer could not read comes
- * back in `notes`, and a drawing that yields nothing cuttable comes back with
- * `ok: false` and a reason — never as an empty program that looks finished.
+ * Errors are RETURNED as JSON with `ok: false`, never thrown: a UI that has to
+ * catch to find out a program was refused will eventually forget to catch, and
+ * the refusal becomes invisible.
  *
- * ⚠ Text only. A mesh must go through [`plan_import_bytes`]; an STL forced
- * through here is either rejected or silently corrupted by the UTF-8 decode
- * that happened before it ever reached this function.
+ * # `surface_cell_mm` — the simulated stock surface, and why it is opt-in
  *
- * ⚠ And so there is deliberately **no `mesh_budget_tris` here**. A DXF or an
- * SVG contains no 3D object — that is what the format is, not a gap — so a
- * parameter asking for one would be a setting that can be turned on and does
- * nothing, which reads to the next person as a broken feature. `loaded_mesh`
- * comes back `null` from this export, always.
- * @param {string} text
- * @param {string} format
+ * Pass `undefined` (or omit it) and `simulated_stock_surface` comes back
+ * `null`. Pass a millimetre value and the report carries the machined surface
+ * as a base64 `f32` height map resampled to about that display cell.
+ *
+ * 🔴 It is opt-in because the honest size is punishing: at the default 0.6mm
+ * simulation cell a 600x900 workpiece is 1,001 x 1,501 samples — **8.0MB of base64
+ * on every single call**. A panel that re-plans while a slider moves would send
+ * that on every frame. Ask for it when something is going to draw it, at a cell
+ * that thing can afford (3mm on that workpiece is ~322KB), and decline it the rest
+ * of the time.
+ *
+ * 🔴 And name it correctly downstream. What comes back is the **simulated stock
+ * surface**, not the part: it cannot see a feature narrower than one cell, and
+ * on a through-cut it shows removed material without knowing which side of the
+ * cut is the part and which is the offcut.
+ * @param {string} job
+ * @param {string} plant
  * @param {string} config_json
  * @param {number} sim_cell_mm
  * @param {number | null} [surface_cell_mm]
  * @returns {string}
  */
-export function plan_import(text, format, config_json, sim_cell_mm, surface_cell_mm) {
+export function plan(job, plant, config_json, sim_cell_mm, surface_cell_mm) {
     let deferred4_0;
     let deferred4_1;
     try {
-        const ptr0 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const ptr0 = passStringToWasm0(job, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const ptr1 = passStringToWasm0(plant, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(config_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
-        const ret = wasm.plan_import(ptr0, len0, ptr1, len1, ptr2, len2, sim_cell_mm, !isLikeNone(surface_cell_mm), isLikeNone(surface_cell_mm) ? 0 : surface_cell_mm);
+        const ret = wasm.plan(ptr0, len0, ptr1, len1, ptr2, len2, sim_cell_mm, !isLikeNone(surface_cell_mm), isLikeNone(surface_cell_mm) ? 0 : surface_cell_mm);
         deferred4_0 = ret[0];
         deferred4_1 = ret[1];
         return getStringFromWasm0(ret[0], ret[1]);
     } finally {
         wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * The tool library WITH a fit verdict per tool for this machine's collets.
- *
- * Kept separate from `tools()` rather than replacing it: a caller that has no
- * machine yet still needs the catalogue, and a library that silently reported
- * every tool as unfittable because no collet was declared would be worse than
- * one that does not answer the question at all.
- * @param {number} collet_mm
- * @param {string} spares_json
- * @returns {string}
- */
-export function tools_for_machine(collet_mm, spares_json) {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const ptr0 = passStringToWasm0(spares_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.tools_for_machine(collet_mm, ptr0, len0);
-        deferred2_0 = ret[0];
-        deferred2_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-    }
-}
-
-/**
- * Fingerprint of the `core/src` this wasm was compiled from — 12 hex chars.
- *
- * 🔴 This is the ONE export whose value must NOT be produced here. It is
- * `twobee_cam::BUILD_ID`, baked in at compile time by the core's `build.rs`, so
- * a wasm built from an older core keeps saying the older id no matter how new
- * the page around it is. Gate K3 compares it against `2bee-slice buildid`.
- *
- * Prints bare, with nothing wrapped around it: the gate compares strings, and a
- * JSON envelope invites a future "helpful" field that changes the comparison.
- * @returns {string}
- */
-export function build_id() {
-    let deferred1_0;
-    let deferred1_1;
-    try {
-        const ret = wasm.build_id();
-        deferred1_0 = ret[0];
-        deferred1_1 = ret[1];
-        return getStringFromWasm0(ret[0], ret[1]);
-    } finally {
-        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
     }
 }
 
@@ -597,25 +610,27 @@ export function plan_import_bytes(data, format, z_section_mm, config_json, sim_c
 }
 
 /**
- * How much clear material two parts must have between them, for this cutter.
+ * The sourced spoilboard catalogue, for a host that has to draw a picker.
  *
- * 🔴 **Returns the refusal, never a fallback number.** A clearance that cannot
- * be built is `{ ok: false, why }` with no `required_mm` at all — a check that
- * cannot run is not a check that passed, and a caller reading a plausible
- * number off a failed call would place parts against it.
+ * 🔴 IT IS THE CORE'S LIST OR IT IS A SECOND LIST. `core/src/spoilboards.rs`
+ * says so in as many words: *"a catalogue re-typed in TypeScript is a second
+ * list that can drift, and the drift would be invisible: both sides would
+ * render confidently and only the machine would disagree"*. Every entry
+ * carries its `source` and the date it was read, so a picker can show WHERE a
+ * number came from rather than only how big it is — which is the difference
+ * between a measured board and an invented one.
  *
- * This is the export that exists so nobody adds a cutter diameter to a margin
- * in TypeScript. The sum is [`Clearance::required_mm`]'s, in the core, where
- * the gates can see it.
- * @param {number} cutter_diameter_mm
- * @param {number} margin_mm
+ * ⚠ The payload's `default_id` is `null` **on purpose**, and a host must not
+ * improve on that. Nothing here ranks the entries and `[0]` is not a
+ * recommendation; an over-declared board reports the machine's own frame as
+ * sacrificial material, so the operator picks the board they own.
  * @returns {string}
  */
-export function clearance_for(cutter_diameter_mm, margin_mm) {
+export function spoilboards() {
     let deferred1_0;
     let deferred1_1;
     try {
-        const ret = wasm.clearance_for(cutter_diameter_mm, margin_mm);
+        const ret = wasm.spoilboards();
         deferred1_0 = ret[0];
         deferred1_1 = ret[1];
         return getStringFromWasm0(ret[0], ret[1]);
@@ -676,37 +691,23 @@ export function check_layout(drawings_json, cutter_diameter_mm, margin_mm) {
 }
 
 /**
- * Plan a job and return the full report as JSON.
+ * The physical setup for a job — tools in order of use, every program stop,
+ * work offset, Z datum, depth against the workpiece, rpm and feeds — READ OFF
+ * THE EMITTED PROGRAM by the core and cross-checked against the job.
  *
- * Errors are RETURNED as JSON with `ok: false`, never thrown: a UI that has to
- * catch to find out a program was refused will eventually forget to catch, and
- * the refusal becomes invisible.
- *
- * # `surface_cell_mm` — the simulated stock surface, and why it is opt-in
- *
- * Pass `undefined` (or omit it) and `simulated_stock_surface` comes back
- * `null`. Pass a millimetre value and the report carries the machined surface
- * as a base64 `f32` height map resampled to about that display cell.
- *
- * 🔴 It is opt-in because the honest size is punishing: at the default 0.6mm
- * simulation cell a 600x900 workpiece is 1,001 x 1,501 samples — **8.0MB of base64
- * on every single call**. A panel that re-plans while a slider moves would send
- * that on every frame. Ask for it when something is going to draw it, at a cell
- * that thing can afford (3mm on that workpiece is ~322KB), and decline it the rest
- * of the time.
- *
- * 🔴 And name it correctly downstream. What comes back is the **simulated stock
- * surface**, not the part: it cannot see a feature narrower than one cell, and
- * on a through-cut it shows removed material without knowing which side of the
- * cut is the part and which is the offcut.
+ * Same inputs as [`plan`] (minus the surface request), same core call as
+ * `2bee-slice setup <job>`, so the Make step's checklist and the CLI cannot
+ * disagree. Returns `{ job, ok, refused, facts, gcode_sha256 }`; `facts` (and the
+ * hash of the program it was read from) is `null` when the
+ * job emitted no program that may be sent. Errors are RETURNED as JSON with
+ * `ok: false`, never thrown — same rule as [`plan`].
  * @param {string} job
  * @param {string} plant
  * @param {string} config_json
  * @param {number} sim_cell_mm
- * @param {number | null} [surface_cell_mm]
  * @returns {string}
  */
-export function plan(job, plant, config_json, sim_cell_mm, surface_cell_mm) {
+export function setup_facts_json(job, plant, config_json, sim_cell_mm) {
     let deferred4_0;
     let deferred4_1;
     try {
@@ -716,7 +717,7 @@ export function plan(job, plant, config_json, sim_cell_mm, surface_cell_mm) {
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(config_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
-        const ret = wasm.plan(ptr0, len0, ptr1, len1, ptr2, len2, sim_cell_mm, !isLikeNone(surface_cell_mm), isLikeNone(surface_cell_mm) ? 0 : surface_cell_mm);
+        const ret = wasm.setup_facts_json(ptr0, len0, ptr1, len1, ptr2, len2, sim_cell_mm);
         deferred4_0 = ret[0];
         deferred4_1 = ret[1];
         return getStringFromWasm0(ret[0], ret[1]);
@@ -726,32 +727,146 @@ export function plan(job, plant, config_json, sim_cell_mm, surface_cell_mm) {
 }
 
 /**
- * The sourced spoilboard catalogue, for a host that has to draw a picker.
+ * [`setup_facts_for_import_json`] for N placed drawings — the same arguments,
+ * parsed by the same helper, as [`plan_import_many`] (`drawings_json, blobs,
+ * config_json, sim_cell_mm`), planned by the same `plan_report_import_many`.
  *
- * 🔴 IT IS THE CORE'S LIST OR IT IS A SECOND LIST. `core/src/spoilboards.rs`
- * says so in as many words: *"a catalogue re-typed in TypeScript is a second
- * list that can drift, and the drift would be invisible: both sides would
- * render confidently and only the machine would disagree"*. Every entry
- * carries its `source` and the date it was read, so a picker can show WHERE a
- * number came from rather than only how big it is — which is the difference
- * between a measured board and an invented one.
- *
- * ⚠ The payload's `default_id` is `null` **on purpose**, and a host must not
- * improve on that. Nothing here ranks the entries and `[0]` is not a
- * recommendation; an over-declared board reports the machine's own frame as
- * sacrificial material, so the operator picks the board they own.
+ * 🔴 This is the one to pair with a plan made through `planImportMany` — the
+ * path the app plans EVERY import through. A drawing dragged or turned on the
+ * workpiece is a different program from the bytes planned as drawn, and only
+ * this export sees that placement.
+ * @param {string} drawings_json
+ * @param {Uint8Array} blobs
+ * @param {string} config_json
+ * @param {number} sim_cell_mm
  * @returns {string}
  */
-export function spoilboards() {
+export function setup_facts_for_import_many_json(drawings_json, blobs, config_json, sim_cell_mm) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(drawings_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(blobs, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(config_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.setup_facts_for_import_many_json(ptr0, len0, ptr1, len1, ptr2, len2, sim_cell_mm);
+        deferred4_0 = ret[0];
+        deferred4_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Version of the core and of the G-code contract it emits.
+ * @returns {string}
+ */
+export function version() {
     let deferred1_0;
     let deferred1_1;
     try {
-        const ret = wasm.spoilboards();
+        const ret = wasm.version();
         deferred1_0 = ret[0];
         deferred1_1 = ret[1];
         return getStringFromWasm0(ret[0], ret[1]);
     } finally {
         wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * The physical setup for ONE IMPORTED drawing — the Make step's checklist for
+ * a design the browser meshed, sectioned and planned.
+ *
+ * Same leading arguments, in the same order, as [`plan_import_bytes`]
+ * (`data, format, z_section_mm, config_json, sim_cell_mm`), and the SAME core
+ * planning call (`plan_report_import_bytes` → the one-element import engine).
+ * The surface and mesh requests are absent because they change the size of a
+ * plan's answer, never its program.
+ *
+ * Returns `{ job, ok, refused, facts, gcode_sha256 }` — `facts` read off the
+ * program that call emitted, cross-checked against that job's tools, workpiece
+ * and work offset. A refused plan → `facts: null`, `gcode_sha256: null`,
+ * reasons in `refused`. 🔴 Compare `gcode_sha256` with the SHA-256 of the
+ * `gcode` your plan call returned: unequal means the checklist describes a
+ * different program from the one being downloaded.
+ *
+ * A workpiece or material the config does not declare is planned on a default,
+ * so it lands in `facts.pending` and `ok` is false — never a clean checklist.
+ * Errors (bad config) are RETURNED as `{ ok: false, errors }`, never thrown.
+ * @param {Uint8Array} data
+ * @param {string} format
+ * @param {number | null | undefined} z_section_mm
+ * @param {string} config_json
+ * @param {number} sim_cell_mm
+ * @returns {string}
+ */
+export function setup_facts_for_import_json(data, format, z_section_mm, config_json, sim_cell_mm) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(config_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.setup_facts_for_import_json(ptr0, len0, ptr1, len1, !isLikeNone(z_section_mm), isLikeNone(z_section_mm) ? 0 : z_section_mm, ptr2, len2, sim_cell_mm);
+        deferred4_0 = ret[0];
+        deferred4_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * 🔴 **The UNION extent of everything on the workpiece** — the question a per-pair
+ * check cannot ask.
+ *
+ * `drawings_json` is the same `PlacedDrawingIn[]` [`check_layout`] takes, so a
+ * caller sends back exactly what it was given. Nothing is held between calls
+ * and there is no layout handle: the caller already knows where its drawings
+ * sit, and a second copy on this side of the wire would be a second source of
+ * truth about where parts are.
+ *
+ * # Two extents come back and they are NOT interchangeable
+ *
+ * * `extent` — the placed GEOMETRY, outer boundaries only, exactly as drawn.
+ * * `cut_extent` — that window grown by `tool_radius_mm` on every side: where
+ *   the tool CENTRE goes. This is the one to compare against a workpiece when the
+ *   outer profile is cut on the outside. Comparing `extent` instead is wrong by
+ *   a whole cutter diameter, and wrong in the direction that says a job fits
+ *   when it does not.
+ *
+ * `tool_radius_mm` is a **parameter with no default** — see [`NO_TOOL_RADIUS`].
+ * Pass `0.0` deliberately when the coordinates already carry the offset.
+ *
+ * ⚠ **This does not answer workpiece fit and must not be read as doing so.** It
+ * hands back a window; the caller compares it against whichever workpiece it holds.
+ * See [`SHEET_FIT_IS_A_DIFFERENT_QUESTION`] — the sheet basis is contested in
+ * this repo and belongs to bom + ops, so nothing here picks one.
+ *
+ * An empty workpiece is a **refusal**, not a zero extent — see [`EMPTY_SHEET`].
+ * @param {string} drawings_json
+ * @param {number} tool_radius_mm
+ * @returns {string}
+ */
+export function layout_extent(drawings_json, tool_radius_mm) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(drawings_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.layout_extent(ptr0, len0, tool_radius_mm);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
     }
 }
 

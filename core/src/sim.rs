@@ -128,13 +128,16 @@ fn arc_points(from: Vec3, to: Vec3, cx: f64, cy: f64, cw: bool, step: f64) -> Ve
     let a0 = (from.y - cy).atan2(from.x - cx);
     let a1 = (to.y - cy).atan2(to.x - cx);
     let mut sweep = a1 - a0;
-    // Normalise into the direction the arc actually travels.
+    // Normalise into the direction the arc actually travels. A start and end
+    // that coincide are a FULL CIRCLE — the same rule as the post's
+    // `flatten_arc` and the bounds. With `> 0.0` / `< 0.0` here a full circle
+    // kept sweep 0 and was stamped as one point (bughunt 2026-11-15).
     if cw {
-        while sweep > 0.0 {
+        while sweep >= -1e-12 {
             sweep -= std::f64::consts::TAU;
         }
     } else {
-        while sweep < 0.0 {
+        while sweep <= 1e-12 {
             sweep += std::f64::consts::TAU;
         }
     }
@@ -951,6 +954,12 @@ pub struct SimCheck {
     pub board_depth: SpoilboardDepth,
 }
 
+/// The depth below which a gouge or an uncut floor is not reported. A DEPTH,
+/// independent of the XY cell size: the stamp writes the tool's own Z into a
+/// cell, so a flat floor is exact to float noise. Not zero, because heights
+/// are stored as `f32`.
+pub const SIM_DEPTH_TOL_MM: f64 = 0.02;
+
 /// Compare the simulated workpiece against what the job intended.
 ///
 /// `keep` are regions that must survive intact (the parts). `remove` are
@@ -1157,12 +1166,14 @@ pub fn check(
                 });
                 continue;
             }
-            // A cell inside a keep region must be untouched. The tolerance is
-            // one cell of depth: a cutter tangent to the boundary clips the
-            // edge cell by construction, and reporting that would drown the
-            // real findings.
+            // A cell inside a keep region must be untouched. The tangent-cutter
+            // tolerance is the one-cell SHRINK of the region above, in XY.
+            // 🔴 It used to be ALSO a depth tolerance of one cell (`z < -cell`):
+            // an XY size used as a Z size, so a gouge shallower than the cell
+            // (0.5mm at the default 0.6mm cell, 2.9mm at a 3mm cell) was never
+            // reported (bughunt 2026-11-15).
             if z < -1e-6 && inside(&keep_rings, x, y) {
-                if z < -hm.cell_mm {
+                if z < -SIM_DEPTH_TOL_MM {
                     out.push(SimFinding::Gouge { x, y, depth_mm: -z });
                 }
                 continue;
@@ -1172,7 +1183,8 @@ pub fn check(
                 // One line above the test it qualifies, so the two cannot drift.
                 uncut.cells_tested += 1;
                 let standing = remove_depth_mm + z; // z is negative
-                if standing > hm.cell_mm {
+                // Same defect, same fix: a floor left 3mm proud passed at a 3mm cell.
+                if standing > SIM_DEPTH_TOL_MM {
                     out.push(SimFinding::Uncut { x, y, standing_mm: standing });
                 }
             }
@@ -1185,7 +1197,7 @@ pub fn check(
 mod tests {
     use super::*;
     use crate::geometry::Contour;
-    use crate::types::{Move, Tool, Toolpath};
+    use crate::types::{Move, Tool, Toolpath, Vec2};
 
     fn path(moves: Vec<Move>) -> Toolpath {
         let mut p = Toolpath { moves, tool: Tool::default(), ..Default::default() };
@@ -1308,6 +1320,56 @@ mod tests {
         let hm = simulate(&p, 3.0, 100.0, 100.0, 0.5, 0.0, 0.0);
         let found = check(&hm, &[], &[], 0.0, 18.0, 0.3, None).findings;
         assert!(found.iter().any(|f| matches!(f, SimFinding::Spoilboard { .. })));
+    }
+
+    // ── bughunt 2026-11-15: the depth tolerance was the XY cell size ────────
+
+    /// A slot `depth` deep straight across the middle of a keep region.
+    fn slot_through_keep(depth: f64, cell: f64) -> Vec<SimFinding> {
+        let p = path(vec![
+            Move::rapid(Vec3::new(10.0, 50.0, 5.0)),
+            Move::feed_to(Vec3::new(10.0, 50.0, -depth), 300.0),
+            Move::feed_to(Vec3::new(90.0, 50.0, -depth), 1000.0),
+        ]);
+        let hm = simulate(&p, 3.0, 100.0, 100.0, cell, 0.0, 0.0);
+        check(&hm, &[Contour::rect(30.0, 30.0, 40.0, 40.0)], &[], 0.0, 18.0, 0.3, None).findings
+    }
+
+    #[test]
+    fn a_gouge_shallower_than_one_cell_is_still_a_gouge() {
+        for (depth, cell) in [(0.5, 0.6), (2.5, 3.0)] {
+            let n = slot_through_keep(depth, cell).iter().filter(|f| matches!(f, SimFinding::Gouge { .. })).count();
+            assert!(n > 0, "a {depth}mm gouge through a kept part was not reported at a {cell}mm cell");
+        }
+    }
+
+    #[test]
+    fn a_floor_left_proud_by_less_than_one_cell_is_still_uncut() {
+        let p = path(vec![
+            Move::rapid(Vec3::new(10.0, 50.0, 5.0)),
+            Move::feed_to(Vec3::new(10.0, 50.0, -5.5), 300.0),
+            Move::feed_to(Vec3::new(90.0, 50.0, -5.5), 1000.0),
+        ]);
+        let hm = simulate(&p, 10.0, 100.0, 100.0, 0.6, 0.0, 0.0);
+        let found = check(&hm, &[], &[Contour::rect(30.0, 46.0, 40.0, 8.0)], 6.0, 18.0, 0.3, None).findings;
+        assert!(
+            found.iter().any(|f| matches!(f, SimFinding::Uncut { .. })),
+            "a pocket floor 0.5mm proud of 6mm was reported cleared at a 0.6mm cell"
+        );
+    }
+
+    #[test]
+    fn a_full_circle_arc_cuts_the_whole_circle() {
+        // Start == end is a full circle in the post (`flatten_arc`); the sim
+        // stamped it as one point.
+        let p = path(vec![
+            Move::rapid(Vec3::new(60.0, 50.0, 5.0)),
+            Move::feed_to(Vec3::new(60.0, 50.0, -5.0), 300.0),
+            Move::arc(true, Vec3::new(60.0, 50.0, -5.0), Vec2::new(50.0, 50.0), 1000.0),
+        ]);
+        let hm = simulate(&p, 1.0, 100.0, 100.0, 0.5, 0.0, 0.0);
+        let (c, r) = ((40.0 / 0.5) as usize, (50.0 / 0.5) as usize);
+        assert!(hm.at(c, r) < -4.0, "the far side of a full circle was not cut: {}", hm.at(c, r));
     }
 
     // ── THE DEPTH LIMB: through the board, into the machine ─────────────────

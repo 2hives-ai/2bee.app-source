@@ -1,0 +1,93 @@
+/* The 3D design viewer (DesignViewer.tsx) and the clickable thumbnail.
+ * Colours are brand tokens only (brand/tokens.css via styles.css). */
+
+/* A card whose picture and action are two buttons, stacked. */
+.shop-card-split { display: flex; flex-direction: column; }
+.shop-card-split > .shop-card-btn { flex: 1; height: auto; }
+
+.shop-thumb-btn {
+  position: relative; width: 100%; padding: 0; margin: 0;
+  border: 0; border-bottom: 1px solid var(--line);
+  color: inherit; font: inherit; cursor: zoom-in;
+}
+.shop-thumb-btn:hover { background: color-mix(in srgb, var(--color-amber) 8%, var(--bg)); }
+.shop-thumb-btn:focus-visible { outline: 2px solid var(--color-amber-light); outline-offset: -2px; }
+.shop-thumb-3d {
+  position: absolute; right: 8px; bottom: 8px; padding: 1px 7px;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: var(--panel); color: var(--muted);
+  font-size: 0.7rem; letter-spacing: 0.04em;
+}
+.shop-thumb-src {
+  position: absolute; left: 8px; bottom: 8px; padding: 1px 7px;
+  border: 1px solid var(--color-border-subtle); border-radius: 999px;
+  background: var(--color-bg-card); color: var(--muted);
+  font-size: 0.7rem; letter-spacing: 0.04em;
+}
+.shop-thumb-btn:hover .shop-thumb-3d,
+.shop-thumb-btn:focus-visible .shop-thumb-3d { color: var(--color-amber); border-color: var(--color-amber); }
+
+.dv {
+  width: min(1100px, calc(100vw - 32px)); height: min(820px, calc(100vh - 32px));
+  max-width: none; max-height: none; padding: 0;
+  border: 1px solid var(--color-border-subtle); border-radius: var(--radius-default);
+  background: var(--color-bg-card); color: var(--ink); box-shadow: var(--shadow-card);
+}
+.dv::backdrop { background: rgb(0 0 0 / 0.55); }
+.dv-box { display: flex; flex-direction: column; height: 100%; }
+.dv-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 16px; border-bottom: 1px solid var(--line);
+}
+.dv-title { margin: 0; font-size: 1.05rem; }
+.dv-sub { margin: 2px 0 0; color: var(--muted); font-family: var(--mono); font-size: 0.72rem; word-break: break-all; }
+.dv-close {
+  flex: none; padding: 6px 14px; cursor: pointer; font: inherit;
+  background: var(--bg); color: var(--ink);
+  border: 1px solid var(--line); border-radius: var(--radius);
+}
+.dv-close:hover { border-color: var(--color-amber); }
+.dv-close:focus-visible { outline: 2px solid var(--color-amber-light); outline-offset: 2px; }
+.dv-trust { padding: 8px 16px; font-size: 0.8rem; color: var(--muted); border-bottom: 1px solid var(--line); }
+.dv-trust .shop-badge { margin-top: 0; }
+.dv-oracle { margin: 4px 0 0; }
+.dv-refused { margin-top: 4px; color: var(--warn); }
+.dv-refused summary { cursor: pointer; }
+.dv-refused ul { max-height: 140px; overflow-y: auto; margin: 4px 0 0; padding-left: 18px; color: var(--muted); }
+.dv-stage { position: relative; flex: 1; min-height: 0; background: var(--bg); }
+.dv-msg {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  height: 100%; margin: 0; padding: 16px; text-align: center; color: var(--muted);
+}
+.dv-msg-bad { color: var(--bad); }
+.dv-slow { max-width: 46ch; color: var(--warn); font-size: 0.85rem; }
+/* Indeterminate: the mesher is synchronous and reports no fraction, so the bar
+ * moves without claiming a percentage; the elapsed seconds are the measurement. */
+.dv-bar { width: min(360px, 80%); height: 8px; accent-color: var(--color-amber); }
+.dv-hint { margin: 0; padding: 6px 16px; font-size: 0.75rem; color: var(--muted); border-top: 1px solid var(--line); }
+
+@media (max-width: 600px) {
+  .dv { width: 100vw; height: 100dvh; border-radius: 0; }
+}
+.dv-thumb-bar { position: absolute; left: 10px; right: 10px; top: 10px; display: flex; gap: 10px; align-items: center; justify-content: flex-end; z-index: 3; pointer-events: none; }
+.dv-thumb-bar > * { pointer-events: auto; }
+.dv-thumb-bar .note { margin: 0 auto 0 0; font-size: 12px; background: color-mix(in srgb, var(--color-bg-card) 85%, transparent); padding: 2px 6px; border-radius: var(--radius-sm); }
+.dv-thumb-bar-low { top: auto; bottom: 10px; } /* PCB viewer: BoardView keeps its view buttons along the top */
+.dv-thumb-bar .note.bad { color: var(--color-status-error); }
+
+/* The design's variables (founder 2026-11-13), between the verdict and the picture. */
+.dv-params {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.dv-params .params {
+  max-height: 28vh;
+}
+.dv-params-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}

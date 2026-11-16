@@ -64,7 +64,10 @@
  * cannot make these tests quietly assert about a database nobody writes.
  */
 import { expect, test, type Page } from '@playwright/test';
-import { seedTab } from './tab';
+import { seedTab, seedCadCode } from './tab';
+
+/* 2bee.cad opens on the chat view since 2026-10-15; these tests drive its code view. */
+test.beforeEach(async ({ page }) => seedCadCode(page));
 
 /* The landing tab is Designs; this suite is about the CNC tab. See e2e/tab.ts. */
 test.beforeEach(async ({ page }) => {

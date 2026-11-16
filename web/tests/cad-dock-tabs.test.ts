@@ -52,7 +52,7 @@ const { CadTab, DOCK_PANEL_ID, dockTabDomId, nextDockTabIndex } = await import(
   '../src/cad/CadTab.tsx'
 );
 
-const html = renderToStaticMarkup(h(CadTab));
+const html = renderToStaticMarkup(h(CadTab, { initialView: 'code' } as never));
 
 /** Every `<button role="tab">` in the rendered dock, as its raw open tag. */
 function tabTags(source: string): string[] {

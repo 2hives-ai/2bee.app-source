@@ -77,6 +77,8 @@
 // which line of the design's §15 table it is enforcing.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import RouterPage from './run/RouterPage';
+import { ESTOP_REASON } from './cncjob/safety';
 import {
   classifyInbound,
   decodeHomingConfig,
@@ -178,10 +180,33 @@ const ACTION_OF: Partial<Record<ControlId, RunAction>> = {
  * `R14`/`R15` for them would put numbers in the UI that the design does not
  * carry. ⚠ If `run/protocol.ts` grows `RunAction`s for them, delete this.
  */
+/* 🔴 NO MOTION ON A REAL BOARD UNTIL A PHYSICAL E-STOP EXISTS (ops H5). The ruling (pcb
+ * 2026-10-15-01-20-26, recorded in docs/plan-2bee-cnc-redesign.md): streaming is refused until
+ * ops closes H5, regardless of operator presence. The CNC jobs page enforced it
+ * (cncjob/safety.ts::runBlocker); this expert tab did not, so a real grblHAL board reached over
+ * Web Serial could be started, jogged and homed from here (journey test, 2026-10-15).
+ *
+ * A REAL port is one taken from the browser's own `navigator.serial`. The test harnesses
+ * replace `navigator.serial` itself, on purpose, so the app runs its real, unmodified path
+ * against the fake. They say so by setting `__2BEE_FAKE_SERIAL__`, which no real browser has. A
+ * port of unknown kind counts as real. Stop, Hold, Abort, status and settings reads stay
+ * available: stopping is always allowed. */
+let realPortConnected = false;
+const MOTION_ON_REAL_PORT = new Set<ControlId>(['start', 'jog', 'home']);
+export const REAL_PORT_MOTION_REFUSAL =
+  ESTOP_REASON + ' This tab may read the controller and stop it, and it moves nothing until then.';
+/** Tests only. */
+export function setRealPortConnectedForTest(v: boolean): void {
+  realPortConnected = v;
+}
+
 export function uiStateGate(control: ControlId, s: TrackedState): ControlRefusal | null {
   const st = s.controllerState;
   if (s.tab === 'Disconnected' && control !== 'connect') {
     return { id: 'link', why: 'Not connected. Nothing here can reach a controller.' };
+  }
+  if (realPortConnected && MOTION_ON_REAL_PORT.has(control)) {
+    return { id: 'H5', why: REAL_PORT_MOTION_REFUSAL };
   }
   switch (control) {
     /* 🔴 THE PROBE IS OFFERED IN EXACTLY ONE STATE. `awaitingIdentifyConsent`
@@ -214,7 +239,11 @@ export function uiStateGate(control: ControlId, s: TrackedState): ControlRefusal
             why: `Zeroing writes G10 L20 to the controller's non-volatile storage and is Idle-only; the machine is ${st}.`,
           };
     case 'stop':
-      return s.tab === 'Streaming' || s.tab === 'Held' || s.tab === 'Jogging'
+      /* 🔴 THE CONTROLLER'S OWN STATE COUNTS TOO. Allowed only on this tab's own states, Stop was
+       * greyed out ("it is doing nothing") while the status report said `Jog` — after the Jog
+       * button, or a `$J=` typed in the console (journey test, 2026-10-15). A machine that reports
+       * motion can always be told to stop. Idle and Alarm are the only states that are not moving. */
+      return s.tab === 'Streaming' || s.tab === 'Held' || s.tab === 'Jogging' || (st !== undefined && st !== null && st !== 'Idle' && st !== 'Alarm')
         ? null
         : {
             id: '§15',
@@ -513,7 +542,14 @@ export type RunTabPlant =
    * firmware nobody has classified, two seconds before anything classifies it.
    * {@link connectCommands}
    */
-  | 'probe-unasked';
+  | 'probe-unasked'
+  /**
+   * 🔴 **The defect review r3 reproduced on 2026-11-12: the console classifies the TYPED text.**
+   * `$ J=…`, `$J =…`, `$ H`, `$HZ` and a BS-edited `$X<BS>J=…` are not recognised as jog or home,
+   * so they skip H5 and the jog/home refusals and go to the port as a plain line, where grblHAL
+   * normalises them and moves. {@link grblSystemCommand}, {@link consoleAction}
+   */
+  | 'console-classifier-loose';
 
 export const RUN_TAB_PLANTS: RunTabPlant[] = [
   'start-ignores-refusals',
@@ -521,6 +557,7 @@ export const RUN_TAB_PLANTS: RunTabPlant[] = [
   'realtime-as-line',
   'stale-reads-current',
   'probe-unasked',
+  'console-classifier-loose',
 ];
 
 /**
@@ -530,11 +567,21 @@ export const RUN_TAB_PLANTS: RunTabPlant[] = [
  *
  * The design's own rule applies to all of them: *every `--plant` must be
  * verified to actually plant*, and the control asserts the **VERDICT** line, not
- * the gate's message. Every plant named below has been watched go red — the runs
- * are in the commit body. ⚠ *This sentence said "all four" while the table held
+ * the gate's message. ⚠ *This sentence said "all four" while the table held
  * six rows and five distinct plants; a count in prose beside a list is the one
  * number nobody re-reads.* `RUN-19`–`RUN-24` are exercised in
  * `web/tests/run-status-console.test.ts`; `RUN-25` in `web/tests/run.test.ts`.
+ *
+ * 🔴 **CORRECTED 2026-10-12 — the plant column is a DESIGN, not an inventory.**
+ * This block used to say *"every plant named below has been watched go red"*.
+ * Two of them do not exist: `poll-on-the-clock` (RUN-19) and `poll-plain-only`
+ * (RUN-20) are in neither {@link RunTabPlant} nor any test — grep finds them only
+ * in this comment. The commit that wrote the table (`2975fb5d05`) says *"Four
+ * plants watched red"*. RUN-19 and RUN-20 are covered by ordinary assertions in
+ * `run-status-console.test.ts` (grep `one request outstanding` and
+ * `goes out as ONE byte`), with NO negative control behind them. And nothing
+ * reads {@link RUN_TAB_GATE_BRANCHES}: gate `RUN` stops at RUN-18, so these
+ * seven ids are a request to whoever wires it, not a registered row.
  *
  * | Branch | What it asserts | `--plant` |
  * |---|---|---|
@@ -666,8 +713,11 @@ export function afterVerdictCommands(v: IdentificationVerdict): readonly WorkerC
   return out;
 }
 
+/** A start refusal: one of `run/protocol.ts`'s R-numbers, or this tab's own H5 (no e-stop). */
+export type StartRefusal = Omit<Refusal, 'id'> & { id: Refusal['id'] | 'H5' };
+
 export type StartOutcome =
-  | { status: 'refused'; refusals: readonly Refusal[]; why: string }
+  | { status: 'refused'; refusals: readonly StartRefusal[]; why: string }
   | { status: 'ok'; commands: readonly WorkerCommand[]; hash: string; total: number };
 
 /**
@@ -694,6 +744,20 @@ export function startCommands(
   s: TrackedState,
   plant?: RunTabPlant
 ): StartOutcome {
+  /* 🔴 H5 — NO STREAM TO A REAL BOARD UNTIL A PHYSICAL E-STOP EXISTS. Asked HERE, where the bytes
+   * are built, and not only by the Start button's `uiStateGate` (review r3, 2026-11-12: the comment
+   * above said this function was the enforcement point, and for H5 it was not). It comes before
+   * every plant on purpose: `start-ignores-refusals` defeats R1–R13 to prove they are what stops a
+   * job, and no plant may be the thing that streams to a machine with no e-stop. */
+  if (realPortConnected) {
+    const h5: StartRefusal = {
+      id: 'H5',
+      action: 'start-job',
+      fact: 'the connected port is a real serial port, and no physical e-stop exists (ops H5).',
+      why: REAL_PORT_MOTION_REFUSAL,
+    };
+    return { status: 'refused', refusals: [h5], why: `H5 — ${h5.fact} ${h5.why}` };
+  }
   const refusals = refusalsFor('start-job', s);
   if (!program) {
     /* Not reachable through the tab — `trackedForProgram` keeps `programLoaded`
@@ -1618,6 +1682,94 @@ export type ConsoleOutcome =
   /** Nothing was sent, and these are all the reasons. */
   | { kind: 'refused'; echo: string; refusals: ControlRefusal[] };
 
+/** grblHAL's homing commands (`grblhal/core/system.c:965-985`): `$H` and one per axis. `$HSS`
+ *  (home-switch state, a read) and `$HELP` are deliberately absent — they move nothing. */
+export const GRBL_HOMING_COMMANDS: ReadonlySet<string> = new Set([
+  'H', 'HX', 'HY', 'HZ', 'HA', 'HB', 'HC', 'HU', 'HV', 'HW',
+]);
+/** `$` commands that carry or trigger g-code: `$TPW` (tool_probe_workpiece, system.c:996) and the
+ *  startup lines `$N0=` / `$N1=` (system.c:1006-1007), run by the controller at every reset. */
+export const GRBL_GCODE_CARRYING_COMMANDS: ReadonlySet<string> = new Set(['TPW', 'N0', 'N1']);
+
+export type GrblSystemCommand =
+  | { ok: true; name: string; args: string | null }
+  | { ok: false; why: string };
+
+/**
+ * A trimmed `$` line as grblHAL will execute it — the command NAME it looks up, and the args.
+ *
+ * Mirrors, and must keep mirroring, two layers of `grblhal/core` (the vendored tree in this lane):
+ *
+ *  1. `system_execute_line` (system.c:1127-1131): every character before the first `=` has its
+ *     spaces REMOVED and is upper-cased (`CAPS`); everything after `=` is kept verbatim. The name
+ *     is then compared whole (`strcmp`) against the command table. So `$ j =G91 X1` is `J`.
+ *  2. `protocol_main_loop` (protocol.c:226-326) and `protocol_enqueue_realtime_command`
+ *     (protocol.c:822-1000) BEFORE that: CR/LF end the line, CAN (0x18) discards it, BS/DEL
+ *     DELETE the previous character, other control characters are dropped, 0x80-0xBF are picked
+ *     out as realtime commands, and `?` `!` `~` inside a `$` line are picked out as status /
+ *     feed hold / cycle start unless the controller's legacy-realtime setting says otherwise —
+ *     a setting this tab does not read.
+ *
+ * 🔴 Layer 2 is REFUSED, not emulated. Each of those bytes either edits the line (`$X<BS>J=…`
+ * runs as `$J=…`), splits it into two commands, or acts on the machine by itself, so the line
+ * the console would classify is not the line the board would execute. Refusing costs an operator
+ * nothing they need; guessing wrong costs a jog with no e-stop. Anything outside printable ASCII
+ * is refused for the same reason (`CAPS` is ASCII-only, and a multi-byte character lands in the
+ * 0x80-0xBF realtime range on the wire).
+ */
+export function grblSystemCommand(text: string): GrblSystemCommand {
+  for (const ch of text) {
+    const c = ch.codePointAt(0)!;
+    if (c < 0x20 || c >= 0x7f || ch === '?' || ch === '!' || ch === '~') {
+      const label = c < 0x20 || c >= 0x7f ? `0x${c.toString(16).padStart(2, '0')}` : `“${ch}”`;
+      return {
+        ok: false,
+        why:
+          `The line contains ${label}. grblHAL does not parse that as part of the line: a control ` +
+          'character is dropped or acts (BS/DEL delete the character before them, CR/LF end the ' +
+          'line, CAN discards it), bytes above 0x7F and “? ! ~” are picked out as realtime ' +
+          'commands — so the command the controller would run is not the one shown here. ' +
+          'Nothing was sent. Type the command without it.',
+      };
+    }
+  }
+  if (!text.startsWith('$')) return { ok: false, why: 'Not a $ command.' };
+  const body = text.slice(1);
+  const eq = body.indexOf('=');
+  const head = eq < 0 ? body : body.slice(0, eq);
+  return {
+    ok: true,
+    name: head.replace(/ /g, '').toUpperCase(),
+    args: eq < 0 ? null : body.slice(eq + 1),
+  };
+}
+
+/**
+ * H5 for a line about to be written, decided on the command grblHAL would execute: a jog, a homing
+ * cycle or a probe on a REAL port is refused, and so is any line that is not one parse away from
+ * what it shows ({@link grblSystemCommand} refuses those). `null` = may be written as far as H5 goes.
+ */
+export function realPortMotionRefusal(line: string): ControlRefusal | null {
+  if (!realPortConnected) return null;
+  const t = line.trim();
+  if (!t.startsWith('$')) return null; // g-code never reaches here: the console refuses it (R5)
+  const cmd = grblSystemCommand(t);
+  if (!cmd.ok) return { id: 'H5', why: `${REAL_PORT_MOTION_REFUSAL} ${cmd.why}` };
+  return cmd.name === 'J' || cmd.name === 'TPW' || GRBL_HOMING_COMMANDS.has(cmd.name)
+    ? { id: 'H5', why: REAL_PORT_MOTION_REFUSAL }
+    : null;
+}
+
+/** 🔴 PLANT ONLY (`console-classifier-loose`): the classifier this tab shipped until 2026-11-12 —
+ *  it matched the TYPED text, exact-case-folded, with no space removal and no byte check. */
+function looseSystemCommand(text: string): GrblSystemCommand {
+  const upper = text.toUpperCase();
+  if (upper === '$X') return { ok: true, name: 'X', args: null };
+  if (upper === '$H') return { ok: true, name: 'H', args: null };
+  if (upper.startsWith('$J=')) return { ok: true, name: 'J', args: text.slice(3) };
+  return { ok: true, name: `typed:${upper}`, args: null };
+}
+
 /**
  * What the console does with what was typed — **and every refusal that applies**.
  *
@@ -1725,6 +1877,19 @@ export function consoleAction(
     const rt = realtimeRefusal(name, s.controllerState);
     const gated = refusedIf(rt ? [{ id: `0x${REALTIME[name].byte.toString(16)}`, why: rt }] : []);
     if (gated) return gated;
+    /* 🔴 `~` IS THE RESUME BUTTON BY ANOTHER ROUTE, AND IT MUST ANSWER TO THE SAME
+     * REFUSALS. `cycleStart` has no state table of its own (`allowedIn: null`),
+     * so the console sent it after an abort (R10) and in Alarm: after Stop, that
+     * resumed the rest of the program already in the RX buffer and planner —
+     * 40–70 lines — with no sender behind it. */
+    if (name === 'cycleStart') {
+      const asResume: ControlRefusal[] = [];
+      const gate = uiStateGate('resume', s);
+      if (gate) asResume.push(gate);
+      for (const r of refusalsFor('resume', s)) asResume.push({ id: r.id, why: `${r.fact} ${r.why}` });
+      const refused = refusedIf(asResume);
+      if (refused) return refused;
+    }
     if (name === 'reset' && !opts.resetConfirmed && !ignore) {
       return {
         kind: 'confirm',
@@ -1773,19 +1938,42 @@ export function consoleAction(
     return { kind: 'line', line: text, echo, note: 'planted: a refusal was skipped' };
   }
 
-  const upper = text.toUpperCase();
-  let action: RunAction | null = null;
-  if (upper === '$X') action = 'unlock';
-  else if (upper.startsWith('$J=')) action = 'jog';
+  /* 🔴 CLASSIFY WHAT grblHAL WILL EXECUTE, NOT WHAT WAS TYPED (review r3, 2026-11-12). The old
+   * test here was `upper === '$H'` / `upper.startsWith('$J=')` on the typed text, and
+   * `$ J=G91 X10`, `$J =G91 X10`, `$ H` and `$HZ` all fell through to "any other `$`" and were
+   * written to the port — where `system_execute_line` drops the spaces, upper-cases, and runs a
+   * jog or a homing cycle. On a real board with no e-stop. See {@link grblSystemCommand}. */
+  const loose = plant === 'console-classifier-loose';
+  const cmd: GrblSystemCommand = loose ? looseSystemCommand(text) : grblSystemCommand(text);
+  if (!cmd.ok) {
+    return { kind: 'refused', echo, refusals: [{ id: 'bytes', why: cmd.why }] };
+  }
+  const h5: ControlRefusal[] = realPortConnected ? [{ id: 'H5', why: REAL_PORT_MOTION_REFUSAL }] : [];
 
-  if (action) {
+  if (cmd.name === 'X') {
     const gated = refusedIf(
-      refusalsFor(action, s).map((r) => ({ id: r.id, why: `${r.fact} ${r.why}` }))
+      refusalsFor('unlock', s).map((r) => ({ id: r.id, why: `${r.fact} ${r.why}` }))
     );
     if (gated) return gated;
-  } else if (upper === '$H') {
+  } else if (cmd.name === 'J') {
+    const gated = refusedIf([
+      ...h5,
+      ...refusalsFor('jog', s).map((r) => ({ id: r.id, why: `${r.fact} ${r.why}` })),
+    ]);
+    if (gated) return gated;
+  } else if (GRBL_HOMING_COMMANDS.has(cmd.name)) {
+    /* `uiStateGate('home')` carries H5 itself, ahead of the state table. */
     const gate = uiStateGate('home', s);
     const gated = refusedIf(gate ? [gate] : []);
+    if (gated) return gated;
+  } else if (GRBL_GCODE_CARRYING_COMMANDS.has(cmd.name)) {
+    /* `$TPW` is a probing MOVE; `$N0=`/`$N1=` store g-code the controller runs at every reset.
+     * Either is g-code with none of the Start preflight behind it — refused exactly as typed
+     * g-code is (R5), and `$TPW` additionally meets H5 because it moves now. */
+    const gated = refusedIf([
+      ...(cmd.name === 'TPW' ? h5 : []),
+      ...refusalsFor('console-gcode', s).map((r) => ({ id: r.id, why: `${r.fact} ${r.why}` })),
+    ]);
     if (gated) return gated;
   } else {
     /* Every other `$`: grblHAL answers `error:8` — "'$' command cannot be used
@@ -1817,13 +2005,13 @@ export function consoleAction(
    * accept it has made itself the obstacle. It is annotated rather than
    * silently passed, because $ settings are non-volatile and some of them
    * (steps/mm, direction inversion) change what every later move does. */
-  const write = /^\$(\d+)=/.exec(text);
+  const write = /^\d+$/.test(cmd.name) && cmd.args !== null ? cmd.name : null;
   return {
     kind: 'line',
     line: text,
     echo,
     note: write
-      ? `⚠ $${write[1]} is a SETTING WRITE: it goes to the controller’s non-volatile storage, ` +
+      ? `⚠ $${write} is a SETTING WRITE: it goes to the controller’s non-volatile storage, ` +
         'survives a power cycle, and this tab does not check what it means. It is accepted ' +
         'because you typed it, not because anything here verified it.'
       : '',
@@ -1843,6 +2031,37 @@ export function consoleAction(
  */
 export function chargedCharacters(o: ConsoleOutcome): number {
   return o.kind === 'line' ? o.line.length + 1 : 0;
+}
+
+/**
+ * A disabled control's reasons: the FIRST one in full, the rest one click away.
+ *
+ * Founder 2026-10-12, *"too many words"*. Disconnected, Start printed 349 words
+ * under one button, and two more buttons repeated most of them, because every
+ * check that could not run said so. The first reason is usually the one that
+ * decides (`link` — not connected); the others follow from it.
+ *
+ * 🔴 STILL NOT A TOOLTIP. `Control` explains why: touch and keyboard users cannot
+ * read a `title`. The remaining reasons sit in a `<details>`, which is reachable
+ * by keyboard and touch and is present in the markup, so every test that reads
+ * a reason out of `run-refused-*` still finds it.
+ */
+function RefusalReasons({ refusals }: { refusals: readonly { id: string; why: string }[] }) {
+  const [first, ...rest] = refusals;
+  if (!first) return null;
+  return (
+    <>
+      {`${first.id} — ${first.why}`}
+      {rest.length > 0 ? (
+        <details style={{ display: 'inline' }}>
+          <summary style={{ display: 'inline', cursor: 'pointer' }}>
+            {` +${rest.length} more`}
+          </summary>
+          {' ' + rest.map((r) => `${r.id} — ${r.why}`).join(' ')}
+        </details>
+      ) : null}
+    </>
+  );
 }
 
 /**
@@ -1917,7 +2136,7 @@ export function Control({
        * not move the text somewhere else — it removes it from the page. */}
       {disabled ? (
         <span className="note" data-testid={`run-refused-${id}`} style={{ margin: 0 }}>
-          {refusals.map((r) => `${r.id} — ${r.why}`).join(' ')}
+          <RefusalReasons refusals={refusals} />
         </span>
       ) : null}
     </span>
@@ -2147,7 +2366,7 @@ export function ConsolePanel({
       </div>
       {disabled ? (
         <p className="note" data-testid="run-console-refused" style={{ margin: '0 0 6px' }}>
-          {refusals.map((r) => `${r.id} — ${r.why}`).join(' ')}
+          <RefusalReasons refusals={refusals} />
         </p>
       ) : null}
       {awaitingResetConfirm ? (
@@ -2259,12 +2478,16 @@ export function ProgressCanvas({
       </div>
     );
   }
-  const xs = program.path.map((p) => p.x);
-  const ys = program.path.map((p) => p.y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
+  // A loop, not `Math.min(...xs)`: spreading the path passes one argument per point, and past
+  // ~120k points (node 22, measured 2026-11-15; a browser may be lower) that throws RangeError
+  // and blanks this tab beside a running machine. One real profile DXF already renders 12,732.
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const p of program.path) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
   const pad = 10;
   const sx = maxX - minX > 0 ? (width - 2 * pad) / (maxX - minX) : 1;
   const sy = maxY - minY > 0 ? (height - 2 * pad) / (maxY - minY) : 1;
@@ -2570,6 +2793,13 @@ export function useSerialConnection(opts: {
   const onLine = useCallback(
     (line: string) => {
       say('in', line);
+      /* 🔴 FIRST, before any early return. The status branch below returns, and
+       * the push used to sit at the END of this function — so the full status
+       * report carrying `FW:grblHAL` (the strongest identification, asked for by
+       * the consent probe's 0x87) never reached `identify()`, and a running
+       * grblHAL board identified through consent was classified `grbl`.
+       * Found 2026-10-14 by e2e/journey-router.spec.ts (consent route). */
+      handshake.current.push(line);
       const inbound = classifyInbound(line);
       /* 🔴 EVERY line, before anything branches on it. This is where an `ok`
        * discharges what we owe and where a banner says the controller restarted
@@ -2620,8 +2850,11 @@ export function useSerialConnection(opts: {
           tab: 'Alarm',
           controllerState: 'Alarm',
           controllerSubstate: inbound.code,
-          positionTrusted: trust.trusted,
-          positionUntrustedWhy: trust.trusted ? null : trust.why,
+          // 🔴 An alarm that RETAINS position cannot restore trust that was
+          // already lost (an earlier ALARM:1/3, a mid-job link drop): only homing
+          // does. Taking `trust.trusted` alone re-trusted it and cleared R2.
+          positionTrusted: t.positionTrusted && trust.trusted,
+          positionUntrustedWhy: trust.trusted ? t.positionUntrustedWhy : trust.why,
         }));
         return;
       }
@@ -2666,7 +2899,6 @@ export function useSerialConnection(opts: {
           }
         }
       }
-      handshake.current.push(line);
     },
     [lastWco, mask, say]
   );
@@ -2790,6 +3022,8 @@ export function useSerialConnection(opts: {
     serial
       .requestPort()
       .then(async (port) => {
+        realPortConnected =
+          opts.navigatorLike === undefined && !(globalThis as { __2BEE_FAKE_SERIAL__?: boolean }).__2BEE_FAKE_SERIAL__;
         const ports = await serial.getPorts();
         const idx = ports.indexOf(port);
         const info = port.getInfo();
@@ -2932,6 +3166,11 @@ export function useSerialConnection(opts: {
        * single-port shop there is exactly one. */
       const port = ports[0];
       const idx = 0;
+      /* 🔴 H5 — the same classification `connect` makes. Until 2026-11-12 this path never set it, so
+       * a disconnect (which clears it) followed by Reconnect left a REAL board marked as a fake one,
+       * and every H5 refusal in the tab stood down. */
+      realPortConnected =
+        opts.navigatorLike === undefined && !(globalThis as { __2BEE_FAKE_SERIAL__?: boolean }).__2BEE_FAKE_SERIAL__;
       const info = port.getInfo();
       /* Tear down any existing worker before creating a new one. */
       worker.current?.terminate();
@@ -3019,6 +3258,7 @@ export function useSerialConnection(opts: {
     worker.current?.postMessage({ t: 'close' } satisfies WorkerCommand);
     worker.current?.terminate();
     worker.current = null;
+    realPortConnected = false;
     setTracked(initialTrackedState());
     setReport(null);
     setLastReportAt(null);
@@ -3077,13 +3317,21 @@ export function useSerialConnection(opts: {
 
   const writeLine = useCallback((line: string) => {
     if (!worker.current) return;
+    /* H5 at the bytes for the Jog / Home buttons too (they write `$J=…` / `$H` through here and were
+     * gated only by their rendered `uiStateGate`). Same check the console uses. */
+    const h5 = realPortMotionRefusal(line);
+    if (h5) {
+      say('refused', line);
+      say('note', `${h5.id} — ${h5.why}`);
+      return;
+    }
     /* ⚠ NO OPTIMISTIC ECHO. The worker posts `{ t: 'sent' }` after the bytes
      * have actually been written, and that event is echoed in `onmessage`.
      * Echoing here as well printed every handshake and console line twice, and a
      * transcript that shows a line that never left is worse than one that is
      * late. */
     worker.current.postMessage({ t: 'write', line } satisfies WorkerCommand);
-  }, []);
+  }, [say]);
 
   const stopFeeding = useCallback((why: string) => {
     worker.current?.postMessage({ t: 'stop', why } satisfies WorkerCommand);
@@ -3104,6 +3352,18 @@ export function useSerialConnection(opts: {
         const why =
           'Nothing is connected, so there is nothing to stream to. Connect a controller first.';
         say('note', why);
+        return { status: 'refused', refusals: [], why };
+      }
+      /* 🔴 A SECOND START WHILE A STREAM RUNS IS REFUSED HERE, on the ref, not
+       * on `trackedNow`. `trackedNow` is a render snapshot: a double-click lands
+       * before the re-render, and during a `G4` dwell the controller reports
+       * `Idle` mid-program. Either way the second `load` replaced the running
+       * pump while its lines were still in the RX buffer, and their `ok`s were
+       * credited to the new stream — the sender's count and the controller's
+       * buffer part company, which is how a board gets overrun. */
+      if (streamingRef.current) {
+        const why = 'A program is already streaming. Stop it, or let it finish, before starting another.';
+        say('note', `Start refused. ${why}`);
         return { status: 'refused', refusals: [], why };
       }
       const outcome = startCommands(program, trackedNow);
@@ -3151,6 +3411,8 @@ export function useSerialConnection(opts: {
       trackedNow: TrackedState,
       opts: { resetConfirmed?: boolean } = {}
     ): ConsoleOutcome => {
+      /* H5 (no motion on a real port) is decided INSIDE `consoleAction`, on the command grblHAL
+       * will execute. A regex here on the typed text was the r3 defect: `$ J=…` walked past it. */
       const outcome = consoleAction(input, trackedNow, opts);
       switch (outcome.kind) {
         case 'nothing':
@@ -3299,7 +3561,7 @@ export function wiredActions(a: {
     },
     'spindle-stop': () => a.conn.send('spindleStop'),
     'jog-cancel': () => a.conn.send('jogCancel'),
-    jog: () => a.conn.writeLine('$J=G91 X10'),
+    jog: () => a.conn.writeLine(`$J=G91 X10 F${JOG_FEED_MM_MIN}`),
     home: () => a.conn.writeLine('$H'),
     unlock: () => a.conn.writeLine('$X'),
   };
@@ -3366,6 +3628,18 @@ export interface RunTabProps {
  * Watched red: restoring it turns a planted `nowe:` typo from "did you mean
  * 'now'?" into 28 identical "does not exist in type 'Attributes'" errors, one per
  * correct prop — the typo indistinguishable from every prop that was right. */
+/**
+ * Jog feed for the Jog button and the arrow-key shortcuts, mm/min.
+ *
+ * 🔴 grblHAL REQUIRES IT: a `$J=` line without an F word is an error on the board
+ * (`grbl/gcode.c:2328`, "For jogging, ignore prior feed rate mode. Enforce G94 and check for
+ * required F word", read in /home/gbacs/apps/grblHAL). Every jog this tab sent had none, so on a
+ * real controller the Jog button would have done nothing; only the fake accepted it (journey
+ * test, 2026-10-15). 1000 mm/min is a deliberately slow hand-jog: a 10 mm step takes 0.6 s.
+ * It is OUR choice, not a machine fact, and it is far below any plausible $110-$112.
+ */
+export const JOG_FEED_MM_MIN = 1000;
+
 export function RunTab(props: RunTabProps) {
   const { program = null, autoReportMs } = props;
 
@@ -3495,12 +3769,27 @@ export function RunTab(props: RunTabProps) {
    * Guard: only when the tab is connected (not Disconnected) and the event
    * target is not a text input or textarea — typing in the console must not
    * trigger machine commands. */
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  /** Is this tab actually showing? A hidden ancestor (an inactive tab panel) gives no layout box. */
+  const runVisible = () => {
+    const el = rootRef.current;
+    return !!el && el.getClientRects().length > 0;
+  };
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       /* Never intercept keys while the user is typing in the console or any
        * other text input. */
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t?.isContentEditable) return;
+      /* 🔴 ONLY WHILE THE RUN TAB IS ON SCREEN, AND NEVER ON A CONTROL THAT OWNS ITS ARROW KEYS.
+       * This listener is on `window` and the Run tab stays mounted, so once connected the arrows
+       * jogged the machine from EVERY tab: ArrowRight on the tab bar switched tab AND sent
+       * `$J=G91 X10`, ArrowDown on a <select> in 2bee.cnc sent `$J=G91 Y-10`, and Escape anywhere
+       * sent a feed hold (journey test, 2026-10-15, wire log from the fake). A key pressed on
+       * another screen is never a jog. The buttons on this tab still work as before. */
+      if (!runVisible()) return;
+      if (t?.closest('[role="tablist"],[role="menu"],[role="menubar"],[role="listbox"],[role="slider"],[role="dialog"],button')) return;
       if (tracked.tab === 'Disconnected') return;
 
       switch (e.key) {
@@ -3517,13 +3806,14 @@ export function RunTab(props: RunTabProps) {
            * missed the tab-state refusals. Using runConsole rather than
            * consoleAction + writeLine means a refusal is echoed to the
            * transcript with its reason, same as a typed line would be. */
+          const F = ` F${JOG_FEED_MM_MIN}`;
           const jogMap: Record<string, string> = {
-            ArrowRight: '$J=G91 X10',
-            ArrowLeft: '$J=G91 X-10',
-            ArrowUp: '$J=G91 Y10',
-            ArrowDown: '$J=G91 Y-10',
-            PageUp: '$J=G91 Z5',
-            PageDown: '$J=G91 Z-5',
+            ArrowRight: '$J=G91 X10' + F,
+            ArrowLeft: '$J=G91 X-10' + F,
+            ArrowUp: '$J=G91 Y10' + F,
+            ArrowDown: '$J=G91 Y-10' + F,
+            PageUp: '$J=G91 Z5' + F,
+            PageDown: '$J=G91 Z-5' + F,
           };
           const line = jogMap[e.key];
           if (line) {
@@ -3626,6 +3916,7 @@ export function RunTab(props: RunTabProps) {
 
   return (
     <div
+      ref={rootRef}
       data-testid="run-tab"
       style={{ padding: 12, overflow: 'auto', minHeight: 0, flex: '1 1 auto' }}
     >
@@ -3721,6 +4012,18 @@ export function RunTab(props: RunTabProps) {
           </p>
         </div>
       ) : null}
+
+      {/* ─── the router, as it describes itself (founder 2026-10-14) ────────
+          Read-only analysis + the measurements a person takes at the machine.
+          See `run/RouterPage.tsx` for exactly what it sends and when. */}
+      <RouterPage
+        tracked={tracked}
+        report={report}
+        lastWco={lastWco}
+        inbound={conn.console.filter((l) => l.dir === 'in')}
+        writeLine={conn.writeLine}
+        streaming={conn.sender.state === 'streaming'}
+      />
 
       {/* ─── state and the DROs ─────────────────────────────────────────── */}
       <div className="block" data-testid="run-status" style={{ marginTop: 12 }}>

@@ -48,6 +48,17 @@ pub enum Plant {
     RpmOutOfRange,
     /// Emit an arc as the very first motion, before any positioning move.
     ArcBeforePosition,
+    /// Restore the 2026-11 defect: close each ramped pass at the START point
+    /// instead of the ramp END, so the ramp stretch is never cut at that pass's
+    /// depth and the last pass leaves a wedge (Z0 -> full depth) attached along
+    /// the first edge. The part does not come free.
+    ///
+    /// ⚠ CORE-ONLY. It is the negative control for the emitted-program test
+    /// `every_point_of_the_perimeter_is_cut_at_full_depth_in_the_emitted_program`
+    /// and is deliberately NOT a `--plant` name in the CLI: exposing it there
+    /// makes it a registry plant that gate PLANT requires a consuming gate row
+    /// for, and no gate row walks the perimeter yet (left open, see that test).
+    RampStretchUncut,
 }
 
 #[derive(Clone, Debug)]
@@ -129,12 +140,15 @@ pub fn build(job: &RectJob) -> Result<(Toolpath, String), String> {
 
     let mut x0 = job.x0 - grow;
     let y0 = job.y0 - grow;
-    let x1 = job.x0 + job.width_mm + grow;
+    let mut x1 = job.x0 + job.width_mm + grow;
     let y1 = job.y0 + job.height_mm + grow;
 
     if job.plant == Plant::OffBed {
-        // Shift the whole part past the far edge of 600mm of X travel.
+        // Shift the whole part past the far edge of 600mm of X travel. BOTH edges: until
+        // 2026-11-13 only x0 moved, so the planted part was inside out (x1 < x0, a negative first
+        // edge) and reached the travel check only because nothing looked at its shape first.
         x0 += 900.0;
+        x1 += 900.0;
     }
 
     let mut depth_total = job.op.depth_total_mm;
@@ -176,12 +190,36 @@ pub fn build(job: &RectJob) -> Result<(Toolpath, String), String> {
     let cr = job.corner_r_mm.min(r.max(job.corner_r_mm));
     let arcs = cr > 1e-9;
 
+    // 🔴 A ramp needs a straight edge to ride. When the corner arcs eat the whole first edge
+    // (10 mm wide part, 8 mm corners, 6 mm cutter outside: 16 - 16 = 0) the clamp below took
+    // `ramp_len` to 0 and "Ramp" emitted a VERTICAL plunge to full pass depth at the CUTTING feed,
+    // not the plunge feed (bughunt 2026-11-13) — the program reading Ramp while plunging. Refused,
+    // like Helix: ask for Plunge, which descends at the plunge feed, or give the part an edge.
+    if job.op.entry == EntryMode::Ramp && (x1 - cr) - (x0 + cr) <= 1e-6 {
+        return Err(format!(
+            "ramp entry refused: the first straight edge of the tool path is {:.3} mm long, so there is \
+             nothing to ramp along and the descent would be a vertical plunge at the cutting feed. \
+             Use plunge entry, or a part whose corners leave a straight edge.",
+            ((x1 - cr) - (x0 + cr)).max(0.0)
+        ));
+    }
+
     for z in depth_passes(depth_total, job.op.depth_per_pass_mm) {
         mv.push(Move::rapid(Vec3::new(x0 + cr, y0, safe_z)));
 
         // Ramp entry: descend along the first edge instead of plunging. A
         // straight plunge in ply burns the bit and the work.
-        let ramp_len = job.op.ramp_length_mm.min(job.width_mm.max(1.0));
+        //
+        // 🔴 The ramp must END ON THE FIRST STRAIGHT EDGE, because the pass is
+        // closed by cutting back along that edge to the ramp end (below). This
+        // was clamped to `width_mm`, the PART width, while the straight edge the
+        // tool centre runs is `x1 - x0 - 2*cr` — on a small rounded part the
+        // ramp overran the corner arc's tangent point and descended through
+        // waste off the contour. Same rule as the engine's `ramp_len` clamp in
+        // `toolpath.rs` (`.min(perim * 0.5)`): the ramp has to fit what it rides.
+        let first_edge = (x1 - cr) - (x0 + cr);
+        let ramp_len = job.op.ramp_length_mm.min(job.width_mm.max(1.0)).min(first_edge.max(0.0));
+        let ramped = job.op.entry == EntryMode::Ramp;
         match job.op.entry {
             EntryMode::Plunge => {
                 mv.push(Move::feed_to(Vec3::new(x0 + cr, y0, z), job.op.plunge_mm_min));
@@ -198,8 +236,9 @@ pub fn build(job: &RectJob) -> Result<(Toolpath, String), String> {
                 // 🔴 The fork's G1 gate exists because the contour then
                 // restarted at index 0 regardless of where the ramp ended,
                 // cutting a chord at full depth straight across the part.
-                // The path below CONTINUES from the ramp end and closes the
-                // loop at the ramp end — it never jumps back to the start.
+                // The path below CONTINUES from the ramp end, runs the whole
+                // loop back to the start, and then CUTS ON TO THE RAMP END at
+                // depth — see the close below.
             }
         }
 
@@ -224,7 +263,25 @@ pub fn build(job: &RectJob) -> Result<(Toolpath, String), String> {
             mv.push(Move::feed_to(Vec3::new(x0 + cr, y0, z), feed));
         }
 
-        mv.push(Move::rapid(Vec3::new(x0 + cr, y0, safe_z)));
+        // 🔴 CLOSE AT THE RAMP END, NOT AT THE START. Everything between the
+        // start and the ramp end was cut while descending — shallower than `z`
+        // everywhere except the ramp's last point. Until 2026-11-13 this file
+        // closed the loop at the start and its comment claimed it closed at the
+        // ramp end; on the last pass that left a wedge from Z0 at X47 to Z-18 at
+        // X67 along Y47 (the `fixture rect-profile` numbers) and the part did
+        // not come free. The engine (`toolpath.rs::plan_profile`) completes the
+        // ramped stretch with a full finishing lap; here the stretch is a
+        // straight run on the first edge, so cutting on to the ramp end at depth
+        // covers exactly what the ramp left — and nothing else.
+        let mut lap_end = (x0 + cr, y0);
+        if ramped && ramp_len > 1e-9 && job.plant != Plant::RampStretchUncut {
+            mv.push(Move::feed_to(Vec3::new(x0 + cr + ramp_len, y0, z), feed));
+            lap_end = (x0 + cr + ramp_len, y0);
+        }
+
+        // A pure Z lift where the cut ended — a retract that moves XY as well
+        // drags the cutter sideways while it is still in the cut.
+        mv.push(Move::rapid(Vec3::new(lap_end.0, lap_end.1, safe_z)));
     }
 
     mv.push(Move::spindle_off());
@@ -289,6 +346,24 @@ mod tests {
         );
     }
 
+    /// Bughunt 2026-11-13: corners that eat the whole first straight edge left a 0 mm ramp, and
+    /// "Ramp" emitted a vertical plunge at the CUTTING feed. Refused; Plunge still builds there.
+    #[test]
+    fn a_ramp_with_no_straight_edge_to_ride_is_refused_and_plunge_still_builds() {
+        let mut j = job_with_entry(EntryMode::Ramp);
+        j.op.side = CutSide::Outside;
+        j.width_mm = 10.0;
+        j.corner_r_mm = j.width_mm / 2.0 + j.tool.radius_mm(); // first edge = 10 + 2r - 2cr = 0
+        let err = build(&j).expect_err("a 0 mm ramp must be refused, not emitted as a plunge at cutting feed");
+        assert!(err.contains("ramp entry refused"), "{err}");
+        j.op.entry = EntryMode::Plunge;
+        build(&j).unwrap_or_else(|e| panic!("plunge entry must still build here: {e}"));
+        // Control: a part with an edge left still ramps.
+        j.op.entry = EntryMode::Ramp;
+        j.corner_r_mm -= 1.0;
+        build(&j).unwrap_or_else(|e| panic!("a 2 mm edge must still ramp: {e}"));
+    }
+
     /// The other half, which is the half a refuse-everything "fix" would fail:
     /// the modes that ARE implemented still build a real program.
     #[test]
@@ -299,6 +374,247 @@ mod tests {
             assert!(
                 p.moves.iter().any(|m| matches!(m.kind, MoveKind::Feed)),
                 "{entry:?} produced no cutting move"
+            );
+        }
+    }
+
+    // ---- the emitted-program perimeter walk --------------------------------
+    //
+    // 🔴 ASSERTS ON THE G-CODE TEXT, NOT ON `Toolpath::moves`. The defect this
+    // guards (the ramp stretch never cut at depth) was invisible to every check
+    // that read the plan's Z range: the plan reached -18 and the bounds were
+    // right. What it got wrong was WHERE it reached -18, and only a walk of the
+    // posted program over the perimeter can see that.
+
+    /// Every cutting point the posted program visits, sampled every `step` mm
+    /// along each G1/G2/G3 block. Modal motion, absolute XYZ, incremental IJ
+    /// (the grblHAL post's arc form). Rapids are not cutting and are skipped.
+    fn cut_points(gcode: &str, step: f64) -> Vec<(f64, f64, f64)> {
+        let (mut x, mut y, mut z) = (0.0_f64, 0.0_f64, 0.0_f64);
+        let mut mode = 0u32;
+        let mut pts = Vec::new();
+        for raw in gcode.lines() {
+            // Strip `( ... )` comments and `;` tails.
+            let mut line = String::new();
+            let mut depth = 0;
+            for c in raw.chars() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    ';' if depth == 0 => break,
+                    _ if depth == 0 => line.push(c),
+                    _ => {}
+                }
+            }
+            let up = line.to_ascii_uppercase();
+            let mut words: Vec<(char, f64)> = Vec::new();
+            let b = up.as_bytes();
+            let mut i = 0;
+            while i < b.len() {
+                let c = b[i] as char;
+                if c.is_ascii_alphabetic() {
+                    let st = i + 1;
+                    let mut e = st;
+                    while e < b.len() && (b[e] == b'-' || b[e] == b'.' || b[e].is_ascii_digit()) {
+                        e += 1;
+                    }
+                    if let Ok(v) = up[st..e].parse::<f64>() {
+                        words.push((c, v));
+                    }
+                    i = e;
+                } else {
+                    i += 1;
+                }
+            }
+            for &(c, v) in &words {
+                if c == 'G' && [0.0, 1.0, 2.0, 3.0].contains(&v) {
+                    mode = v as u32;
+                }
+            }
+            let get = |k: char| words.iter().find(|w| w.0 == k).map(|w| w.1);
+            // No axis word (G4 P2, G17 G21 ..., M3 S...): no motion.
+            if get('X').is_none() && get('Y').is_none() && get('Z').is_none() {
+                continue;
+            }
+            let (nx, ny, nz) = (get('X').unwrap_or(x), get('Y').unwrap_or(y), get('Z').unwrap_or(z));
+            match mode {
+                1 => {
+                    let l = ((nx - x).powi(2) + (ny - y).powi(2) + (nz - z).powi(2)).sqrt();
+                    let n = ((l / step).ceil() as usize).max(1);
+                    for k in 0..=n {
+                        let f = k as f64 / n as f64;
+                        pts.push((x + (nx - x) * f, y + (ny - y) * f, z + (nz - z) * f));
+                    }
+                }
+                2 | 3 => {
+                    let (cx, cy) = (x + get('I').unwrap_or(0.0), y + get('J').unwrap_or(0.0));
+                    let r = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+                    let a0 = (y - cy).atan2(x - cx);
+                    let a1 = (ny - cy).atan2(nx - cx);
+                    let mut sweep = a1 - a0;
+                    if mode == 2 {
+                        while sweep >= 0.0 {
+                            sweep -= std::f64::consts::TAU;
+                        }
+                    } else {
+                        while sweep <= 0.0 {
+                            sweep += std::f64::consts::TAU;
+                        }
+                    }
+                    let n = (((sweep.abs() * r) / step).ceil() as usize).max(1);
+                    for k in 0..=n {
+                        let f = k as f64 / n as f64;
+                        let a = a0 + sweep * f;
+                        pts.push((cx + r * a.cos(), cy + r * a.sin(), z + (nz - z) * f));
+                    }
+                }
+                _ => {}
+            }
+            x = nx;
+            y = ny;
+            z = nz;
+        }
+        pts
+    }
+
+    /// Sample the tool-centre perimeter the job asks for — derived from the
+    /// JOB's fields, not from the generator's moves, so a generator that
+    /// changes its contour cannot change what is checked.
+    fn perimeter_samples(job: &RectJob, step: f64) -> Vec<(f64, f64)> {
+        let g = job.tool.radius_mm(); // outside profile
+        let (x0, y0) = (job.x0 - g, job.y0 - g);
+        let (x1, y1) = (job.x0 + job.width_mm + g, job.y0 + job.height_mm + g);
+        let cr = job.corner_r_mm;
+        let mut out = Vec::new();
+        let mut line = |a: (f64, f64), b: (f64, f64), out: &mut Vec<(f64, f64)>| {
+            let l = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+            let n = ((l / step).ceil() as usize).max(1);
+            for k in 0..n {
+                let f = k as f64 / n as f64;
+                out.push((a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f));
+            }
+        };
+        line((x0 + cr, y0), (x1 - cr, y0), &mut out);
+        line((x1, y0 + cr), (x1, y1 - cr), &mut out);
+        line((x1 - cr, y1), (x0 + cr, y1), &mut out);
+        line((x0, y1 - cr), (x0, y0 + cr), &mut out);
+        if cr > 1e-9 {
+            for (cx, cy, a0) in [
+                (x1 - cr, y0 + cr, -90.0_f64),
+                (x1 - cr, y1 - cr, 0.0),
+                (x0 + cr, y1 - cr, 90.0),
+                (x0 + cr, y0 + cr, 180.0),
+            ] {
+                let n = ((cr * std::f64::consts::FRAC_PI_2 / step).ceil() as usize).max(1);
+                for k in 0..n {
+                    let a = (a0 + 90.0 * k as f64 / n as f64).to_radians();
+                    out.push((cx + cr * a.cos(), cy + cr * a.sin()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Post `job` and return, for each perimeter sample, the DEEPEST emitted
+    /// cutting Z within `tol` of it (`None` = the program never cut there).
+    fn deepest_z_along_perimeter(job: &RectJob) -> Vec<((f64, f64), Option<f64>)> {
+        use crate::post_grblhal::{post_grblhal, PostOptions};
+        let (path, name) = build(job).expect("buildable");
+        let post = post_grblhal(
+            &path,
+            &Machine::default(),
+            &job.stock,
+            &job.op,
+            &PostOptions { program_name: name, ..PostOptions::default() },
+        );
+        assert!(post.errors.is_empty(), "post refused the job: {:?}", post.errors);
+        assert!(!post.gcode.is_empty(), "post produced no program");
+        let pts = cut_points(&post.gcode, 0.05);
+        let tol = 0.05;
+        perimeter_samples(job, 1.0)
+            .into_iter()
+            .map(|s| {
+                let deepest = pts
+                    .iter()
+                    .filter(|p| (p.0 - s.0).powi(2) + (p.1 - s.1).powi(2) <= tol * tol)
+                    .map(|p| p.2)
+                    .fold(None, |m: Option<f64>, z| Some(m.map_or(z, |m| m.min(z))));
+                (s, deepest)
+            })
+            .collect()
+    }
+
+    /// The fixtures `fixture rect-profile` / `rect-arcs` post: 18mm ply cut
+    /// through at exactly `stock.thickness_mm`, as the CLI sets it.
+    fn through_job(corner_r_mm: f64, plant: Plant) -> RectJob {
+        let stock = Stock::default();
+        RectJob {
+            corner_r_mm,
+            plant,
+            op: OperationParams { depth_total_mm: stock.thickness_mm, ..OperationParams::default() },
+            stock,
+            ..RectJob::default()
+        }
+    }
+
+    fn shallow_samples(job: &RectJob) -> Vec<((f64, f64), Option<f64>)> {
+        let want = -job.op.depth_total_mm;
+        deepest_z_along_perimeter(job)
+            .into_iter()
+            .filter(|(_, z)| z.map_or(true, |z| z > want + 1e-6))
+            .collect()
+    }
+
+    /// 🔴 THE PART COMES FREE: every point of the profile perimeter is cut at
+    /// the final depth somewhere in the EMITTED program. Square and rounded,
+    /// ramp and plunge.
+    #[test]
+    fn every_point_of_the_perimeter_is_cut_at_full_depth_in_the_emitted_program() {
+        for cr in [0.0, 8.0] {
+            for entry in [EntryMode::Ramp, EntryMode::Plunge] {
+                let mut job = through_job(cr, Plant::None);
+                job.op.entry = entry;
+                let total = deepest_z_along_perimeter(&job).len();
+                let bad = shallow_samples(&job);
+                assert!(
+                    bad.is_empty(),
+                    "corner_r={cr} {entry:?}: {} of {total} perimeter samples not cut to Z{:.3}; \
+                     first {:?}, last {:?}",
+                    bad.len(),
+                    -job.op.depth_total_mm,
+                    bad.first(),
+                    bad.last()
+                );
+            }
+        }
+    }
+
+    /// The negative control. `RampStretchUncut` restores closing at the start;
+    /// the walk must see the wedge — at the ramp START the deepest cut is Z0,
+    /// and the shallow samples sit on the first edge between ramp start and end.
+    #[test]
+    fn the_ramp_stretch_plant_leaves_a_wedge_the_walk_sees() {
+        for cr in [0.0, 8.0] {
+            let job = through_job(cr, Plant::RampStretchUncut);
+            let bad = shallow_samples(&job);
+            assert!(!bad.is_empty(), "corner_r={cr}: plant is VACUOUS — the walk saw no wedge");
+            let g = job.tool.radius_mm();
+            let (sx, y) = (job.x0 - g + cr, job.y0 - g);
+            let ex = sx + job.op.ramp_length_mm;
+            for ((px, py), _) in &bad {
+                assert!(
+                    (py - y).abs() < 1e-9 && *px >= sx - 1e-9 && *px < ex,
+                    "corner_r={cr}: shallow sample ({px},{py}) is outside the ramp stretch"
+                );
+            }
+            // The ramp start itself is also the end of the closing edge, cut at
+            // depth, so the wedge is the OPEN interval (start, end): 19 samples
+            // at 1mm over a 20mm ramp. Its thin end is cut less than 1mm deep.
+            assert_eq!(bad.len(), 19, "corner_r={cr}: wedge sample count {}", bad.len());
+            let shallowest = bad.iter().filter_map(|(_, z)| *z).fold(f64::MIN, f64::max);
+            assert!(
+                shallowest > -1.0,
+                "corner_r={cr}: the wedge's thin end should be cut <1mm deep, got Z{shallowest:.3}"
             );
         }
     }

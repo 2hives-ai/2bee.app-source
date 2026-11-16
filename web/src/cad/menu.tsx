@@ -166,9 +166,12 @@ export const OMISSIONS: string[] = [
     'different computations. Here mesh.ts always computes real booleans and always audits the ' +
     'result — one evaluation path — so two buttons would assert a capability difference we do not ' +
     'have.',
-  'The Customizer. It reads /* [Section] */ annotations and parameter sets, and this parser reads ' +
-    'neither. An empty Customizer would be a claim about your model made by a feature that is not ' +
-    'here.',
+  /* Corrected 2026-11-13: this said the Customizer was absent because nothing read its annotations.
+   * The Variables panel (cad/params.ts, cad/ParamsPanel.tsx) now does. What is still absent is below. */
+  'The Customizer\'s parameter SETS (the JSON file of named presets) and its -D/-p/-P command-line ' +
+    'overrides. The Variables panel above the 3D view reads top-level literal variables, /* [Section] */ ' +
+    'and [Hidden] markers and // [min:max] or // [a, b] hints, and changes a value by rewriting that one ' +
+    'literal in the source. Saving or loading a named set of values is not here.',
   /* 🔴 FIVE, NOT ELEVEN. This line used to end "…Find, Indent, bookmarks,
    * tab-conversion", and "the browser already owns those keys" is true of the
    * five below and FALSE of the other six — those have no native equivalent at
@@ -369,6 +372,8 @@ export interface CadMenuContext {
   bottomTab: string;
   /** Whether the model-edit pane is offered at all. */
   askVisible: boolean;
+  /** OpenSCAD's `view/hideEditor`: the code column is not drawn. */
+  editorHidden: boolean;
   /** OpenSCAD's `view/showAxes` — the origin cross and the corner gizmo. */
   axes: boolean;
   /**
@@ -640,9 +645,15 @@ export function cadMenus(ctx: CadMenuContext): Menu[] {
          * that they are on — the dead-control shape this bar exists to avoid,
          * arriving as a stale green rather than as a grey item. */
         {
+          id: 'view.hide-editor',
+          label: 'Hide editor',
+          separatorBefore: true,
+          checked: ctx.editorHidden,
+          note: 'The 3D view takes the whole width. Your code is kept, with its undo history.',
+        },
+        {
           id: 'view.axes',
           label: 'Show axes',
-          separatorBefore: true,
           checked: ctx.axes,
           note:
             'The cross through [0,0,0] and the X/Y/Z arrows in the corner — OpenSCAD draws both off ' +

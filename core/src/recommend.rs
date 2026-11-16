@@ -599,7 +599,7 @@ pub struct RecommendOptions {
 
 impl Default for RecommendOptions {
     fn default() -> Self {
-        Self { prefer_fewer_tool_changes: true, drill_tolerance_mm: 0.05 }
+        Self { prefer_fewer_tool_changes: true, drill_tolerance_mm: crate::toolpath::DRILL_DIAMETER_TOL_MM }
     }
 }
 
@@ -904,7 +904,7 @@ fn evaluate<'a>(
 
         let d = spec.tool.diameter_mm;
         let mut note: Vec<String> = Vec::new();
-        let size_key;
+        let mut size_key;
 
         match &feature.kind {
             FeatureKind::Hole { diameter_mm } => {
@@ -954,6 +954,23 @@ fn evaluate<'a>(
                     continue;
                 }
                 size_key = -d;
+                // 🔴 THE OUTER PROFILE'S HALF OF THE WIDTH RULE, AS A RANKING. A square
+                // notch has no arcs, so rule 1 never capped the cutter and a 12mm end
+                // mill was chosen for an 8mm notch — the notch came out solid, with only
+                // a note, while a 6mm cutter that fits was in the set (bughunt
+                // 2026-11-15). NOT a rejection: a cutter the operator FORCES still cuts
+                // the rest of the outline and names the lost area (gate REACH; refusing
+                // every part with an unreachable notch would refuse ordinary work). So a
+                // cutter that loses outline ranks below every cutter that does not.
+                if feature.kind == FeatureKind::Profile {
+                    if let Some((lost, _, _)) = crate::toolpath::unreachable_area_mm2(&feature.contour, d * 0.5) {
+                        size_key = 1.0e6 + lost;
+                        note.push(format!(
+                            "{d}mm is wider than a notch or slot in this outline: {lost:.1}mm² of the part \
+                             would not be cut and would come out solid — ranked after every cutter that fits"
+                        ));
+                    }
+                }
             }
         }
 
@@ -2585,6 +2602,21 @@ mod tests {
         assert_eq!(c.shank_fit, Some(ShankFit::Undeclared));
         assert!(c.notes.iter().any(|n| n.contains("UNCHECKED")), "{:?}", c.notes);
         assert!(c.reason.contains("UNCHECKED"), "{}", c.reason);
+    }
+
+    #[test]
+    fn a_cutter_wider_than_a_notch_in_the_outline_is_not_chosen_when_one_that_fits_exists() {
+        // bughunt 2026-11-15: 100x100 with an 8mm-wide, 60mm-deep square notch. The
+        // outline has no arcs, so rule 1 never capped it, and 12mm was chosen.
+        let mut c = Contour::closed(vec![
+            Vertex::line(0.0, 0.0), Vertex::line(46.0, 0.0), Vertex::line(46.0, 60.0), Vertex::line(54.0, 60.0),
+            Vertex::line(54.0, 0.0), Vertex::line(100.0, 0.0), Vertex::line(100.0, 100.0), Vertex::line(0.0, 100.0),
+        ]);
+        c.normalise_winding(true);
+        let f = Feature::new("outline", FeatureKind::Profile, c, 9.0);
+        let r = recommend(&[f], &well_stocked_machine(), &stock(18.0), Material::Plywood, &default_library(), &RecommendOptions::default());
+        let ch = &r.choices[0];
+        assert!(chosen_diameter(ch, &default_library()) <= 8.0 + 1e-9, "{}", ch.reason);
     }
 
     #[test]

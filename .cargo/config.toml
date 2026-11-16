@@ -1,0 +1,20 @@
+# Throttle by DEFAULT (ceo ticket 2026-11-15-11-26-56). jamesave also carries the 2hives live
+# streams; above load ~20 they drop their YouTube leg. Until now the throttle was a convention
+# (CLAUDE.md "Where heavy work runs"), and a bare `cargo test` still ran its test binary at nice 0
+# on every core: 500% CPU for a twobee_cam test binary at 11:23 that day, ~1800% on 2026-11-14.
+#
+# - runner: every test/bench/run binary for the host target starts under nice 19 + idle I/O.
+#   It does not apply to the wasm32 target (wasm-pack never runs a binary through cargo).
+# - jobs / RUST_TEST_THREADS: 4 compile jobs and 4 test threads. The CARGO_BUILD_JOBS and
+#   RUST_TEST_THREADS environment variables override both (tools/mac_run.sh raises them on the
+#   Mac Pro, where nothing else runs).
+# This does NOT renice rustc itself; slicer_gate_check.mjs and mac_run.sh still do that.
+
+[build]
+jobs = 4
+
+[env]
+RUST_TEST_THREADS = "4"
+
+[target.x86_64-unknown-linux-gnu]
+runner = ["nice", "-n", "19", "ionice", "-c3"]

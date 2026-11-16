@@ -89,7 +89,7 @@
 // nothing. Each names what happened and none of them touch the editor.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { parseScad, type ScadError, type ScadResult, type Unsupported } from './scad';
+import { parseScad, type ScadError, type ScadOptions, type ScadResult, type Unsupported } from './scad';
 import { meshScene, type MeshResult } from './mesh';
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -146,7 +146,33 @@ const str = (v: unknown): string => (typeof v === 'string' ? v : '');
  * to be remembered. A record written by an older build, or hand-edited, does
  * not get to opt the operator in silently.
  */
+/**
+ * 🔴 DEV SERVER ⇒ THE LOCAL CLAUDE, WHATEVER IS STORED (founder 2026-10-15: *"use the
+ * backend claude session for now"*, after an endpoint stored in his browser answered
+ * "Failed to fetch"). `vite dev` serves `/__claude/…` (vite.config.ts), which forwards
+ * to `tools/claude-bridge` on 127.0.0.1 and adds the bridge token ON THE SERVER, so no
+ * token, key or host is in this bundle and nothing is stored. The `apiKey` here is a
+ * placeholder the proxy replaces; it only satisfies `preflight`'s no-key refusal.
+ * ⚠ A production build has no `/__claude` route and reads the stored config as before.
+ * Node tests have no `import.meta.env`, so every rule below is still tested as written.
+ */
+export const LOCAL_CLAUDE_CONFIG: AskConfig = {
+  endpoint: '/__claude/v1/chat/completions',
+  model: 'claude-sonnet',
+  apiKey: 'dev-server-proxy',
+  rememberKey: false,
+  timeoutMs: 180000,
+};
+function devLocalClaude(): boolean {
+  try {
+    return (import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV === true;
+  } catch {
+    return false;
+  }
+}
+
 export function readAskConfig(store?: AskStore | null): AskConfig {
+  if (devLocalClaude()) return LOCAL_CLAUDE_CONFIG;
   try {
     const raw = store?.getItem(ASK_CONFIG_KEY);
     if (!raw) return NO_ASK_CONFIG;
@@ -455,6 +481,17 @@ export const FORBIDDEN_CONSTRUCTS: readonly string[] = [
 ];
 
 /** The user turn: the operator's words, then the source they are about. */
+/**
+ * Add a reference to a picked part (`preview.tsx` pickReference) to the end of a
+ * prompt. The same reference twice in a row is added once: a double-click
+ * re-centre is two clicks on the same point.
+ */
+export function withReference(prompt: string, ref: string): string {
+  if (prompt.trimEnd().endsWith(ref)) return prompt;
+  const head = prompt.trimEnd();
+  return `${head}${head ? ' ' : ''}${ref} `;
+}
+
 export function userMessage(prompt: string, source: string): string {
   return `${prompt}\n\n----- current 2bee.cad source -----\n${source}`;
 }
@@ -571,7 +608,11 @@ export type AskFailureKind =
   | 'empty'
   | 'not-scad'
   | 'parses-to-nothing'
-  | 'unchanged';
+  | 'unchanged'
+  | 'still-broken'
+  | 'stale'
+  | 'truncated'
+  | 'ambiguous';
 
 export interface AskFailure {
   kind: AskFailureKind;
@@ -640,6 +681,17 @@ export function preflight(cfg: AskConfig, prompt: string, online: boolean): AskF
 }
 
 /** A thrown fetch is one of two very different things, and the difference matters. */
+/**
+ * The design was edited (a variable switched, a line typed) while the model was
+ * working. The reply is a change to the text that was SENT, so applying it would
+ * silently undo those edits. Nothing is applied; asking again sends the new text.
+ */
+export const STALE_FAILURE: AskFailure = {
+  kind: 'stale',
+  headline: 'the design changed while the AI was working, so its change was not applied',
+  detail: 'Its reply was written against the text you sent, and applying it would undo your newer edits. Ask again to send the design as it is now.',
+};
+
 export function classifyThrow(err: unknown): AskFailure {
   const name = (err as { name?: string } | null)?.name ?? '';
   if (name === 'AbortError' || name === 'TimeoutError') {
@@ -668,6 +720,9 @@ export function classifyThrow(err: unknown): AskFailure {
       'the platform, not of this app.',
   };
 }
+
+/** Every fenced block in a reply (see {@link readReply}: more than one distinct block is refused). */
+const FENCE_ALL = /```[a-zA-Z]*\r?\n([\s\S]*?)```/g;
 
 /**
  * Pull the source out of a reply.
@@ -788,6 +843,51 @@ export function readReply(r: AskTransportResult): AskReply {
   return { ok: true, scad, raw: content };
 }
 
+/**
+ * {@link readReply} for a reply that will REPLACE the design. Two refusals that a chat
+ * answer must not get (a prose answer may well show several blocks, and a cut-off answer
+ * is still worth reading), so they live here and not in the shared reader.
+ */
+export function readScadReply(r: AskTransportResult): AskReply {
+  const base = readReply(r);
+  if (!base.ok) return base;
+  const content = base.raw;
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(r.text);
+  } catch {
+    /* readReply already parsed it; unreachable */
+  }
+  /* 🔴 A reply stopped by the token limit is a design with its end missing; it can still
+   * parse (a dropped closing union is a missing feature, not an error). Refused. */
+  const finish = (parsed as { choices?: { finish_reason?: unknown }[] } | null)?.choices?.[0]?.finish_reason;
+  if (finish === 'length') {
+    return {
+      ok: false,
+      failure: {
+        kind: 'truncated',
+        headline: 'the reply was cut off at the model\'s length limit',
+        detail: 'The source it sent is incomplete, so it was not used. Ask for a smaller change, or raise the limit on the endpoint.',
+      },
+    };
+  }
+  /* 🔴 SEVERAL DIFFERENT CODE BLOCKS: which one is the design is a guess. The first used to
+   * win, so "change this line: <snippet> … whole file: <file>" replaced the design with the
+   * snippet. Refused rather than picked (bughunt 2026-11-15). */
+  const fences = [...content.matchAll(FENCE_ALL)].map((m) => normaliseForComparison(m[1])).filter((f) => f.trim());
+  if (new Set(fences).size > 1) {
+    return {
+      ok: false,
+      failure: {
+        kind: 'ambiguous',
+        headline: `the reply has ${fences.length} different code blocks`,
+        detail: 'Which one is the whole design would be a guess, so none was used. Ask again for the whole source in one block.',
+      },
+    };
+  }
+  return base;
+}
+
 /* ════════════════════════════════════════════════════════════════════════════
  * 5. The review — the same parser, the same audit, and a comparison
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -823,8 +923,16 @@ export interface Evaluated {
   mesh: MeshResult;
 }
 
-export function evaluate(source: string): Evaluated {
-  const parse = parseScad(source);
+/**
+ * ⚠ `opts` ADDED 2026-10-14. Without a host every `use <…>` / `include <…>` is
+ * unresolved, so a design made of several files (most of the catalogue) was
+ * reviewed as a model with every import refused, on both sides of the
+ * comparison. The deltas cancelled and the shape delta was empty. That looked
+ * like "no change" when the review simply could not see the part. Callers that
+ * hold the design's library pass it. Omitting it keeps the old behaviour.
+ */
+export function evaluate(source: string, opts?: ScadOptions): Evaluated {
+  const parse = parseScad(source, opts);
   return { source, parse, mesh: meshScene(parse.scene) };
 }
 
@@ -979,8 +1087,8 @@ export interface ProposalReview {
  * proposal that drops a `minkowski()` may be exactly right; a proposal that
  * evaluates to nothing never is.
  */
-export function reviewProposal(current: Evaluated, proposalSource: string): ProposalReview {
-  const proposed = evaluate(proposalSource);
+export function reviewProposal(current: Evaluated, proposalSource: string, opts?: ScadOptions): ProposalReview {
+  const proposed = evaluate(proposalSource, opts);
   const refused = proposed.parse.unsupported;
   const meshRefused = proposed.mesh.issues
     .filter((i) => i.severity === 'refused')
@@ -1070,8 +1178,42 @@ export function reviewProposal(current: Evaluated, proposalSource: string): Prop
  * ══════════════════════════════════════════════════════════════════════════ */
 
 export type AskOutcome =
-  | { ok: true; source: string; raw: string; review: ProposalReview }
+  | { ok: true; source: string; raw: string; review: ProposalReview; repairs?: number }
   | { ok: false; failure: AskFailure };
+
+/**
+ * How many times the model is sent its own result back to fix (founder 2026-11-13:
+ * "when AI is changing the object make sure the end result is working!").
+ */
+export const REPAIR_ROUNDS = 2;
+
+const NO_SOLID = 'it produces no solid at all';
+
+/**
+ * What is wrong with a built design, one line each, in words a model can act on:
+ * refused constructs, mesher refusals, parse errors, and a mesh the audit does not
+ * stand behind (the cad gate "The solid is closed and trusted"). Empty = it works.
+ */
+export function buildProblems(ev: Evaluated): string[] {
+  const out: string[] = [];
+  for (const u of ev.parse.unsupported) out.push(`line ${u.line}: ${u.name} is not supported by 2bee.cad and produced nothing (${u.detail})`);
+  for (const i of ev.mesh.issues) if (i.severity === 'refused') out.push(`line ${i.line}: ${i.name} was refused by the mesher (${i.detail})`);
+  for (const e of ev.parse.errors) out.push(`line ${e.line}: ${e.message}`);
+  if (ev.mesh.trust === 'nothing') out.push(NO_SOLID);
+  else if (ev.mesh.trust !== 'trusted') out.push(`the mesh is not a closed, trusted solid: ${ev.mesh.trustDetail}`);
+  /* One construct can be refused once per use (a text() is many glyphs); the same line twice is one problem. */
+  return [...new Set(out)];
+}
+
+function repairPrompt(request: string, problems: string[]): string {
+  return (
+    `You were asked: "${request}". Your result (the source below) does NOT build correctly in 2bee.cad:\n` +
+    problems.slice(0, 20).map((p) => `- ${p}`).join('\n') +
+    (problems.length > 20 ? `\n- …and ${problems.length - 20} more of the same kinds` : '') +
+    '\nFix the source so it builds as one or more closed solids with no refused constructs and no errors, ' +
+    'still doing what was asked. Use only constructs 2bee.cad supports. Reply with the whole corrected source.'
+  );
+}
 
 /**
  * Preflight, send, read, review — the whole pipeline, with no React in it.
@@ -1090,33 +1232,106 @@ export async function askOnce(args: {
   online: boolean;
   transport: AskTransport;
   signal: AbortSignal;
+  /** The design's library host and path, so imports resolve. See {@link evaluate}. */
+  scad?: ScadOptions;
+  /** Repair rounds after the first reply (default {@link REPAIR_ROUNDS}; 0 = check only, never resend). */
+  repairs?: number;
+  /**
+   * Give up on ONE request after this long. Per request, not for the whole run: a
+   * run with repairs is several requests. `signal` is still the Stop button.
+   */
+  timeoutMs?: number;
+  /** What the run is doing now, for the busy line: asking, checking, fixing round k of n. */
+  onStage?: (stage: string) => void;
 }): Promise<AskOutcome> {
   const fail = preflight(args.cfg, args.prompt, args.online);
   if (fail) return { ok: false, failure: fail };
 
+  const call = async (req: AskRequest): Promise<AskTransportResult> => {
+    const c = new AbortController();
+    const stop = () => c.abort();
+    if (args.signal.aborted) c.abort();
+    args.signal.addEventListener('abort', stop);
+    const t = args.timeoutMs ? setTimeout(stop, args.timeoutMs) : null;
+    try {
+      return await args.transport(req, c.signal);
+    } finally {
+      if (t) clearTimeout(t);
+      args.signal.removeEventListener('abort', stop);
+    }
+  };
+
+  args.onStage?.('Asking the model');
   let res: AskTransportResult;
   try {
-    res = await args.transport(
-      buildRequest(args.cfg, args.prompt, args.source),
-      args.signal,
-    );
+    res = await call(buildRequest(args.cfg, args.prompt, args.source));
   } catch (e) {
     return { ok: false, failure: classifyThrow(e) };
   }
 
-  const reply = readReply(res);
+  const reply = readScadReply(res);
   if (!reply.ok) return { ok: false, failure: reply.failure };
 
   /* 🔴 THE SAME PARSER AND THE SAME AUDIT. `reviewProposal` calls `parseScad`
    * and `meshScene` — there is no second, lenient path for model output — and
    * it compares against the source that was SENT, so the delta is about the
    * thing the operator was looking at. */
-  return {
-    ok: true,
-    source: reply.scad,
-    raw: reply.raw,
-    review: reviewProposal(evaluate(args.source), reply.scad),
-  };
+  args.onStage?.('Checking that the result builds');
+  const current = evaluate(args.source, args.scad);
+  const first = reviewProposal(current, reply.scad, args.scad);
+  if (first.blocked) return { ok: true, source: reply.scad, raw: reply.raw, review: first };
+
+  /* 🔴 CHECK THE RESULT, AND SEND IT BACK UNTIL IT BUILDS (founder 2026-11-13). The
+   * built result is judged by `buildProblems`; while it has any, the model gets its
+   * own source and the problem list, up to `REPAIR_ROUNDS` times. A round is kept
+   * only if it has FEWER problems; a failed repair request ends the loop with the
+   * best result so far rather than losing it. */
+  let best = { scad: reply.scad, raw: reply.raw };
+  let problems = buildProblems(first.proposed);
+  let repairs = 0;
+  for (let round = 0; round < (args.repairs ?? REPAIR_ROUNDS) && problems.length > 0; round++) {
+    if (args.signal.aborted) break;
+    args.onStage?.(`Fixing what did not build (${round + 1} of ${args.repairs ?? REPAIR_ROUNDS}: ${problems.length} problem(s))`);
+    let r2: AskTransportResult;
+    try {
+      r2 = await call(buildRequest(args.cfg, repairPrompt(args.prompt, problems), best.scad));
+    } catch {
+      break;
+    }
+    const fixed = readScadReply(r2);
+    if (!fixed.ok) break;
+    repairs++;
+    const next = buildProblems(evaluate(fixed.scad, args.scad));
+    if (next.length < problems.length) {
+      best = { scad: fixed.scad, raw: fixed.raw };
+      problems = next;
+    }
+  }
+
+  /* Stop pressed during a repair round: the repair loop only `break`s on it, so
+   * without this the FIRST reply came back as `ok` and a panel that applies on
+   * reply wrote it into the editor after the operator had said stop. */
+  if (args.signal.aborted) return { ok: false, failure: classifyThrow({ name: 'AbortError' }) };
+
+  const review = repairs > 0 ? reviewProposal(current, best.scad, args.scad) : first;
+  const before = buildProblems(current).length;
+  if (repairs > 0) review.cautions.unshift(`Checked after the change and sent back to the model ${repairs} time(s) to fix what did not build.`);
+  /* Counts are not comparable across kinds: one refused text() is two lines, "no solid at all" is
+   * one. A design that built a solid must never be replaced by one that builds none. */
+  const lostSolid = current.mesh.trust !== 'nothing' && problems.includes(NO_SOLID);
+  if (problems.length > 0 && (problems.length > before || lostSolid) && !review.blocked) {
+    /* Worse than what is on screen now: NOT applied. Every caller applies only through `mayApply`. */
+    review.blocked = {
+      kind: 'still-broken',
+      headline: `the change does not build correctly (${problems.length} problem(s) after ${repairs} repair attempt(s)), so your design was NOT changed`,
+      detail: problems.join(' · '),
+    };
+  } else if (problems.length > 0) {
+    review.cautions.unshift(
+      `Still ${problems.length} problem(s), no more than the design had before this change (${before}): ${problems.join(' · ')}`,
+    );
+  }
+  return { ok: true, source: best.scad, raw: best.raw, review, repairs };
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -1904,6 +2119,10 @@ export interface AskPanelProps {
   transport?: AskTransport;
   /** Injected in tests. `navigator.onLine` in the product. */
   online?: boolean;
+  /** A part reference from a click on the 3D view; each new nonce is added to the prompt once. */
+  insert?: { nonce: number; text: string } | null;
+  /** The design's library host and path, so its `use`/`include` resolve when the reply is checked. */
+  scad?: ScadOptions;
 }
 
 /* ⚠ THERE IS DELIBERATELY NO `onGoToLine` HERE, and the first draft had one.
@@ -1922,8 +2141,29 @@ export function AskPanel({
   onOpenSettings,
   transport = fetchTransport,
   online,
+  insert = null,
+  scad,
 }: AskPanelProps) {
   const [state, setState] = useState<AskState>(INITIAL_ASK_STATE);
+  /* The editor text NOW, read when a reply lands. See {@link STALE_FAILURE}. */
+  const latestSource = useRef(source);
+  latestSource.current = source;
+  /* Founder 2026-11-13: what the AI is doing and for how long, beside Stop. */
+  const [stage, setStage] = useState('');
+  const [secs, setSecs] = useState(0);
+  useEffect(() => {
+    if (state.phase !== 'sending') return;
+    const t0 = Date.now();
+    setSecs(0);
+    /* A timeout chain: tests/cad-ask.test.ts forbids an interval timer anywhere in this file. */
+    let id: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      setSecs(Math.round((Date.now() - t0) / 1000));
+      id = setTimeout(tick, 1000);
+    };
+    id = setTimeout(tick, 1000);
+    return () => clearTimeout(id);
+  }, [state.phase]);
   const abort = useRef<AbortController | null>(null);
   const configured = askConfigured(cfg);
 
@@ -1963,6 +2203,13 @@ export function AskPanel({
     [onApply],
   );
 
+  const lastInsert = useRef(0);
+  useEffect(() => {
+    if (!insert || insert.nonce === lastInsert.current) return;
+    lastInsert.current = insert.nonce;
+    setState((old) => askReducer(old, { t: 'prompt', text: withReference(old.prompt, insert.text) }));
+  }, [insert]);
+
   /* Every decision — including whether anything is sent at all — is
    * `askOnce`'s. This callback owns the abort controller, the timer and the
    * dispatch, and nothing else. */
@@ -1970,23 +2217,26 @@ export function AskPanel({
     dispatch({ t: 'send' });
     const controller = new AbortController();
     abort.current = controller;
-    const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
+    setStage('Asking the model');
     try {
       const out = await askOnce({
+        timeoutMs: cfg.timeoutMs,
+        onStage: setStage,
         cfg,
         prompt: state.prompt,
         source,
         online: effectiveOnline,
         transport,
         signal: controller.signal,
+        scad,
       });
-      if (out.ok) dispatch({ t: 'reply', source: out.source, raw: out.raw, review: out.review });
-      else dispatch({ t: 'failed', failure: out.failure });
+      if (!out.ok) dispatch({ t: 'failed', failure: out.failure });
+      else if (latestSource.current !== source) dispatch({ t: 'failed', failure: STALE_FAILURE });
+      else dispatch({ t: 'reply', source: out.source, raw: out.raw, review: out.review });
     } finally {
-      clearTimeout(timer);
       abort.current = null;
     }
-  }, [cfg, state.prompt, source, effectiveOnline, transport, dispatch]);
+  }, [cfg, state.prompt, source, effectiveOnline, transport, dispatch, scad]);
 
   const review = state.proposal?.review ?? null;
 
@@ -2095,13 +2345,19 @@ export function AskPanel({
           {state.phase === 'sending' ? 'Asking…' : 'Ask'}
         </button>
         {state.phase === 'sending' ? (
-          <button
-            type="button"
-            data-testid="cad-ask-stop"
-            onClick={() => abort.current?.abort()}
-          >
-            Stop
-          </button>
+          <>
+            <span className="note" role="status" aria-live="polite" data-testid="cad-ask-busy">
+              <span className="cad-chat-spin" aria-hidden="true" style={{ display: 'inline-block', verticalAlign: 'middle', marginRight: 6 }} />
+              {stage}… {secs} s
+            </span>
+            <button
+              type="button"
+              data-testid="cad-ask-stop"
+              onClick={() => abort.current?.abort()}
+            >
+              Stop
+            </button>
+          </>
         ) : null}
         {/* 🔴 NO PUT-BACK BUTTON HERE ANY MORE — it is the toolbar's, once, for
             every replacement. See the header. */}

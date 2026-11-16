@@ -129,6 +129,7 @@ import {
   listPlants,
   plan,
   planPlacement,
+  layoutExtent,
   clearanceFor,
   spoilboardCatalogue,
   toolLibraryFor,
@@ -197,6 +198,7 @@ import {
 import {
   Viewport,
   LAYER_LABEL,
+  LAYER_DEFAULTS,
   LAYER_SECTION,
   layerTitle,
   liveLayersOf,
@@ -215,10 +217,18 @@ import {
   readStoredTab,
   rememberTab,
   type TabId,
+  TABS,
 } from './Tabs';
 import CadTab from './cad/CadTab';
 import ShopTab from './shop/ShopTab';
+import MakeFlow from './make/MakeFlow';
+import ToolsPage from './shop-setup/ToolsPage';
+import CncPage from './cncjob/CncPage';
+import JobsPage from './cncjob/JobsPage';
+import { SPARE_COLLETS_MM } from './cncjob/machines';
+import Home, { useHomeLink } from './home/Home';
 import RunTab from './RunTab';
+import PnpTab from './pnp/PnpTab';
 /* 🔴 THE HANDOFF — the CNC tab's emitted program, reaching the Run tab.
  *
  * `RunTab` has taken a `program` prop since it was written and this file
@@ -417,11 +427,9 @@ const CNC_ABOUT_LINES: readonly string[] = [
 // spoilboardReachVerdict, fitSpoilboard, ReachVerdict, SpoilboardFit
 // imported from ./panels/spoilboardHelpers
 
-// The collets a small shop owns beyond the one in the spindle. Mirrors the
-// core's reference machine; a tool needing one of these is SELECTABLE and says
-// which collet to fit, because a router tool change is routinely a collet
-// change too.
-const SPARE_COLLETS_MM = [3.175, 6.35, 8.0];
+// The collets a small shop owns beyond the one in the spindle: one declaration,
+// in cncjob/machines.ts, and SENT to the core in the config below (it was only
+// used here to list cutters, so the core planned with a different drawer).
 
 /* 🔴 THE THREE INLINE SHEET NUMBERS ARE GONE — they are `materials.ts` now.
  *
@@ -928,6 +936,62 @@ import { OperationPanel } from './panels/OperationPanel';
 import { SimulationPanel } from './panels/SimulationPanel';
 import { useSpoilboardState, type SpoilboardRestore } from './panels/useSpoilboardState';
 import { useCncStore } from './store/cncStore';
+import { markLoaded, tabEnabled, useLoaded } from './loaded';
+import { readJobs } from './cncjob/jobs';
+import { cncWarnings } from './cnc/warnings';
+import { CncAskPanel, type PlanOutcome } from './cnc/CncAskPanel';
+import { CncChat } from './cnc/CncChat';
+import { MachinesTab } from './machines/MachinesTab';
+import { Print3dTab } from './print3d/Print3dTab';
+import RunSimple from './run/RunSimple';
+import { ownedToolIds } from './make/autoPlan';
+import { registerCatalogueTool } from './shop-setup/toolRegistry';
+import { DesignPreview } from './cnc/DesignPreview';
+import { CncSpec } from './spec/mounts';
+import { PcbTab } from './pcbtab/PcbTab';
+import { SendToRun } from './cnc/SendToRun';
+import { describeFinding } from './cnc/findings';
+import { runGates, type GateInput } from './cnc/runGates';
+import { edgeClamps } from './cnc/autoClamps';
+import { leftoverSurface } from './cnc/leftover';
+import { GatesPanel } from './gates/GatesPanel';
+import { fetchTransport as askTransport, readAskConfig as readAskCfg, readReply as readAskReply } from './cad/ask';
+import { claimPendingFor, subscribeHandoffFor, type PendingCnc } from './shop/handoff';
+import { takeHandoffWorkpiece } from './shop/toCnc';
+import { setupFactsForImportMany } from './cam';
+
+/**
+ * Which face 2bee.cnc shows. Founder 2026-10-15: *"The 2bee.cnc should be the
+ * same concept as the 2bee.cad … have a chat window and have a cnc view, that is
+ * all."* ⇒ `chat` is the default. `code` (menu bar, every panel, the report) is
+ * NOT deleted: `?cnc=code` reaches it and persists it, `?cnc=chat` comes back.
+ * The panels stay MOUNTED in chat view (hidden by CSS), so every setting they
+ * hold and every check they run is exactly as before.
+ */
+/**
+ * The cnc chat view's three pictures (founder 2026-10-16: "Final Product,
+ * Leftover, Toolpath"). Drawing only.
+ *   product  the cut parts: their outlines extruded to the cut depth (`walls`)
+ *   leftover the core's simulated stock after machining (`result`)
+ * Both with the machine (`travel`) and the clamps.
+ */
+const layersOnly = (on: readonly string[]): Record<Layer, boolean> =>
+  Object.fromEntries(Object.keys(LAYER_DEFAULTS).map((k) => [k, on.includes(k)])) as Record<Layer, boolean>;
+const PRODUCT_LAYERS = layersOnly(['walls', 'travel', 'clamps']);
+const LEFTOVER_LAYERS = layersOnly(['result', 'travel', 'clamps']);
+const CNC_VIEW_KEY = '2bee.app.cnc.view';
+function readCncView(): 'chat' | 'code' {
+  try {
+    const q = new URLSearchParams(globalThis.location?.search ?? '').get('cnc');
+    const v = q === 'code' || q === 'chat' ? q : globalThis.localStorage?.getItem(CNC_VIEW_KEY) === 'code' ? 'code' : 'chat';
+    globalThis.localStorage?.setItem(CNC_VIEW_KEY, v);
+    return v;
+  } catch {
+    return 'chat';
+  }
+}
+import { opOf, storeUpdateOf, type JobContext, type JobPatch } from './cnc/jobAsk';
+import { clampsForPhase, moveLines, movedInto, phaseAt, playedCount, stopSummary, stopTitle, stopsOf } from './cnc/interventions';
 
 /* ── The core's DRAWING verdicts, as a picker row ──────────────────────────── */
 
@@ -1101,6 +1165,17 @@ interface SavedWorkpiece {
  */
 // EyeIcon, SectionEye, Section imported from ./panels/SectionPanel
 
+/* The reasons a plan is refused, as the `blocked` panel lists them: refusals,
+ * errors and fixture findings. Using `refusals` alone showed a refused
+ * candidate with an EMPTY reason list (measured in e2e, 2026-10-13). */
+function refusalReasons(r: Report): string[] {
+  return [
+    ...r.refusals,
+    ...r.errors,
+    ...r.fixture_findings.filter((f) => f !== 'Undeclared'),
+  ];
+}
+
 export default function App() {
   /* ── WHICH TAB IS SHOWING ────────────────────────────────────────────────
    *
@@ -1117,19 +1192,71 @@ export default function App() {
    * and is cheap either way; it is rendered on the same terms for consistency,
    * not because it holds anything. */
   const [tab, setTabState] = useState<TabId>(() => readStoredTab());
+  const [cncView] = useState<'chat' | 'code'>(readCncView);
+  /* cnc chat view, founder 2026-10-15: "on the cnc show the final product". The
+   * Final product view draws the core's simulated stock after machining (the
+   * `result` layer) with the machine and clamps; Toolpath shows the layers as set.
+   * Drawing only: nothing about the plan changes. */
+  const [cncShow, setCncShow] = useState<'product' | 'leftover' | 'toolpath'>('product');
+  const [runView] = useState<'chat' | 'code'>(() => {
+    try {
+      const q = new URLSearchParams(globalThis.location?.search ?? '').get('run');
+      const v = q === 'code' || q === 'chat' ? q : globalThis.localStorage?.getItem('2bee.app.run.view') === 'code' ? 'code' : 'chat';
+      globalThis.localStorage?.setItem('2bee.app.run.view', v);
+      return v;
+    } catch {
+      return 'chat';
+    }
+  });
   const [cadSeen, setCadSeen] = useState(() => readStoredTab() === 'cad');
+  /* Tools: mounted on first visit and kept, like `cad`, so a half-typed tool
+   * and its photo preview survive a tab switch; never mounted on a first load,
+   * so a fresh page does not open IndexedDB. */
+  const [toolsSeen, setToolsSeen] = useState(() => readStoredTab() === 'tools');
+  const [machinesSeen, setMachinesSeen] = useState(() => readStoredTab() === 'machines');
+  const [print3dSeen, setPrint3dSeen] = useState(() => readStoredTab() === 'print3d');
+  const [pcbSeen, setPcbSeen] = useState(() => readStoredTab() === 'pcb');
+  useEffect(() => {
+    if (tab === 'pcb') setPcbSeen(true);
+  }, [tab]);
+  /* 2bee.cnc and Jobs: mounted on first visit and kept, like `cad`, so the
+   * designs being prepared survive a switch between the two pages. */
+  const [cncJobSeen, setCncJobSeen] = useState(() => readStoredTab() === 'cncjob' || readStoredTab() === 'jobs');
+  /* The home page's Back returns here (founder 2026-10-16). */
+  const beforeHome = useRef<TabId>('make');
   const setTab = useCallback((next: TabId) => {
+    if (next !== 'home' && globalThis.location?.hash === '#home') history.replaceState(history.state, '', location.pathname + location.search);
     setTabState(next);
     rememberTab(next);
     if (next === 'cad') setCadSeen(true);
+    if (next === 'tools') setToolsSeen(true);
+    if (next === 'machines') setMachinesSeen(true);
+    if (next === 'print3d') setPrint3dSeen(true);
+    if (next === 'cncjob' || next === 'jobs') setCncJobSeen(true);
   }, []);
+  useHomeLink(useCallback(() => setTab('home'), [setTab]));
 
   /* The shop hands a design to `CadTab` through `shop/handoff.ts` and then asks
    * to be switched. Going through `setTab('cad')` is what MOUNTS the tree — the
    * request is held in the handoff's pending slot until it does, and on a first
    * visit nothing has mounted `CadTab` at all, which is now the normal case
    * because the shop is the landing tab. */
-  const onShopOpened = useCallback(() => setTab('cad'), [setTab]);
+  /* The design page says WHERE (founder 2026-10-15: "when I click on open 3d it
+   * opens in cad", "same with pnp"): each target maps to its own tab. */
+  /* Founder 2026-10-16: work tabs with nothing loaded are disabled (loaded.ts). */
+  const loadedTabs = useLoaded();
+  /* A queued job from before this flag existed still opens cnc.run. */
+  useEffect(() => {
+    try {
+      if (readJobs(localStorage).book.jobs.length > 0) markLoaded('run');
+    } catch {
+      /* storage unavailable: cnc.run opens once a job is sent */
+    }
+  }, []);
+  const onShopOpened = useCallback(
+    (target: string) => (markLoaded(target === '3d' ? 'print3d' : target), setTab(target === '3d' ? 'print3d' : target === 'pnp' ? 'pnp' : target === 'pcb' ? 'pcb' : target === 'cnc' ? 'cnc' : 'cad')),
+    [setTab],
+  );
 
   // ready, loadError, ver, jobs, plants, lib — migrated to Zustand store
 
@@ -2389,7 +2516,7 @@ export default function App() {
           version(),
           listJobs(),
           listPlants(),
-          toolLibraryFor(colletMm, SPARE_COLLETS_MM),
+          toolLibraryFor(colletMm, [...SPARE_COLLETS_MM]),
           /* The spoilboard catalogue, from the CORE. Fetched here with the tool
            * library and for the same reason: it is a list of physical objects
            * with sources, and a second copy in TypeScript would drift silently.
@@ -2744,6 +2871,7 @@ export default function App() {
         travel_z_mm: travelZ,
         safe_z_mm: safeZ,
         collet_mm: colletMm,
+        spare_collets_mm: [...SPARE_COLLETS_MM],
         spindle_max_rpm: spindleMax,
         probe_enabled: probeEnabled,
         /* 🔴 OMITTED when the field is blank, never sent as `0`. `MachineCfg`
@@ -2842,6 +2970,14 @@ export default function App() {
       tool_ids: toolIds,
       ...(extraTools ? { extra_tools: extraTools } : {}),
       probe_after_toolchange: probeAfterChange,
+      /* Founder 2026-10-16: "How the tool will cut under the clamp? if the clamp
+       * needs to be removed and reapplied during the job show it in the timeline
+       * and the 3d". It never cuts under one: when a cut crosses a clamp the
+       * core splits the job at a stop to move it (core `reclamp.rs`) and checks
+       * every phase against the clamps standing during it. The re-probe after
+       * the move follows the operator's tool-change choice. */
+      auto_reclamp: true,
+      probe_after_clamp_change: probeAfterChange,
       /* 🔴 A JOB FIELD, DELIBERATELY NOT AN `op` ONE. The decision is taken
        * against the PLACED outline and the workpiece, so it is a fact about the
        * setup — where the part sits on the material — not about how one
@@ -3378,12 +3514,194 @@ export default function App() {
     void replan();
   }, [replan]);
 
+  /* ── 2bee.cnc "Ask a model" (founder 2026-10-12, option B) ────────────────
+   * The CANDIDATE is planned by the same door `replan` uses for one workpiece,
+   * with the same drawings and placements, so "the core accepts it" means the
+   * same thing it means for the live job. Several planned workpieces are
+   * REFUSED by name rather than previewed through one of them: a preview of
+   * part of the job is not a preview of the job. */
+  const planCandidate = useCallback(
+    async (cfg: JobConfig): Promise<PlanOutcome> => {
+      if (workpieces.filter((wp) => wp.drawings.length > 0).length > 1) {
+        throw new Error(
+          'this job plans several workpieces, and the preview plans one job at a time — apply by hand in the Operation panel'
+        );
+      }
+      const r = drawings.length
+        ? await planImportMany(
+            drawings.map((d) => ({
+              id: d.instance,
+              format: d.format,
+              bytes: d.bytes ?? new TextEncoder().encode(d.text ?? ''),
+              z_section_mm: sel >= 0 && d === drawings[sel] ? sectionZ ?? undefined : undefined,
+              offset_mm: d.offset,
+              rotation_deg: d.rotation,
+            })),
+            cfg,
+            simCell,
+            SURFACE_CELL_MM,
+            MESH_BUDGET_TRIS
+          )
+        : await plan(job, plant, cfg, simCell, SURFACE_CELL_MM);
+      return {
+        ok: r.ok,
+        refusals: refusalReasons(r),
+        warnings: r.warnings,
+        lines: r.gcode ? r.gcode.split('\n').length : 0,
+        seconds: r.estimated_seconds,
+      };
+    },
+    [workpieces, drawings, sel, sectionZ, simCell, job, plant]
+  );
+  const askContext: JobContext = useMemo(
+    () => ({
+      op: opOf(config),
+      toolIds,
+      library: (lib?.tools ?? []).map((t: ToolRow) => t.id),
+      facts: { machine: config.machine, stock: config.stock, material: config.material, clamps: config.clamps },
+      plan: {
+        ok: !!report?.ok,
+        refusals: report ? refusalReasons(report) : [],
+        warnings: report?.warnings ?? [],
+        notes: (report?.notes ?? []).slice(0, 20),
+        summary: report
+          ? `${report.gcode ? report.gcode.split('\n').length : 0} lines, ${Math.round(report.estimated_seconds)} s`
+          : 'not planned',
+      },
+    }),
+    [config, toolIds, lib, report]
+  );
+  /* 🔴 cnc chat view: CUTTERS COME FROM cnc.tools (founder 2026-10-15: "tools
+   * selection should be automatic from cnc.tool, if no tools exists in the
+   * inventory came up with a new tool"). Every cutter registered as owned is
+   * offered to the core, which chooses among them, exactly as the Make step's
+   * autoPlan does (`ownedToolIds`). Re-read when cnc is opened, so a cutter just
+   * registered in cnc.tools counts. With none owned, NOTHING is selected here:
+   * the chat says so and the AI proposes a cutter to register, it never adds
+   * one itself. */
+  const ownedIds = useMemo(
+    () => ownedToolIds(inventory, (lib?.tools ?? []).map((t: ToolRow) => t.id)),
+    [inventory, lib],
+  );
+  const drawingsKey = drawings.map((d) => d.name).join(', ');
+  useEffect(() => {
+    if (tab !== 'cnc') return;
+    readInventory()
+      .then(({ doc }) => setInventory(doc))
+      .catch(() => {
+        /* the load at mount already reports a failed read */
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+  useEffect(() => {
+    if (cncView !== 'chat' || !drawingsKey || ownedIds.length === 0) return;
+    if (ownedIds.length === toolIds.length && ownedIds.every((id) => toolIds.includes(id))) return;
+    pushSnapshot();
+    setToolIds(ownedIds);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drawingsKey, ownedIds.join('|'), cncView]);
+
+  /* machines chat: "add this machine" saves the fields AFTER the patch has been
+   * applied, i.e. on the render where the new values are in state, and selects it. */
+  const [pendingMachineName, setPendingMachineName] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pendingMachineName) return;
+    const snap = currentMachine();
+    void savedMachines.saveAs(pendingMachineName, snap);
+    setLoadedMachine({ id: rowId('saved', pendingMachineName), snapshot: { ...snap } });
+    setPendingMachineName(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingMachineName]);
+
+  const askCurrent: PlanOutcome | null = useMemo(
+    () =>
+      report
+        ? {
+            ok: report.ok,
+            refusals: refusalReasons(report),
+            warnings: report.warnings,
+            lines: report.gcode ? report.gcode.split('\n').length : 0,
+            seconds: report.estimated_seconds,
+          }
+        : null,
+    [report]
+  );
+  const applyAskPatch = useCallback((patch: JobPatch) => {
+    useCncStore.setState(storeUpdateOf(patch));
+  }, []);
+
   // The travel refusal, as the CORE worded it. Not re-derived here: the rule
   // about what fits lives in one place, and this panel only repeats its answer.
   const fitRefusal = useMemo(
     () => report?.refusals.find((r: string) => r.includes('travel')) ?? null,
     [report]
   );
+
+  /* ── AUTOMATIC PLACEMENT, cnc chat view (founder 2026-10-15: "the positioning
+   * of the objects should be fully automatic"; dragging is off there).
+   *
+   * Each loaded design's extent is measured BY THE CORE (`layoutExtent`, cut
+   * extent at a 3 mm tool radius) at its as-drawn position, then the designs are
+   * shelf-packed onto the workpiece: 20 mm clamp margin (make/autoPlan.ts
+   * CLAMP_MARGIN_MM), 10 mm between cut extents, left to right, then a new row.
+   * Nothing here decides that the result is safe: the core still plans it and
+   * refuses an overlap, a clamp in the path or a move outside travel, exactly as
+   * for a hand placement. Runs once per set of designs + rotations, so it never
+   * fights itself; a design that does not fit is left where it was and the plan's
+   * refusal says so. */
+  const autoPlacedKey = useRef('');
+  useEffect(() => {
+    if (cncView !== 'chat' || !report?.drawing?.length || drawings.length === 0) return;
+    const key = drawings.map((d) => `${d.instance}@${d.rotation}`).join('|') + `#${stockX}x${stockY}#` + clamps.map((c) => `${c.x},${c.y},${c.w},${c.h},${c.rotation_deg ?? 0}`).join(';');
+    if (autoPlacedKey.current === key) return;
+    const split = splitDrawingParts(report.drawing, drawings.map((d) => d.instance));
+    if (!split.ok) return;
+    let alive = true;
+    void (async () => {
+      const MARGIN = 20, GAP = 10, R = 3, STEP = 5;
+      /* Keepouts: every declared clamp's footprint (swapped for a quarter turn) grown by
+       * the cutter radius + 2 mm, then each placed part's cut extent grown by GAP. The
+       * first spot scanning from the workpiece corner (rows of Y, then X) that touches
+       * none of them is taken. Founder 2026-10-16: a part had been placed ON a clamp. */
+      type Rect = [number, number, number, number];
+      const keepouts: Rect[] = clamps.map((c) => {
+        const quarter = Math.round(((c.rotation_deg ?? 0) % 180 + 180) % 180) === 90;
+        const w = quarter ? c.h : c.w, h = quarter ? c.w : c.h;
+        return [c.x - R - 2, c.y - R - 2, c.x + w + R + 2, c.y + h + R + 2];
+      });
+      const hits = (a: Rect) => keepouts.some((b) => a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1]);
+      const next = new Map<string, [number, number]>();
+      for (const d of drawings) {
+        const asDrawn = await layoutExtent(
+          [{ id: d.instance, parts: split.byId.get(d.instance) ?? [], x_mm: d.offset[0], y_mm: d.offset[1], rotation_deg: d.rotation }],
+          R,
+        );
+        if (!alive || !asDrawn.ok) return;
+        const e = asDrawn.cut_extent;
+        let spot: [number, number] | null = null;
+        for (let y = MARGIN; !spot && y + e.height_mm <= stockY - MARGIN + 1e-6; y += STEP) {
+          for (let x = MARGIN; x + e.width_mm <= stockX - MARGIN + 1e-6; x += STEP) {
+            const r: Rect = [originX + x, originY + y, originX + x + e.width_mm, originY + y + e.height_mm];
+            if (!hits(r)) {
+              spot = [x, y];
+              break;
+            }
+          }
+        }
+        /* Nowhere free: leave it at the margin; the core's refusal says why. */
+        const [x, y] = spot ?? [MARGIN, MARGIN];
+        next.set(d.instance, [d.offset[0] + (originX + x - e.min_x), d.offset[1] + (originY + y - e.min_y)]);
+        keepouts.push([originX + x - GAP, originY + y - GAP, originX + x + e.width_mm + GAP, originY + y + e.height_mm + GAP]);
+      }
+      if (!alive) return;
+      autoPlacedKey.current = key;
+      updateDrawings((ds) => ds.map((d) => (next.has(d.instance) ? { ...d, offset: next.get(d.instance)! } : d)));
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cncView, report?.drawing, drawings.map((d) => `${d.instance}@${d.rotation}`).join('|'), stockX, stockY, clamps]);
 
   /* ── PLACEMENT ADVISOR — TODO #28 ──────────────────────────────────────────
    *
@@ -3474,7 +3792,7 @@ export default function App() {
   useEffect(() => {
     if (!ready) return;
     let live = true;
-    toolLibraryFor(colletMm, SPARE_COLLETS_MM)
+    toolLibraryFor(colletMm, [...SPARE_COLLETS_MM])
       .then((t) => live && setLib(t))
       .catch(() => {});
     return () => {
@@ -4191,10 +4509,17 @@ export default function App() {
     for (let i = 0; i < n; i++) {
       const m = moves[i];
       let sec = 0;
-      if (m.kind === 'change') {
+      // A `zero` (set Z zero by hand, no probe) is the second `M0` of the cutter
+      // change before it; its time is a person's and no rate covers it, so it
+      // is charged nothing here, as in the core's estimate (a named blind spot).
+      if (m.kind === 'change' || (m.kind === 'clamp' && moves[i + 1]?.kind !== 'change')) {
         // An `M0` is ONE move and however long the report says a person takes.
+        // A clamp move that shares its stop with the cutter change after it is
+        // the SAME `M0` (the core writes one), so it is charged once, there.
         sec = changeSec;
         changes += 1;
+      } else if (m.kind === 'clamp') {
+        // Charged on the `change` that follows: one stop, one charge.
       } else if (i > 0) {
         const d = Math.hypot(m.x - px, m.y - py, m.z - pz);
         // `feed ?? rapid_mm_min` and NOT `feed ?? 0`: `undefined` here means the
@@ -4359,6 +4684,27 @@ export default function App() {
   /* Runs of same-kind moves for the coloured bar. MEMOISED — playback re-renders
    * this component and rebuilding a few dozen runs out of 9000 moves on every
    * frame is work the animation cannot afford. */
+  /* ── Clamps per PHASE, at the playhead (founder 2026-10-16) ─────────────────
+   * The core echoes the clamp set standing during each phase of a program that
+   * moves its clamps; the 3D shows the set at the playhead, the moved clamps in
+   * the clamp-move orange, and where they stood before as dashed outlines. Only
+   * a phase CHANGE changes these arrays, so the scene does not churn on play. */
+  const clampPhase = useMemo(() => {
+    const mv = report?.render ?? [];
+    return report?.clamp_phases?.length ? phaseAt(mv, playedCount(mv.length, progress)) : 0;
+  }, [report, progress]);
+  const phaseView = useMemo(() => {
+    if (!report?.clamp_phases?.length) return null;
+    const moved = movedInto(report, clampPhase);
+    const before = clampsForPhase(report, Math.max(0, clampPhase - 1));
+    return {
+      clamps: clampsForPhase(report, clampPhase),
+      movedNames: moved.map((m) => m.clamp),
+      ghosts: moved.length ? before.filter((c) => moved.some((m) => m.clamp === c.name)) : undefined,
+      lines: moveLines(report.clamp_moves ?? [], unit),
+    };
+  }, [report, clampPhase, unit]);
+
   const programRuns = useMemo(() => {
     const moves = report?.render ?? [];
     const runs: { kind: string; n: number }[] = [];
@@ -4751,7 +5097,7 @@ export default function App() {
       y: 0,
       thickness_mm: Number(touchPlateMm || 0),
     },
-    clamps: report?.clamps ?? clamps,
+    clamps: phaseView?.clamps ?? report?.clamps ?? clamps,
     /* 🔴 NOT `report?.spoilboard ?? null` — see the five states above. That
      * expression is what made the eye disappear for a board the operator had
      * declared, and a bare `??` to the declaration is what would draw a board
@@ -5260,733 +5606,198 @@ export default function App() {
   }));
   const toolInv = inventoryFor('tool', toolCatalogueRows);
 
-  return (
-    <div className="app">
-      <header className="topbar">
-        {/* 🔴 THE NAME, AND ONLY THE NAME — founder, 2026-08-11: *"remove the
-            header: 2bee.slicer CNC CAM · grblHAL to just 2bee.app"*.
-            Two separate wrongs went with that string, which is why it is a
-            correction and not only a layout change:
-              · **`2bee.slicer` IS A DEAD PRODUCT NAME.** The lane was renamed to
-                `2bee.app` on 2026-08-09 and this header kept shipping the old one
-                to the operator — the same residue a sweep is chasing across the
-                rest of the lane. `index.html`'s <title> was already fixed; this
-                was the other user-visible copy.
-              · **`CNC CAM · grblHAL` WAS A SCOPE CLAIM THAT STOPPED BEING TRUE.**
-                The app has a CAD tab and a Run tab. A strapline naming one of the
-                three is a header describing an app this is not.
-            The MARK is not deleted — it moved to the tab row below, where the
-            founder asked for it. It is the same `.mark` span driven by the same
-            `--brand-mark` CSS variable; nothing was copied, redrawn or re-themed
-            to move it. */}
-        <div className="brand">
-          <span className="name">
-            <strong>2bee.app</strong>
-          </span>
-        </div>
-        <div className="topright">
-          {showFixtures ? (
-            <label className="inline">
-              Job
-              <select
-                value={job}
-                onChange={(e) => setJob(e.target.value)}
-                data-testid="job-select"
-                title="Built-in gate fixtures. NOT drawings — they bypass the importer."
-              >
-                {jobs.map((j) => (
-                  <option key={j.name} value={j.name}>
-                    {j.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-          {/*
-            🔴 OFF THE OPERATOR SURFACE — founder, 2026-08-08, after asking what
-            "Plant" meant. That question was the answer: a control nobody outside
-            this lane can name does not belong in a machining UI.
+  /* design → "Open in cnc": the design page has already SAVED it into the
+   * drawings list (cad's Save route, same refusals). cnc refreshes its view of
+   * that list, then loads exactly that row as the job and shows the hand-off's
+   * note (e.g. "ONE section at z = … mm"). Held as PENDING so the load runs with
+   * the current list, not the one the subscription was made with. */
+  const [pendingCnc, setPendingCnc] = useState<PendingCnc | null>(null);
+  useEffect(() => {
+    const take = (p: PendingCnc) => setPendingCnc(p);
+    const held = claimPendingFor('cnc');
+    if (held) take(held);
+    return subscribeHandoffFor('cnc', take);
+  }, []);
+  useEffect(() => {
+    if (!pendingCnc) return;
+    const name = pendingCnc.cnc.drawingName;
+    if (!savedDrawings.items.some((x) => x.name === name)) {
+      void savedDrawings.refresh();
+      return;
+    }
+    const note = pendingCnc.cnc.note;
+    /* 🔴 THE THICKNESS COMES WITH THE HAND-OFF (make/autoPlan.ts workpieceFor,
+     * the function the Make step plans with). Without it this tab planned the
+     * Hive cleat (14 mm) on its remembered 18 mm and emitted Z-18. */
+    pushSnapshot();
+    takeHandoffWorkpiece(pendingCnc.cnc);
+    setPendingCnc(null);
+    void syncDrawings([drawingRowId('saved', name)]).then(() => setDrawingNote(note));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingCnc, savedDrawings.items]);
 
-            A plant is a DELIBERATE DEFECT, and four of them emit a runnable
-            program rather than a refusal, by design — the gates compare a clean
-            run against a planted one, so the planted one has to post. Measured:
-            `no-tabs` 8276 bytes, `gouge` 10837, `cut-clamp` 10436,
-            `shallow-floor` 10436, none refused. In the operator UI that is a
-            person one click from exporting a program that drives a cut across
-            the part or leaves it untabbed under a 2.2 kW spindle. This lane's
-            own rule says a plant path must not leak into a real job; it had been
-            leaking since the UI was built.
+  /* Leftover = the simulated surface with the parts taken out (founder 2026-10-16:
+   * "the leftover should show the remaining panel"). Only built when shown. */
+  const leftover = useMemo(() => {
+    if (cncShow !== 'leftover' || !scene.stockSurface || !report?.drawing?.length) return null;
+    try {
+      return leftoverSurface(scene.stockSurface, report.drawing, report.drawing_placement ?? null, -thickness);
+    } catch {
+      return null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cncShow, scene.stockSurface, report?.drawing, report?.drawing_placement, thickness]);
 
-            Kept behind `?plants=1` rather than deleted, for ONE reason: the
-            browser suite proves the SIMULATION catches a planted gouge, and that
-            test needs a way to plant one. Deleting the control would delete the
-            only route the E2E has to arm that check, and a safety check with no
-            way to fire it is the thing this whole lane exists to prevent. It is
-            a query parameter, not a build flag, because the suite runs against
-            the production build where a dev flag is compiled out.
-          */}
-          {showPlants ? (
-            <label className="inline">
-              Plant
-              <select
-                value={plant}
-                onChange={(e) => setPlant(e.target.value)}
-                data-testid="plant-select"
-                title="Deliberate defects, for proving the checks actually fire. NOT for cutting."
-              >
-                <option value="">none</option>
-                {plants.map((p) => (
-                  <option key={p.name} value={p.name}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-        </div>
-      </header>
+  /* Founder 2026-10-16: a work tab with nothing loaded is disabled. Landing on one
+   * (a remembered tab after its work was cleared) goes to the design tab instead. */
+  const isTabEnabled = (id: TabId) => tabEnabled(id, loadedTabs) || (id === 'cnc' && drawings.length > 0);
+  useEffect(() => {
+    if (TABS.some((t) => t.id === tab) && !isTabEnabled(tab)) setTab('shop');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, loadedTabs, drawings.length]);
 
-      {/* THE TAB BAR — founder 2026-08-11: *"1st tab cad, 2nd tab CNC, 3rd tab
-          operation, this is where I will execute and monitor the CNC router"*.
-          Order is his. Which one OPENS is a different question and is answered
-          in `Tabs.tsx` (`DEFAULT_TAB`), with the reasons.
+  /* cnc pre-run gates (cnc/runGates.ts), shown in the right column and gating Test/Run. */
+  const [runMachine, setRunMachine] = useState<GateInput['machine']>(null);
+  const cncGates = runGates({
+    plan: report ? { ok: report.ok, refusals: [...report.refusals, ...report.errors], fixtureFindings: report.fixture_findings ?? [], notes: [...(report.notes ?? []), ...(report.warnings ?? [])] } : null,
+    clampCount: clamps.length,
+    holdDownCount: workholdingIds.filter((id) => WORKHOLDING.find((w) => w.id === id)?.obstructs === false).length,
+    confirmedClear,
+    jobToolIds: toolIds,
+    ownedToolIds: ownedIds,
+    material,
+    materialLibrary: lib ? materialLibrary : null,
+    thicknessMm: thickness,
+    ...(report?.clamp_phases && report.clamp_phases.length > 1
+      ? {
+          clampPhases: {
+            phases: report.clamp_phases.length,
+            moves: report.clamp_moves?.length ?? 0,
+            stops: stopSummary(report.render ?? [], report.intervention_plan),
+            warnings: [...new Set(stopsOf(report.render ?? []).flatMap((st) => (st.warning ? [st.warning] : [])))],
+          },
+        }
+      : {}),
+    machine: runMachine,
+  });
 
-          It sits BELOW the header rather than inside it, so the brand, the theme
-          toggle and the gate instruments stay app-wide: they are not properties
-          of the CNC tab and must not disappear when another tab is showing.
+  /** Declare `count` clamps of catalogue `id` at computed edge positions, then re-place the parts around them. */
+  const autoClamp = (id: string, count: 2 | 4 | 6): string | null => {
+    const w = WORKHOLDING.find((x) => x.id === id);
+    if (!w || !w.obstructs || w.footprintMm[0] <= 0) return `"${id}" is not a clamp with a footprint in the catalogue.`;
+    pushSnapshot();
+    setClamps(edgeClamps({ x0: originX, y0: originY, w: stockX, h: stockY }, { id, footprint: w.footprintMm, heightMm: w.heightMm }, count));
+    setWorkholdingIds([...new Set([...workholdingIds, id])]);
+    autoPlacedKey.current = '';
+    return null;
+  };
+  /** The AI chooses WHICH clamp and HOW MANY (never where): clamps that clear the safe Z and resist lift. */
+  const aiPickClamp = async (hint: string): Promise<{ id: string; count: 2 | 4 | 6; why: string } | null> => {
+    const options = WORKHOLDING.filter((w) => w.obstructs && w.resists.includes('lift') && w.footprintMm[0] > 0 && w.heightMm - thickness + 2 < safeZ);
+    if (!options.length) return null;
+    const cfg = readAskCfg(globalThis.localStorage);
+    try {
+      const res = await askTransport(
+        {
+          url: cfg.endpoint,
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...(cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {}) },
+          body: {
+            model: cfg.model,
+            messages: [
+              { role: 'system', content: 'Choose clamps for a CNC job from the list: the clamp id and how many (2, 4 or 6). Positions are computed by the app; do not give positions. Answer JSON only: {"id": "<id>", "count": 2|4|6, "why": "<short>"}.' },
+              { role: 'user', content: `Request: ${hint}\nWorkpiece ${formatLengthPair(stockX, stockY, 'mm', ' x ')}, ${formatLength(thickness, 'mm')} ${material}. Options: ${options.map((w) => `${w.id} (${w.name})`).join(' | ')}` },
+            ],
+            temperature: 0,
+            stream: false,
+          },
+        },
+        AbortSignal.timeout(cfg.timeoutMs),
+      );
+      const r = readAskReply(res);
+      if (!r.ok) return null;
+      const id = /"id"\s*:\s*"([^"]+)"/.exec(r.raw)?.[1];
+      const n = Number(/"count"\s*:\s*(\d+)/.exec(r.raw)?.[1]);
+      const why = /"why"\s*:\s*"([^"]*)"/.exec(r.raw)?.[1] ?? '';
+      if (!id || !options.some((w) => w.id === id)) return null;
+      return { id, count: n === 2 || n === 6 ? n : 4, why };
+    } catch {
+      return null;
+    }
+  };
 
-          🔴 THE ROW NOW CARRIES THE MARK AND THE THEME TOGGLE — founder,
-          2026-08-11: *"move the dark/light to the 2bee.cad, 2bee.cnc, Run row;
-          add the logo to this row"*.
+  /* "Fix with AI" (founder 2026-10-16: "automatically fix the issues with the ai agent
+   * where possible"). Each fix goes through the same store fields and re-plan as a
+   * hand change, and the gates re-check it. What cannot be fixed safely is said. */
+  const [cncFixing, setCncFixing] = useState(false);
+  const [cncFixNotes, setCncFixNotes] = useState<string[]>([]);
+  const [cncAutoAsk, setCncAutoAsk] = useState<{ nonce: number; text: string } | null>(null);
+  const fixCnc = async () => {
+    setCncFixing(true);
+    const notes: string[] = [];
+    try {
+      const g = Object.fromEntries(cncGates.map((x) => [x.id, x]));
+      if (g.hold?.state === 'FAIL' && !g.hold.confirm) {
+        /* Clamps first: the AI chooses type + count, positions are computed. */
+        const pick = await aiPickClamp('hold the workpiece down for this job');
+        const why = pick ? autoClamp(pick.id, pick.count) : 'the AI did not choose a clamp';
+        if (pick && !why) notes.push(`Clamps: ${pick.count} x ${WORKHOLDING.find((w) => w.id === pick.id)!.name} at the workpiece edges${pick.why ? ` (${pick.why})` : ''}. Fit them where the 3D shows.`);
+        else notes.push(`Clamps: ${why}. Declare the hold-down yourself.`);
+      }
+      if (g.fixture?.state === 'FAIL') {
+        const rapid = report?.fixture_findings?.find((f) => /^RapidBelowClamp/.test(f));
+        const clears = (h: number) => h - thickness + 2 < safeZ;
+        const lower = WORKHOLDING.find((w) => w.obstructs && w.resists.includes('lift') && clears(w.heightMm) && w.footprintMm[0] > 0);
+        if (rapid && lower && clamps.some((c) => !clears(c.height_mm))) {
+          pushSnapshot();
+          setClamps(clamps.map((c, i) => (clears(c.height_mm) ? c : { ...c, name: `${lower.id}-${i + 1}`, w: lower.footprintMm[0], h: lower.footprintMm[1], height_mm: lower.heightMm })));
+          notes.push(`Clamps: swapped for ${lower.name} (${formatLength(lower.heightMm, unit)}), which clears the safe Z.`);
+        } else {
+          autoPlacedKey.current = '';
+          notes.push('Clamps: the parts are placed again around the clamps.');
+        }
+      }
+      if (g.plan?.state === 'FAIL') {
+        setCncAutoAsk({ nonce: Date.now(), text: `Fix this so the planner accepts the job: ${g.plan.why}` });
+        notes.push('Plan: asked the CNC assistant for a settings change (see the chat).');
+      }
+      if (g.cutters?.state === 'FAIL') {
+        /* The selected cutters that are not owned are registered from the catalogue
+         * (founder: "create the required tools"). They are catalogue entries, so the
+         * planner can use them; the note asks for the physical check. */
+        const missing = toolIds.filter((t) => !ownedIds.includes(t));
+        const done: string[] = [];
+        for (const t of missing) {
+          const why = await registerToolById(t);
+          if (why) notes.push(`Cutter ${t}: ${why}`);
+          else done.push(t);
+        }
+        if (done.length) notes.push(`Cutters added to cnc.tools: ${done.join(', ')}. Confirm you have them and measure them there.`);
+      }
+      if (g.material?.state === 'FAIL') notes.push('Material: needs you. Choose the material and thickness on the table.');
+      if (g.machine?.state === 'FAIL') notes.push('Machine: needs you. Choose a machine that answers.');
+    } finally {
+      setCncFixNotes(notes);
+      setCncFixing(false);
+    }
+  };
 
-          ⚠ `TabBar` IS NOT MODIFIED AND TAKES NO CHILDREN. The two controls are
-          SIBLINGS of it inside `.tabrow`, so the tablist stays exactly the set of
-          elements the WAI-ARIA pattern expects — a mark or a button inside
-          `role="tablist"` would be announced as part of the tab set, and the
-          roving-tabindex arithmetic in `Tabs.tsx` counts `TABS`, not children.
+  /** Register a catalogue cutter as owned, as cnc.tools' own "add from list" does. */
+  const registerToolById = async (id: string): Promise<string | null> => {
+    try {
+      const { doc } = await readInventory();
+      const r = registerCatalogueTool(doc, id, (lib?.tools ?? []).map((t: ToolRow) => t.id), Date.now());
+      if (!r.ok) return r.why;
+      await writeInventory(r.doc, Date.now());
+      setInventory(r.doc);
+      return null;
+    } catch (e) {
+      return `Not registered: ${String(e instanceof Error ? e.message : e)}`;
+    }
+  };
 
-          🔴 AND THE TOGGLE'S BEHAVIOUR IS UNTOUCHED. It is the same `setDark`
-          on the same `dark` state, persisted by the same session write and
-          applied by the same `document.documentElement.dataset.theme` effect.
-          This is a move, not a re-implementation: there is an open `[data-theme]`
-          question with `brand`, and a second theme mechanism introduced while
-          relocating a button is exactly how that answer would get pre-empted by
-          an accident. */}
-      <div className="tabrow">
-        {/* The 2bee.farm master mark. Which variant renders is decided entirely
-            in CSS (`--brand-mark`, styles.css) by the same [data-theme] /
-            prefers-color-scheme selectors that resolve every colour here — there
-            is deliberately no theme branch in this component to fall out of step
-            with the surface.
-            🔴 NOT A NEW ASSET AND NOT A COPY. It is the identical `.mark` span
-            that stood in the header, moved. `web/public/favicon.svg` is the one
-            copied brand file in this app and `web/tests/favicon.test.ts` is what
-            keeps it honest against `brand/`; adding a second copy here would have
-            been a third mark with nothing comparing it to anything.
-            aria-hidden: the mark carries no name a screen reader could use — the
-            product name in the header is the real text. */}
-        <span className="mark" aria-hidden="true" />
-        <TabBar tab={tab} onTab={setTab} />
-        <div className="tabrow-right">
-          <button onClick={() => setDark(!dark)} title="Toggle theme" data-testid="theme-toggle">
-            {dark ? '☀' : '☾'}
-          </button>
-        </div>
-      </div>
-
-      <TabPanel id="cnc" tab={tab}>
-      {/* ---- THE MENU BAR — TODO #108 ----------------------------------------
-
-          Founder, 2026-08-11: *"create similar menu in 2bee.cnc what already
-          exists in 2bee.cad (File … etc)"*.
-
-          ⚠ IT IS INSIDE THE TAB, not in the app header or the tab row. A menu
-          bar describes ONE tab: File saves THIS tab's job and View drives THIS
-          tab's camera. Above the tab row it would be a bar whose items changed
-          meaning as the tab changed, or worse, did nothing on two of three tabs.
-
-          ⚠ AND IT SITS ABOVE THE NEVER-CUT BANNER RATHER THAN BELOW IT, which is
-          the ordinary place for chrome. The property that matters for the banner
-          is that it is not collapsible, not dismissible and not conditional —
-          all still true — not that it is the topmost pixel. */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '2px 10px',
-          borderBottom: '1px solid var(--line)',
-        }}
-      >
-        <MenuBar
-          label="2bee.cnc menu"
-          menus={cncMenus({
-            projection,
-            unit,
-            /* 🔴 THE SAME GATE THE SESSION WRITE USES, and for the same reason:
-               `toolIds` and `material` are restored asynchronously, so a job
-               written before that lands carries the DEFAULT cutter over the
-               operator's stored one — into a FILE, where the loss outlives the
-               tab. Not an optimisation and not a spinner. */
-            saveBlocked: ready
-              ? null
-              : 'The core and your stored setup are still loading. A job saved now would carry ' +
-                'this build’s default cutter and material instead of yours, and the file would ' +
-                'look complete.',
-            /* 🔴 ASKED AT RENDER, NOT LATCHED AT LOAD. What `Discard` forgets is
-               whatever is stored RIGHT NOW, and this app writes the setup on
-               every change — so a value captured at mount would say "nothing to
-               forget" over a browser that has been storing settings for an hour.
-               A control whose enabled state describes a moment that has passed
-               is the stale-green shape, in miniature. */
-            hasStoredSetup: hasStoredSession(),
-          })}
-          onCommand={runMenuCommand}
-        />
-      </div>
-      {/* ---- Help → About — TODO #107, now behind the menu it was waiting for --
-
-          🔴 ONE CONSTANT, TWO SURFACES, AND NOT A SECOND LIST. `CNC_NEVER_CUT`
-          is the strip below and the first line here; `CNC_ABOUT_LINES` is
-          rendered here and nowhere else. The old sidebar `About` section is
-          gone in the same change — see the note where it stood — because two
-          doors to one page of text is the duplication this tab spent the day
-          removing, and the About panel's own comment said it existed only until
-          a menu arrived.
-
-          ⚠ THE TESTIDS ARE THE PANEL'S, UNCHANGED (`about-never-cut`,
-          `about-line-N`, `about-version`). A move that renames every hook makes
-          every assertion about it go blind rather than red — the obligation
-          moves with the control, and so do the names it is reached by. */}
-      {aboutOpen ? (
-        <>
-          <div
-            data-testid="about-backdrop"
-            onClick={() => setAboutOpen(false)}
-            style={{
-              position: 'fixed',
-              inset: 0,
-              zIndex: 39,
-              background: 'color-mix(in srgb, var(--bg) 55%, transparent)',
-            }}
-          />
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="About 2bee.cnc"
-            data-testid="panel-about"
-            style={{
-              position: 'fixed',
-              top: '50%',
-              left: '50%',
-              transform: 'translate(-50%, -50%)',
-              zIndex: 40,
-              width: 'min(620px, 92vw)',
-              maxHeight: 'min(76vh, 760px)',
-              overflowY: 'auto',
-              padding: 14,
-              background: 'var(--panel)',
-              color: 'var(--ink)',
-              border: '1px solid var(--line)',
-              borderRadius: 'var(--radius)',
-              boxShadow: 'var(--shadow-card-hover)',
-            }}
-          >
-            <h3 style={{ margin: '0 0 8px' }}>About 2bee.cnc</h3>
-            <p className="bad" data-testid="about-never-cut">
-              <strong>{CNC_NEVER_CUT}</strong>
-            </p>
-            {CNC_ABOUT_LINES.map((line, i) => (
-              <p className="note" key={i} data-testid={`about-line-${i}`}>
-                {line}
-              </p>
-            ))}
-            {/* What the CNC bar does NOT have that the CAD bar does, and why
-                each is absent rather than present-and-empty. It is here for the
-                same reason the CAD tab puts its own omissions in About: a list
-                nobody can read is indistinguishable from an oversight. */}
-            <p className="note" style={{ marginTop: 10 }}>
-              <b>What this tab’s menu does not carry, and why:</b>
-            </p>
-            {CNC_MENU_ABSENT.map((line, i) => (
-              <p className="note" key={`absent${i}`} data-testid={`about-menu-absent-${i}`}>
-                {line}
-              </p>
-            ))}
-            {/* The two numbers the footer already carries, repeated here
-                because "which build am I looking at" is the first question an
-                About panel exists to answer — and they are READ FROM THE CORE
-                (`version()`), never from a literal in this file. An empty
-                string is the honest pre-load state and renders as one. */}
-            <p className="note" data-testid="about-version">
-              core {ver.core || '—'} · G-code contract {ver.gcode_contract || '—'}
-            </p>
-            <div className="row">
-              <button data-testid="about-close" onClick={() => setAboutOpen(false)}>
-                Close
-              </button>
-            </div>
-          </div>
-        </>
-      ) : null}
-      {/* ---- WHAT THIS TAB HAS NEVER DONE — TODO #107 -------------------------
-
-          🔴 IT IS NOT IN A COLLAPSIBLE SECTION AND NOT BEHIND THE MENU, AND THAT
-          IS THE POINT. Sections in this sidebar collapse, the collapse is STICKY
-          across reloads, and a shut section renders nothing at all — so a
-          never-cut statement that lived only inside one could be switched off
-          permanently by a click nobody remembers making. That is the same hole
-          `#106` records the spoilboard badge existing to close, arriving through
-          a different door. `Help → About` has exactly the same property in a
-          different form: a dialog nobody opens says nothing. This line is not
-          collapsible, not dismissible, not conditional, and not one click away.
-
-          ⚠ ONE SENTENCE, FROM ONE CONSTANT. `CNC_NEVER_CUT` is also the first
-          line of the About dialog, so the two surfaces cannot drift into saying
-          different things about the same fact — the duplication `#106` warns
-          about is a second COPY, not a second rendering of one string.
-
-          It mirrors `RunTab`'s `run-unproven` banner deliberately: same border
-          token, same position, same job. An operator who moves between the two
-          tabs should not have to learn that a missing red box means something. */}
-      <div
-        data-testid="cnc-unproven"
-        style={{
-          borderBottom: '1px solid var(--bad)',
-          padding: '6px 14px',
-          fontSize: 12,
-        }}
-      >
-        <strong className="bad">{CNC_NEVER_CUT}</strong>
-      </div>
-      {/* 🔴 THE PERSPECTIVE WARNING MOVED WITH THE CONTROL, AND IT MOVED OUT OF
-          THE SIDEBAR RATHER THAN INTO THE MENU — TODO #108.
-
-          The control is now `View → Perspective`/`Orthographic`. Its warning
-          could not go with it: a menu note is visible only while the menu is
-          open, and this sentence exists precisely because *"a tooltip is a thing
-          you find after you already believe the picture"*. So the warning is a
-          strip on the tab, shown exactly while perspective is selected — which
-          is strictly MORE visible than the sidebar panel it left, because that
-          column scrolls and this does not.
-
-          ⚠ The reason for the orthographic DEFAULT travelled too: it is in
-          `projection.ts`, in the two menu notes, and in this line. */}
-      {projection === 'perspective' ? (
-        <div
-          data-testid="projection-warning-row"
-          style={{ borderBottom: '1px solid var(--line)', padding: '4px 14px', fontSize: 12 }}
-        >
-          <span className="note" data-testid="projection-warning">
-            Perspective converges parallel edges. Judge a fit or a clearance in orthographic — a
-            part that fits can look like it overhangs here, and a hold-down the cutter will strike
-            can look clear.
-          </span>
-        </div>
-      ) : null}
-      {/* 🔴 THE UNIT STRIP — TODO #109, and it is a strip for the perspective
-          warning's exact reason. The thing it has to say (*the numbers you are
-          reading were converted; the program was not*) is needed precisely when
-          the operator is NOT looking at the View menu, and a menu note is
-          visible only while the menu is open.
-
-          ⚠ CONDITIONAL ON THE NON-CANONICAL UNIT, not on both. In millimetres
-          there is nothing to warn about: every number on the panels IS the
-          number the planner holds, and a permanent strip saying so would be
-          noise that trains an operator to stop reading strips on this tab —
-          which is where the never-cut banner lives.
-
-          ⚠ THE SENTENCE IS ONE CONSTANT, IN `units.ts`, BESIDE THE FUNCTIONS IT
-          DESCRIBES. A warning that lives next to the control it warns about goes
-          stale with it; this one goes stale with the conversion. */}
-      {unit !== 'mm' ? (
-        <div
-          data-testid="units-note-row"
-          style={{ borderBottom: '1px solid var(--line)', padding: '4px 14px', fontSize: 12 }}
-        >
-          <span className="warn" data-testid="units-note">
-            {INCH_DISPLAY_NOTE}
-          </span>
-        </div>
-      ) : null}
-      {/* What the last job save or open did. Not a toast and not on a timer: a
-          line that removes itself while somebody is looking at the machine has
-          not been read — the same rule the restore banner is built on. */}
-      {jobNote ? (
-        <div
-          style={{ borderBottom: '1px solid var(--line)', padding: '4px 14px', fontSize: 12 }}
-          data-testid="job-note-row"
-        >
-          <span className={jobNote.tone} data-testid="job-note">
-            {jobNote.text}
-          </span>{' '}
-          <button data-testid="job-note-dismiss" onClick={() => setJobNote(null)}>
-            Dismiss
-          </button>
-        </div>
-      ) : null}
-      {/* 🔴 THE JOB FILE INPUT. Mounted here rather than inside the menu popup,
-          for the reason every other file input in this file is: an input that
-          exists only while a menu is open cannot be handed a file by anything
-          that has not opened the menu, and it is unreachable to a driver.
-
-          🔴 REFUSE, THEN REPLACE, THEN RELOAD — in that order. `parseJobFile`
-          validates the envelope and the settings GENERATION before a single byte
-          of the operator's own setup is touched; a check that runs after the
-          destructive step has destroyed the thing it was protecting. */}
-      <input
-        ref={openJobRef}
-        className="offscreen"
-        type="file"
-        accept=".json,application/json"
-        aria-hidden="true"
-        tabIndex={-1}
-        data-testid="open-job"
-        onChange={async (e) => {
-          const f = e.target.files?.[0];
-          e.target.value = '';
-          if (!f) return;
-          const parsed = parseJobFile(await f.text());
-          if (parsed.status === 'refused') {
-            setJobNote({ tone: 'bad', text: `That job file was NOT opened. ${parsed.why}` });
-            return;
-          }
-          const err = installJob(parsed);
-          if (err) {
-            setJobNote({
-              tone: 'bad',
-              text:
-                `That job file read correctly and this browser refused to store it, so NOTHING was ` +
-                `replaced: ${err}`,
-            });
-            return;
-          }
-          /* The reload is what makes this ONE restore path rather than two. The
-             banner on the next load names what came back and what did not. */
-          window.location.reload();
-        }}
-      />
-      {/*
-        ---- THE RESTORE BANNER ------------------------------------------------
-
-        🔴 A RESTORE THAT IS NOT ANNOUNCED IS NOT SAFE, and that is the whole
-        argument for this block existing rather than the feature being four
-        lines of `localStorage`. Every number on the panels behind it sets a
-        depth of cut, a spindle speed, a rapid height, a tab, or how the machine
-        finds its datum. An operator who does not know those came from LAST
-        session has no reason to read them — a stale setup under a form that
-        looks freshly opened is indistinguishable from one somebody just typed.
-
-        So this states three things and refuses to state a fourth:
-          - HOW MANY settings came back, and (behind a disclosure) which;
-          - WHAT DID NOT come back, by name and with the reason, because
-            silently substituting a default is the one outcome that must never
-            happen — on screen it is identical to the value having survived;
-          - that the bed-clear confirmation was deliberately NOT restored;
-          - and it never says "your setup is ready", because this app cannot
-            know that. It knows what it read back.
-
-        It is dismissed by a CLICK and never by a timer: a banner that removes
-        itself while somebody is looking at the machine has not been read.
-      */}
-      {!restoreDismissed &&
-      (RESTORED.status === 'incompatible' ||
-        RESTORED.status === 'unreadable' ||
-        restored.length > 0 ||
-        dropped.length > 0 ||
-        saveError) ? (
-        <div
-          data-testid="restore-banner"
-          style={{
-            /* Inline, and the values still come from the brand tokens via
-               `var(--…)`, so the banner is theme-correct in both directions.
-               `styles.css` is outside this pass's file scope. */
-            borderBottom: '1px solid var(--line)',
-            background: 'var(--panel)',
-            color: 'var(--ink)',
-            padding: '8px 14px',
-            fontSize: 12,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 4,
-          }}
-        >
-          {RESTORED.status === 'incompatible' ? (
-            <p className="bad" data-testid="restore-incompatible" style={{ margin: 0 }}>
-              <b>Stored settings were NOT restored.</b> {RESTORED.why}
-            </p>
-          ) : null}
-
-          {RESTORED.status === 'unreadable' ? (
-            <p className="bad" data-testid="restore-unreadable" style={{ margin: 0 }}>
-              <b>Stored settings were NOT restored.</b> {RESTORED.why} Everything on the panels is
-              at its default.
-            </p>
-          ) : null}
-
-          {restored.length > 0 ? (
-            <p style={{ margin: 0 }}>
-              <b data-testid="restore-count">{restored.length}</b> setting
-              {restored.length === 1 ? '' : 's'} restored from your last session
-              {RESTORED.status === 'ok' && RESTORED.savedAt
-                ? ` (saved ${new Date(RESTORED.savedAt).toLocaleString()})`
-                : ''}
-              . <b>Check them before you cut</b> — they are not this session's decisions.
-            </p>
-          ) : null}
-
-          {dropped.length > 0 ? (
-            <>
-              <p className="warn" style={{ margin: 0 }}>
-                <b data-testid="restore-dropped-count">{dropped.length}</b> could <b>not</b> be
-                restored and {dropped.length === 1 ? 'is' : 'are'} at the default:
-              </p>
-              <ul
-                data-testid="restore-dropped"
-                className="notes"
-                style={{ margin: 0, paddingLeft: 18 }}
-              >
-                {dropped.map((d, i) => (
-                  <li key={`${d.field}-${i}`} data-testid="restore-dropped-item">
-                    <b>{d.field}</b> — {d.reason}
-                  </li>
-                ))}
-              </ul>
-            </>
-          ) : null}
-
-          {restored.length > 0 ? (
-            <details data-testid="restore-list" style={{ color: 'var(--muted)' }}>
-              <summary style={{ cursor: 'pointer' }}>What came back</summary>
-              <p style={{ margin: '4px 0 0' }}>{restored.join(', ')}</p>
-              {/* 🔴 Said every time, not once. The clamp rectangles are gate
-                  P7's keepout and they DO come back; the statement that a human
-                  looked at the machine does not, and cannot. */}
-              <p className="warn" style={{ margin: '6px 0 0' }} data-testid="restore-not-confirmed">
-                Not restored, deliberately: <b>“I have checked the machine is clear”</b>. That checkbox
-                records that somebody looked, and nobody has looked in this session. The clamp
-                positions came back so they do not have to be retyped; the confirmation is asked
-                again.
-              </p>
-            </details>
-          ) : null}
-
-          {saveError ? (
-            <p className="bad" data-testid="restore-save-error" style={{ margin: 0 }}>
-              <b>Settings are NOT being saved.</b> {saveError} — this browser refused the write, so
-              nothing you change now will survive a refresh.
-            </p>
-          ) : null}
-
-          <div className="row" style={{ marginTop: 2 }}>
-            <button data-testid="restore-dismiss" onClick={() => setRestoreDismissed(true)}>
-              Dismiss
-            </button>
-            {/* Clear AND reload, in one act. Clearing alone would be a lie: the
-                next change to any field writes the setup straight back, so the
-                button would appear to have done something it did not. */}
-            <button
-              data-testid="restore-discard"
-              title={`Forget the stored setup (schema v${SESSION_VERSION}) and reload on defaults.`}
-              onClick={() => {
-                clearSession();
-                window.location.reload();
-              }}
-            >
-              Discard and reload with defaults
-            </button>
-          </div>
-        </div>
-      ) : null}
-
-      {/* The report column's width is a CSS variable, so the layout RULE stays in
-          `styles.css` and only the number lives here. */}
-      <div className="body" style={{ '--report-w': `${reportW}px` } as React.CSSProperties}>
-        <aside className="side" data-testid="panels">
-          {/* 🔴 ONE FILE INPUT FOR ALL FOUR INVENTORY PICKERS, because there is
-              ONE inventory document. Four inputs would be four ways to reach the
-              same atomic replace, and the second one somebody wired would be the
-              one that forgot to report `dropped`.
-
-              Mounted here rather than inside a picker's dialog for the same
-              reason the drawing and tool imports are: an input that only exists
-              while a dialog is open cannot be handed a file by anything that has
-              not opened the dialog, and it is unreachable to a driver. */}
-          <input
-            ref={importInventoryRef}
-            className="offscreen"
-            type="file"
-            accept=".json,application/json"
-            aria-hidden="true"
-            tabIndex={-1}
-            data-testid="import-inventory"
-            onChange={async (e) => {
-              const f = e.target.files?.[0];
-              /* Cleared BEFORE the await, so choosing the same file twice fires
-                 again — an operator re-importing after a fix must not be met
-                 with silence. */
-              e.target.value = '';
-              if (!f) return;
-              try {
-                await importInventory(await f.text());
-              } catch (err) {
-                /* A file that could not even be READ. Distinct from a file that
-                   parsed and was refused, and it must not be silent. */
-                setInventoryImport(null);
-                setInventoryImportRefused(
-                  `that file could not be read from disk at all: ${String(
-                    err instanceof Error ? err.message : err
-                  )}. Nothing was imported.`
-                );
-              }
-            }}
-          />
-          {/* 🔴 PANEL ORDER IS THE FOUNDER'S, VERBATIM — 2026-08-10:
-              *"change order : Machine -> Workpeace -> Drawing -> Work holding ->
-              Tooling -> Operation -> Verification -> Import/Export"*.
-
-              ⚠ It SUPERSEDES the same day's *"push the Machine as the 1st group
-              from the top above Drawing"*, which this file carried for one edit.
-              Both are recorded because the first is not wrong — Machine is still
-              first — and a reader finding only the second would not know the
-              order had been ruled on twice.
-
-              His list has EIGHT names and this column holds exactly those eight.
-              `panel-summary`, `panel-sim`, `panel-notes` and `panel-gcode` are
-              NOT missing from it: they live in the other `<aside>`, the results
-              column, so there was nothing to decide about them.
-
-              🔴 Nothing in this app reads a panel's POSITION, checked rather than
-              assumed before moving anything: `Section` takes `defaultOpen` and
-              its testid as PROPS, the session restore keys on field names, the
-              empty state names the Drawing panel rather than "the first one", and
-              the one e2e that enumerates panels asserts PRESENCE, not order. So
-              this is DOM order and nothing else.
-
-              ⚠ One name does not match: the founder's eighth is *"Import/Export"*
-              and this section is titled **Saved data**. It IS that surface —
-              `Export all` / `Import` over the browser store — so it takes the
-              slot; the TITLE is left alone rather than renamed on an inference,
-              and the mismatch is reported rather than quietly resolved. */}
-          {/* 🔴 THE ONE EYE OVER EVERYTHING, ABOVE `Machine` — founder,
-              2026-08-11: *"move the view layers all none above the Machine what
-              will control all hide/view (just an eye)"*.
-
-              It replaces the `all` / `none` pair the canvas used to carry. I had
-              kept that pair on the argument that a GLOBAL control belongs to no
-              panel; he agreed it is global and put it where global lives in this
-              app — the top of the sidebar, in the same eye column every section
-              eye sits in, so the whole set reads as one instrument.
-
-              🔴 IT IS THE SAME COMPONENT as the section eyes, not a lookalike.
-              Tri-state for the same reason: with four of twelve layers hidden, a
-              two-state control has to claim either "all visible" or "all hidden"
-              and both are false. It writes the same lifted `layers` record, so
-              it cannot disagree with the eight eyes below it — that property is
-              what the lift out of `Viewport` was FOR, and reusing the component
-              is how it survives rather than being re-argued.
-
-              🔴 IT GOVERNS `liveLayers`, NEVER `LAYERS`. "Hide everything" must
-              not assert anything about a layer the scene does not contain — the
-              dead-control rule one level up.
-
-              ⚠ THE EMPTY CASE IS GUARDED AND, TODAY, UNREACHABLE. `workpiece`
-              and `travel` have no liveness predicate in `liveLayersOf`, so the
-              set is never empty as the code stands and this guard has never been
-              seen to fire. It is here so that if either ever gains a predicate,
-              the global eye follows the rule instead of becoming the one control
-              that is exempt from it. Said plainly rather than left to read as a
-              tested path. */}
-          {liveLayers.length > 0 && (
-            <div className="panel" data-testid="view-layers-all">
-              {/* 🔴 THE SECTION HEADER'S OWN GEOMETRY, REUSED — not a second
-                  layout that happens to look the same. This row was
-                  `.layers-all` + `.layers-all-title` with its own padding, which
-                  duplicated `.panel-head`'s numbers; two rules describing one
-                  column drift the next time either is touched, and there is no
-                  pixel-alignment test on this box to catch it. Now it is
-                  literally `.panel-head-row` + `.panel-head` + `.eye-slot`, so
-                  the global eye and the eight section eyes cannot fall out of
-                  the same column without every header moving together.
-
-                  ⚠ A `<span>`, not a `<button>`, wearing `.panel-head`. It takes
-                  the header's box and NOT its behaviour: this row does not
-                  collapse, so it renders no chevron and must not offer a
-                  pointer that promises one. `.panel-head-static` removes the
-                  cursor and mutes the colour — the label is scope, not a
-                  control. The only control in the row is the eye. */}
-              <div className="panel-head-row">
-                <span className="panel-head panel-head-static">
-                  <span className="panel-title">View layers</span>
-                </span>
-                <span className="eye-slot">
-                  <SectionEye
-                    testid="section-eye-all"
-                    section="Every layer in the picture"
-                    live={liveLayers}
-                    layers={layers}
-                    onSet={setLayersTo}
-                  />
-                </span>
-              </div>
-            </div>
-          )}
-
-          {/* 🔴 THE PROJECTION CONTROL LEFT THIS COLUMN ON 2026-08-11 — TODO
-              #108, and this note is the record that the obligation was
-              discharged rather than forgotten.
-
-              `540bab9d66` put a `Projection` panel here, with its move into a
-              `View` menu written into the code as a condition of keeping it:
-              *"When a CNC menu bar lands, this block moves into its View menu
-              and does NOT stay here as well."* The bar landed; the block moved;
-              nothing stayed. Both items are `View → Orthographic` /
-              `View → Perspective` above, exclusive, driving the same
-              `projection` state through the same `chooseProjection`, persisted
-              under the same key.
-
-              🔴 THE OLD NOTE CLAIMED A TEST IT DID NOT HAVE. It said
-              *"`tests/projection.test.ts` asserts this note exists, so the
-              obligation cannot be lost by deleting a comment"* — and no
-              assertion anywhere read that sentence (measured 2026-08-11: the
-              phrase appears in no file but this one). The obligation was carried
-              by a comment claiming to be carried by a test. It is now asserted
-              in `tests/cnc-menu.test.ts`, in the form that survives the move:
-              the sidebar must NOT hold a second projection control, and the
-              perspective warning must still be rendered on the tab.
-
-              ⚠ THE WARNING DID NOT GO INTO THE MENU. A menu note is visible only
-              while the menu is open, and that sentence exists because a tooltip
-              is something you find after you already believe the picture. It is
-              a strip at the top of this tab, shown exactly while perspective is
-              selected. */}
-
-          <Section
-            title="Machine"
-            testid="panel-machine"
-            eye={sectionEye('panel-machine', 'Machine')}
-            layerRows={sectionLayerRows('panel-machine', 'Machine')}
-          >
-            {/*
-              🔴 ONE LIST — TODO #61, founder 2026-08-09: *"in the machine
-              section remove the: saved… ▼ / Delete / Preset"*. All three are
-              gone from the panel and the CAPABILITY behind each is in this list:
-              `Preset` was the shipped catalogue, `saved… ▼` was a second picker
-              holding the user's own machines, and `Delete` was a button whose
-              enabled-state depended on a name box that had itself already been
-              removed on 2026-08-08 — a control that could only be pressed after
-              loading, wired to a `name` state nothing else set any more.
-
-              ⚠ `Preset` AND `saved…` MERGE, AND THE ORIGIN STAYS PER ROW. A
-              shipped preset states travels somebody measured; a machine the user
-              typed in states travels nobody checked. Collapsing them into one
-              list is right and is exactly #54's shape for drawings; letting the
-              first lend its authority to the second is not. `shipped()` /
-              `yours()` build both, in one place.
-
-              A preset is `builtIn`, so the picker offers no Save-over and no
-              delete on it — there would be no way back to the shipped values.
-            */}
+  /* Shared by the Machine/Tooling panels and the 2bee.cnc chat column (2026-10-15). */
+  const machinePickerEl = (
             <ObjectPicker
               label="Machine"
               testid="machine-picker"
@@ -6389,6 +6200,1005 @@ export default function App() {
                 void savedMachines.saveAs(newName, { ...currentMachine(), ...draft });
               }}
             />
+  );
+  /* Shared by the Machine/Tooling panels and the 2bee.cnc chat column (2026-10-15). */
+  const toolPickerEl = (
+            <ObjectPicker
+              label="Tool"
+              testid="tool-picker"
+              mode="multi"
+              items={[...(lib?.tools ?? []).map(  (t: ToolRow) => {
+                /* TWO ANSWERS FROM TWO MODULES, AND THEY DO NOT MERGE.
+                 * `inv` is *do you own it* (TODO #83) — it decides the tags and
+                 * whether the row can be chosen. `v` is *does it work here and
+                 * does this drawing want it* (TODO #66) — it decides the red
+                 * mark and the filter. A cutter can be owned and useless, or
+                 * unowned and perfect for the job, and one word for both would
+                 * hide whichever half the operator needed. */
+                const inv = toolInv.row(t.id);
+                const v = verdictById.get(t.id);
+                return {
+                id: t.id,
+                /* Red when cnc.tools does not hold it as owned (founder 2026-10-15). */
+                ...(ownedIds.includes(t.id) ? {} : { warn: 'not in your cnc.tools inventory' }),
+                /* 🔴 THE DRAWING, ON THE PROPERTY PANEL AND NOWHERE ELSE — TODO
+                 * #60, and the row copy removed 2026-08-10 (founder).
+                 *
+                 * A to-scale schematic, not a product photo. Manufacturer images
+                 * are copyrighted and this lane is AGPL — and a photo of a shiny
+                 * bit hides the three facts that matter here anyway: diameter
+                 * against shank, flute length, and which way the flutes spiral.
+                 *
+                 * `ToolShape` already had a `'pane'` frame and nothing had ever
+                 * asked for it, so the drawing existed only at 22x24px in a list
+                 * row — the size at which a shank step and a flute length are
+                 * exactly the facts you cannot see. That row copy is now gone
+                 * rather than kept alongside: a drawing too small to read its own
+                 * subject is decoration wearing the clothes of evidence.
+                 *
+                 * The label is `describeToolShape().title`, which is the SAME
+                 * function the svg's own `aria-label` comes from and is composed
+                 * from the fields the drawing is drawn from. A caption written
+                 * separately would be a second description that drifts. */
+                shape: { node: <ToolShape tool={t} size="pane" />, label: describeToolShape(t).title },
+                // The category is part of the searchable text, not a filter in
+                // front of the list. Typing "drill" or "v-bit" narrows to them.
+                name: `${t.id} · ${t.category}`,
+                /* THE ROW, FRONT TO BACK: what you own · whether it works here ·
+                 * what it is. The red mark carries the CORE's sentence with it
+                 * — `v.why` verbatim — because that is the sentence the planner
+                 * refuses the whole job with, and an operator reading "it does
+                 * not work" without it has to guess which of the four rules
+                 * fired. */
+                detail: (() => {
+                  const facts =
+                    t.fit && t.fit !== 'fitted'
+                      ? t.fit_why
+                      : `${t.category} · ${L(t.diameter_mm)} · ${t.flutes} flute${t.flutes === 1 ? '' : 's'}`;
+                  const mark =
+                    v && v.usability !== 'usable' ? `${usabilityMark(v)}${v.why ? ` — ${v.why}` : ''}` : '';
+                  return [inv ? inv.tags.join(' · ') : '', mark, facts]
+                    .filter((s) => s)
+                    .join(' · ');
+                })(),
+                /* 🔴 `usability` IS NOT ALLOWED TO DISABLE A ROW, and that is a
+                 * decision rather than an omission. `invalidates` is exactly the
+                 * row the operator most needs to reach and read — it is why the
+                 * job will be refused — and a control they cannot select is one
+                 * they cannot inspect the setup against. What disables is the
+                 * CORE's collet verdict (`selectable`) and the OWNERSHIP verdict,
+                 * both of which are facts about the cutter rather than about
+                 * today's drawing. Both reasons ride in `blockFor`'s two labelled
+                 * clauses when both apply. */
+                disabled: inv ? inv.disabled : t.selectable === false,
+                disabledReason: inv ? inv.disabledReason : t.fit_why,
+                /* The ADVICE value the filter narrows on — never `usability`.
+                 * `undefined` when the core has not answered, which the facet
+                 * offers as its own option rather than dropping. */
+                facet: v?.advice,
+                /* TODO #105. ⚠ THE TWO REASONS A CUTTER ROW CAN BE BLOCKED STAY
+                   APART HERE TOO: this control answers *is it in my shop*, and
+                   the collet verdict beside it answers *does it fit this
+                   spindle*. One sends somebody to a purchase order and the other
+                   to the drawer, and `blockFor` prints both when both apply. */
+                claim: ownershipClaim('tool', toolInv.heldInKind, inv, toolIds.includes(t.id)),
+                properties: [
+                  ...(inv ? ownershipProps(inv) : []),
+                  ...verdictProps(v),
+                  ...(colletDisagreement(t, v)
+                    ? [{ label: '⚠ The two collet answers disagree', value: COLLET_DISAGREEMENT_WHY }]
+                    : []),
+                  { label: 'Category', value: t.category },
+                  { label: 'Diameter', value: L(t.diameter_mm) },
+                  { label: 'Flutes', value: t.flutes },
+                  { label: 'Shank', value: L(t.shank_mm) },
+                  { label: 'Cutting length', value: L(t.cutting_length_mm) },
+                  { label: 'Chipload', value: `${L(t.chipload_min_mm)}–${L(t.chipload_max_mm)}` },
+                  { label: 'Rpm', value: `${t.rpm_min}–${t.rpm_max}` },
+                  {
+                    label: 'Fit',
+                    /* Read off `fit`, the four-valued verdict, NOT off
+                       `fit_why || '…'`. `fit_why` is deliberately the empty
+                       string for `Fitted`, and BOTH fields are optional on the
+                       wire — so the `||` could not tell "the core says it fits"
+                       from "this core never answered", and rendered the reassuring
+                       one for both. Same fix as the tool row below. */
+                    value:
+                      t.fit === undefined
+                        ? 'this core did not answer — UNCHECKED'
+                        : t.fit === 'fitted'
+                          ? 'fits the collet in the spindle'
+                          : t.fit_why || t.fit,
+                  },
+                ],
+                };
+              }),
+              /* Cutters the inventory names and this library does not hold.
+                 Listed because a shop that owns one needs to see that this build
+                 cannot plan with it; unselectable because none of its numbers —
+                 diameter, flutes, cutting length, chipload — are here, and the
+                 core substitutes a Ø6mm end mill for an id it cannot find. */
+              ...toolInv.extras,
+              ]}
+              selectedIds={toolIds}
+              onChange={(ids) => { pushSnapshot(); setToolIds(ids); }}
+              /* 🔴 THE FILTER IS ON `advice` AND NEVER ON `usability` — TODO
+                 #66, and the distinction is the safety half of the founder's
+                 request. Hiding the `invalidates` rows would hide exactly the
+                 rows an operator most needs to see, which is rule 1 of this
+                 picker turned against the person using it. `advice` answers a
+                 different question — does THIS DRAWING want the cutter — and
+                 narrowing by it hides nothing about whether a cutter is safe.
+
+                 It is OPT-IN (`''` = every cutter) and the picker states what it
+                 hid, attributed: "N hidden by the Recommendation filter". On
+                 screen a hidden item and a non-existent item are identical, and
+                 in a machining tool that difference decides whether somebody
+                 walks to the drawer or concludes the cutter does not exist. */
+              /* 🔴 A LIST SINCE 2026-08-11. *Selected* and *recommended* are
+                 INDEPENDENT AXES — a tool can be selected and not recommended,
+                 which is exactly the case an operator most wants to look at — so
+                 the built-in Selected facet had to AND with this one, never
+                 replace it. */
+              facets={[{
+                label: 'Recommendation',
+                value: adviceFilter,
+                onChange: setAdviceFilter,
+                options: ADVICE_OPTIONS.map((o) => ({
+                  value: o.value,
+                  label: o.label,
+                  /* Counted over EVERY row this picker shows — the library AND
+                     the inventory-only rows, which state no advice and are
+                     therefore `unknown`, exactly as `matches` reads them. A
+                     count taken over a different set from the one the filter
+                     runs on is a number that disagrees with the list under it.
+                     A count of 0 is still listed: an option that disappears
+                     when nothing matches it hides the fact that nothing does. */
+                  count:
+                    o.value === ''
+                      ? (lib?.tools ?? []).length + toolInv.extras.length
+                      : (lib?.tools ?? []).filter(
+                            (t: ToolRow) => (verdictById.get(t.id)?.advice ?? 'unknown') === o.value
+                        ).length + (o.value === 'unknown' ? toolInv.extras.length : 0),
+                })),
+                /* The host owns the comparison — `ObjectPicker` never learns what
+                   an advice value means. A row that states nothing is `unknown`,
+                   which is a real answer and is reachable through its own
+                   option. */
+                matches: (item: ObjectItem, value: string) => (item.facet ?? 'unknown') === value,
+              }]}
+              /* 🔴 THE TOOL FILE'S CONTROLS ARE IN THE LIST — TODO #55, founder
+                 2026-08-09: *"tooling, remove the Export tools, Choose File
+                 (new) from the left navbar, put this functionality into the
+                 list"*. Tooling was the last panel still carrying its own file
+                 controls; machines, workpieces and drawings had already made
+                 this move. The `<input type="file">` itself stays mounted below
+                 and off screen, for the same reason the drawing import does. */
+              onAdd={() => importToolsRef.current?.click()}
+              addLabel="+ import a tool file…"
+              actions={
+                <button
+                  type="button"
+                  data-testid="export-tools"
+                  title="Write this library as JSON, in the same shape the importer accepts."
+                  onClick={() => {
+                    // Exported in the SAME shape the importer accepts, so a
+                    // round-trip is a round-trip rather than two formats that
+                    // happen to look alike.
+                    const rows = (lib?.tools ?? []).map(  (t: ToolRow) => ({
+                      id: t.id,
+                      category: t.category,
+                      diameter_mm: t.diameter_mm,
+                      flutes: t.flutes,
+                      shank_mm: t.shank_mm,
+                      cutting_length_mm: t.cutting_length_mm,
+                      chipload_mm: t.chipload_mm,
+                      chipload_min_mm: t.chipload_min_mm,
+                      chipload_max_mm: t.chipload_max_mm,
+                      rpm_min: t.rpm_min,
+                      rpm_max: t.rpm_max,
+                      included_angle_deg: t.included_angle_deg,
+                      point_angle_deg: t.point_angle_deg,
+                    }));
+                    const blob = new Blob([JSON.stringify(rows, null, 2)], {
+                      type: 'application/json',
+                    });
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = 'tool-library.json';
+                    a.click();
+                    URL.revokeObjectURL(a.href);
+                  }}
+                >
+                  Export tools
+                </button>
+              }
+            />
+  );
+  return (
+    /* `app-make`: the three-step view hides the header (styles.css). The
+       header stays MOUNTED, so nothing in it loses state. */
+    <div className={`${tab === 'make' ? 'app app-make' : 'app'}${cncView === 'chat' ? ' cnc-chat-mode' : ''}`}>
+      <header className="topbar">
+        {/* 🔴 THE NAME, AND ONLY THE NAME — founder, 2026-08-11: *"remove the
+            header: 2bee.slicer CNC CAM · grblHAL to just 2bee.app"*.
+            Two separate wrongs went with that string, which is why it is a
+            correction and not only a layout change:
+              · **`2bee.slicer` IS A DEAD PRODUCT NAME.** The lane was renamed to
+                `2bee.app` on 2026-08-09 and this header kept shipping the old one
+                to the operator — the same residue a sweep is chasing across the
+                rest of the lane. `index.html`'s <title> was already fixed; this
+                was the other user-visible copy.
+              · **`CNC CAM · grblHAL` WAS A SCOPE CLAIM THAT STOPPED BEING TRUE.**
+                The app has a CAD tab and a Run tab. A strapline naming one of the
+                three is a header describing an app this is not.
+            The MARK is not deleted — it moved to the tab row below, where the
+            founder asked for it. It is the same `.mark` span driven by the same
+            `--brand-mark` CSS variable; nothing was copied, redrawn or re-themed
+            to move it. */}
+        {/* The 2bee.farm master mark. Which variant renders is decided entirely
+            in CSS (`--brand-mark`, styles.css) by the same [data-theme] /
+            prefers-color-scheme selectors that resolve every colour here — there
+            is deliberately no theme branch in this component to fall out of step
+            with the surface.
+            🔴 NOT A NEW ASSET AND NOT A COPY. It is the identical `.mark` span
+            that stood in the header, moved. `web/public/favicon.svg` is the one
+            copied brand file in this app and `web/tests/favicon.test.ts` is what
+            keeps it honest against `brand/`; adding a second copy here would have
+            been a third mark with nothing comparing it to anything.
+            aria-hidden: the mark carries no name a screen reader could use — the
+            product name in the header is the real text. */}
+        <span className="mark" aria-hidden="true" />
+        <div className="brand">
+          <span className="name">
+            <button type="button" className="brand-home" data-testid="brand-home" title="2bee.app home" onClick={() => (tab !== 'home' && (beforeHome.current = tab), setTab('home'))}>
+              <strong>2bee.app</strong>
+            </button>
+          </span>
+        </div>
+        {/* The three-step view (founder 2026-10-14) shows no tab bar: the
+            expert tabs are behind ONE link, which `MakeFlow` draws. */}
+        {tab === 'make' ? null : <TabBar tab={tab} onTab={setTab} enabled={isTabEnabled} />}
+        <div className="topright">
+          {showFixtures ? (
+            <label className="inline">
+              Job
+              <select
+                value={job}
+                onChange={(e) => setJob(e.target.value)}
+                data-testid="job-select"
+                title="Built-in gate fixtures. NOT drawings — they bypass the importer."
+              >
+                {jobs.map((j) => (
+                  <option key={j.name} value={j.name}>
+                    {j.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          {/*
+            🔴 OFF THE OPERATOR SURFACE — founder, 2026-08-08, after asking what
+            "Plant" meant. That question was the answer: a control nobody outside
+            this lane can name does not belong in a machining UI.
+
+            A plant is a DELIBERATE DEFECT, and four of them emit a runnable
+            program rather than a refusal, by design — the gates compare a clean
+            run against a planted one, so the planted one has to post. Measured:
+            `no-tabs` 8276 bytes, `gouge` 10837, `cut-clamp` 10436,
+            `shallow-floor` 10436, none refused. In the operator UI that is a
+            person one click from exporting a program that drives a cut across
+            the part or leaves it untabbed under a 2.2 kW spindle. This lane's
+            own rule says a plant path must not leak into a real job; it had been
+            leaking since the UI was built.
+
+            Kept behind `?plants=1` rather than deleted, for ONE reason: the
+            browser suite proves the SIMULATION catches a planted gouge, and that
+            test needs a way to plant one. Deleting the control would delete the
+            only route the E2E has to arm that check, and a safety check with no
+            way to fire it is the thing this whole lane exists to prevent. It is
+            a query parameter, not a build flag, because the suite runs against
+            the production build where a dev flag is compiled out.
+          */}
+          {showPlants ? (
+            <label className="inline">
+              Plant
+              <select
+                value={plant}
+                onChange={(e) => setPlant(e.target.value)}
+                data-testid="plant-select"
+                title="Deliberate defects, for proving the checks actually fire. NOT for cutting."
+              >
+                <option value="">none</option>
+                {plants.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          {tab === 'make' ? null : (
+            <button onClick={() => setTab('cncjob')} data-testid="open-cncjob" title="2bee.cnc: send jobs to the routers; Jobs: run them at the machine">
+              CNC jobs
+            </button>
+          )}
+          {tab === 'make' ? null : (
+            <button onClick={() => setTab('make')} data-testid="back-to-simple" title="Back to the three steps: Design, Change, Make">
+              Simple
+            </button>
+          )}
+          <button onClick={() => setDark(!dark)} title="Toggle theme" data-testid="theme-toggle">
+            {dark ? '☀' : '☾'}
+          </button>
+        </div>
+      </header>
+
+      {/* (2026-10-15: the tab bar, mark and theme toggle now sit IN the header row above — founder: "push the Designs … Tools to the top menu". The history below is kept.)
+          THE TAB BAR — founder 2026-08-11: *"1st tab cad, 2nd tab CNC, 3rd tab
+          operation, this is where I will execute and monitor the CNC router"*.
+          Order is his. Which one OPENS is a different question and is answered
+          in `Tabs.tsx` (`DEFAULT_TAB`), with the reasons.
+
+          It sits BELOW the header rather than inside it, so the brand, the theme
+          toggle and the gate instruments stay app-wide: they are not properties
+          of the CNC tab and must not disappear when another tab is showing.
+
+          🔴 THE ROW NOW CARRIES THE MARK AND THE THEME TOGGLE — founder,
+          2026-08-11: *"move the dark/light to the 2bee.cad, 2bee.cnc, Run row;
+          add the logo to this row"*.
+
+          ⚠ `TabBar` IS NOT MODIFIED AND TAKES NO CHILDREN. The two controls are
+          SIBLINGS of it inside `.tabrow`, so the tablist stays exactly the set of
+          elements the WAI-ARIA pattern expects — a mark or a button inside
+          `role="tablist"` would be announced as part of the tab set, and the
+          roving-tabindex arithmetic in `Tabs.tsx` counts `TABS`, not children.
+
+          🔴 AND THE TOGGLE'S BEHAVIOUR IS UNTOUCHED. It is the same `setDark`
+          on the same `dark` state, persisted by the same session write and
+          applied by the same `document.documentElement.dataset.theme` effect.
+          This is a move, not a re-implementation: there is an open `[data-theme]`
+          question with `brand`, and a second theme mechanism introduced while
+          relocating a button is exactly how that answer would get pre-empted by
+          an accident. */}
+
+      <TabPanel id="cnc" tab={tab}>
+      {/* ---- THE MENU BAR — TODO #108 ----------------------------------------
+
+          Founder, 2026-08-11: *"create similar menu in 2bee.cnc what already
+          exists in 2bee.cad (File … etc)"*.
+
+          ⚠ IT IS INSIDE THE TAB, not in the app header or the tab row. A menu
+          bar describes ONE tab: File saves THIS tab's job and View drives THIS
+          tab's camera. Above the tab row it would be a bar whose items changed
+          meaning as the tab changed, or worse, did nothing on two of three tabs.
+
+          ⚠ AND IT SITS ABOVE THE NEVER-CUT BANNER RATHER THAN BELOW IT, which is
+          the ordinary place for chrome. The property that matters for the banner
+          is that it is not collapsible, not dismissible and not conditional —
+          all still true — not that it is the topmost pixel. */}
+      <div
+        className="cnc-menubar"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '2px 10px',
+          borderBottom: '1px solid var(--line)',
+        }}
+      >
+        <MenuBar
+          label="2bee.cnc menu"
+          menus={cncMenus({
+            projection,
+            unit,
+            /* 🔴 THE SAME GATE THE SESSION WRITE USES, and for the same reason:
+               `toolIds` and `material` are restored asynchronously, so a job
+               written before that lands carries the DEFAULT cutter over the
+               operator's stored one — into a FILE, where the loss outlives the
+               tab. Not an optimisation and not a spinner. */
+            saveBlocked: ready
+              ? null
+              : 'The core and your stored setup are still loading. A job saved now would carry ' +
+                'this build’s default cutter and material instead of yours, and the file would ' +
+                'look complete.',
+            /* 🔴 ASKED AT RENDER, NOT LATCHED AT LOAD. What `Discard` forgets is
+               whatever is stored RIGHT NOW, and this app writes the setup on
+               every change — so a value captured at mount would say "nothing to
+               forget" over a browser that has been storing settings for an hour.
+               A control whose enabled state describes a moment that has passed
+               is the stale-green shape, in miniature. */
+            hasStoredSetup: hasStoredSession(),
+          })}
+          onCommand={runMenuCommand}
+        />
+      </div>
+      {/* ---- Help → About — TODO #107, now behind the menu it was waiting for --
+
+          🔴 ONE CONSTANT, TWO SURFACES, AND NOT A SECOND LIST. `CNC_NEVER_CUT`
+          is the strip below and the first line here; `CNC_ABOUT_LINES` is
+          rendered here and nowhere else. The old sidebar `About` section is
+          gone in the same change — see the note where it stood — because two
+          doors to one page of text is the duplication this tab spent the day
+          removing, and the About panel's own comment said it existed only until
+          a menu arrived.
+
+          ⚠ THE TESTIDS ARE THE PANEL'S, UNCHANGED (`about-never-cut`,
+          `about-line-N`, `about-version`). A move that renames every hook makes
+          every assertion about it go blind rather than red — the obligation
+          moves with the control, and so do the names it is reached by. */}
+      {aboutOpen ? (
+        <>
+          <div
+            data-testid="about-backdrop"
+            onClick={() => setAboutOpen(false)}
+            style={{
+              position: 'fixed',
+              inset: 0,
+              zIndex: 39,
+              background: 'color-mix(in srgb, var(--bg) 55%, transparent)',
+            }}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="About 2bee.cnc"
+            data-testid="panel-about"
+            style={{
+              position: 'fixed',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              zIndex: 40,
+              width: 'min(620px, 92vw)',
+              maxHeight: 'min(76vh, 760px)',
+              overflowY: 'auto',
+              padding: 14,
+              background: 'var(--panel)',
+              color: 'var(--ink)',
+              border: '1px solid var(--line)',
+              borderRadius: 'var(--radius)',
+              boxShadow: 'var(--shadow-card-hover)',
+            }}
+          >
+            <h3 style={{ margin: '0 0 8px' }}>About 2bee.cnc</h3>
+            <p className="bad" data-testid="about-never-cut">
+              <strong>{CNC_NEVER_CUT}</strong>
+            </p>
+            {CNC_ABOUT_LINES.map((line, i) => (
+              <p className="note" key={i} data-testid={`about-line-${i}`}>
+                {line}
+              </p>
+            ))}
+            {/* What the CNC bar does NOT have that the CAD bar does, and why
+                each is absent rather than present-and-empty. It is here for the
+                same reason the CAD tab puts its own omissions in About: a list
+                nobody can read is indistinguishable from an oversight. */}
+            <p className="note" style={{ marginTop: 10 }}>
+              <b>What this tab’s menu does not carry, and why:</b>
+            </p>
+            {CNC_MENU_ABSENT.map((line, i) => (
+              <p className="note" key={`absent${i}`} data-testid={`about-menu-absent-${i}`}>
+                {line}
+              </p>
+            ))}
+            {/* The two numbers the footer already carries, repeated here
+                because "which build am I looking at" is the first question an
+                About panel exists to answer — and they are READ FROM THE CORE
+                (`version()`), never from a literal in this file. An empty
+                string is the honest pre-load state and renders as one. */}
+            <p className="note" data-testid="about-version">
+              core {ver.core || '—'} · G-code contract {ver.gcode_contract || '—'}
+            </p>
+            <div className="row">
+              <button data-testid="about-close" onClick={() => setAboutOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </>
+      ) : null}
+      {/* ---- WHAT THIS TAB HAS NEVER DONE — TODO #107 -------------------------
+
+          🔴 IT IS NOT IN A COLLAPSIBLE SECTION AND NOT BEHIND THE MENU, AND THAT
+          IS THE POINT. Sections in this sidebar collapse, the collapse is STICKY
+          across reloads, and a shut section renders nothing at all — so a
+          never-cut statement that lived only inside one could be switched off
+          permanently by a click nobody remembers making. That is the same hole
+          `#106` records the spoilboard badge existing to close, arriving through
+          a different door. `Help → About` has exactly the same property in a
+          different form: a dialog nobody opens says nothing. This line is not
+          collapsible, not dismissible, not conditional, and not one click away.
+
+          ⚠ ONE SENTENCE, FROM ONE CONSTANT. `CNC_NEVER_CUT` is also the first
+          line of the About dialog, so the two surfaces cannot drift into saying
+          different things about the same fact — the duplication `#106` warns
+          about is a second COPY, not a second rendering of one string.
+
+          It mirrors `RunTab`'s `run-unproven` banner deliberately: same border
+          token, same position, same job. An operator who moves between the two
+          tabs should not have to learn that a missing red box means something. */}
+      <div
+        data-testid="cnc-unproven"
+        className="cnc-unproven"
+        style={{
+          borderBottom: '1px solid var(--bad)',
+          padding: '6px 14px',
+          fontSize: 12,
+        }}
+      >
+        <strong className="bad">{CNC_NEVER_CUT}</strong>
+      </div>
+      {/* 🔴 THE PERSPECTIVE WARNING MOVED WITH THE CONTROL, AND IT MOVED OUT OF
+          THE SIDEBAR RATHER THAN INTO THE MENU — TODO #108.
+
+          The control is now `View → Perspective`/`Orthographic`. Its warning
+          could not go with it: a menu note is visible only while the menu is
+          open, and this sentence exists precisely because *"a tooltip is a thing
+          you find after you already believe the picture"*. So the warning is a
+          strip on the tab, shown exactly while perspective is selected — which
+          is strictly MORE visible than the sidebar panel it left, because that
+          column scrolls and this does not.
+
+          ⚠ The reason for the orthographic DEFAULT travelled too: it is in
+          `projection.ts`, in the two menu notes, and in this line. */}
+      {projection === 'perspective' ? (
+        <div
+          data-testid="projection-warning-row"
+          className="cnc-projection-warning"
+          style={{ borderBottom: '1px solid var(--line)', padding: '4px 14px', fontSize: 12 }}
+        >
+          <span className="note" data-testid="projection-warning">
+            Perspective converges parallel edges. Judge a fit or a clearance in orthographic — a
+            part that fits can look like it overhangs here, and a hold-down the cutter will strike
+            can look clear.
+          </span>
+        </div>
+      ) : null}
+      {/* 🔴 THE UNIT STRIP — TODO #109, and it is a strip for the perspective
+          warning's exact reason. The thing it has to say (*the numbers you are
+          reading were converted; the program was not*) is needed precisely when
+          the operator is NOT looking at the View menu, and a menu note is
+          visible only while the menu is open.
+
+          ⚠ CONDITIONAL ON THE NON-CANONICAL UNIT, not on both. In millimetres
+          there is nothing to warn about: every number on the panels IS the
+          number the planner holds, and a permanent strip saying so would be
+          noise that trains an operator to stop reading strips on this tab —
+          which is where the never-cut banner lives.
+
+          ⚠ THE SENTENCE IS ONE CONSTANT, IN `units.ts`, BESIDE THE FUNCTIONS IT
+          DESCRIBES. A warning that lives next to the control it warns about goes
+          stale with it; this one goes stale with the conversion. */}
+      {unit !== 'mm' ? (
+        <div
+          data-testid="units-note-row"
+          style={{ borderBottom: '1px solid var(--line)', padding: '4px 14px', fontSize: 12 }}
+        >
+          <span className="warn" data-testid="units-note">
+            {INCH_DISPLAY_NOTE}
+          </span>
+        </div>
+      ) : null}
+      {/* What the last job save or open did. Not a toast and not on a timer: a
+          line that removes itself while somebody is looking at the machine has
+          not been read — the same rule the restore banner is built on. */}
+      {jobNote ? (
+        <div
+          style={{ borderBottom: '1px solid var(--line)', padding: '4px 14px', fontSize: 12 }}
+          data-testid="job-note-row"
+        >
+          <span className={jobNote.tone} data-testid="job-note">
+            {jobNote.text}
+          </span>{' '}
+          <button data-testid="job-note-dismiss" onClick={() => setJobNote(null)}>
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+      {/* 🔴 THE JOB FILE INPUT. Mounted here rather than inside the menu popup,
+          for the reason every other file input in this file is: an input that
+          exists only while a menu is open cannot be handed a file by anything
+          that has not opened the menu, and it is unreachable to a driver.
+
+          🔴 REFUSE, THEN REPLACE, THEN RELOAD — in that order. `parseJobFile`
+          validates the envelope and the settings GENERATION before a single byte
+          of the operator's own setup is touched; a check that runs after the
+          destructive step has destroyed the thing it was protecting. */}
+      <input
+        ref={openJobRef}
+        className="offscreen"
+        type="file"
+        accept=".json,application/json"
+        aria-hidden="true"
+        tabIndex={-1}
+        data-testid="open-job"
+        onChange={async (e) => {
+          const f = e.target.files?.[0];
+          e.target.value = '';
+          if (!f) return;
+          const parsed = parseJobFile(await f.text());
+          if (parsed.status === 'refused') {
+            setJobNote({ tone: 'bad', text: `That job file was NOT opened. ${parsed.why}` });
+            return;
+          }
+          const err = installJob(parsed);
+          if (err) {
+            setJobNote({
+              tone: 'bad',
+              text:
+                `That job file read correctly and this browser refused to store it, so NOTHING was ` +
+                `replaced: ${err}`,
+            });
+            return;
+          }
+          /* The reload is what makes this ONE restore path rather than two. The
+             banner on the next load names what came back and what did not. */
+          window.location.reload();
+        }}
+      />
+      {/*
+        ---- THE RESTORE BANNER ------------------------------------------------
+
+        🔴 A RESTORE THAT IS NOT ANNOUNCED IS NOT SAFE, and that is the whole
+        argument for this block existing rather than the feature being four
+        lines of `localStorage`. Every number on the panels behind it sets a
+        depth of cut, a spindle speed, a rapid height, a tab, or how the machine
+        finds its datum. An operator who does not know those came from LAST
+        session has no reason to read them — a stale setup under a form that
+        looks freshly opened is indistinguishable from one somebody just typed.
+
+        So this states three things and refuses to state a fourth:
+          - HOW MANY settings came back, and (behind a disclosure) which;
+          - WHAT DID NOT come back, by name and with the reason, because
+            silently substituting a default is the one outcome that must never
+            happen — on screen it is identical to the value having survived;
+          - that the bed-clear confirmation was deliberately NOT restored;
+          - and it never says "your setup is ready", because this app cannot
+            know that. It knows what it read back.
+
+        It is dismissed by a CLICK and never by a timer: a banner that removes
+        itself while somebody is looking at the machine has not been read.
+      */}
+      {!restoreDismissed &&
+      (RESTORED.status === 'incompatible' ||
+        RESTORED.status === 'unreadable' ||
+        restored.length > 0 ||
+        dropped.length > 0 ||
+        saveError) ? (
+        <div
+          data-testid="restore-banner"
+          className="cnc-restore-banner"
+          style={{
+            /* Inline, and the values still come from the brand tokens via
+               `var(--…)`, so the banner is theme-correct in both directions.
+               `styles.css` is outside this pass's file scope. */
+            borderBottom: '1px solid var(--line)',
+            background: 'var(--panel)',
+            color: 'var(--ink)',
+            padding: '8px 14px',
+            fontSize: 12,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 4,
+          }}
+        >
+          {RESTORED.status === 'incompatible' ? (
+            <p className="bad" data-testid="restore-incompatible" style={{ margin: 0 }}>
+              <b>Stored settings were NOT restored.</b> {RESTORED.why}
+            </p>
+          ) : null}
+
+          {RESTORED.status === 'unreadable' ? (
+            <p className="bad" data-testid="restore-unreadable" style={{ margin: 0 }}>
+              <b>Stored settings were NOT restored.</b> {RESTORED.why} Everything on the panels is
+              at its default.
+            </p>
+          ) : null}
+
+          {restored.length > 0 ? (
+            <p style={{ margin: 0 }}>
+              <b data-testid="restore-count">{restored.length}</b> setting
+              {restored.length === 1 ? '' : 's'} restored from your last session
+              {RESTORED.status === 'ok' && RESTORED.savedAt
+                ? ` (saved ${new Date(RESTORED.savedAt).toLocaleString()})`
+                : ''}
+              . <b>Check them before you cut</b> — they are not this session's decisions.
+            </p>
+          ) : null}
+
+          {dropped.length > 0 ? (
+            <>
+              <p className="warn" style={{ margin: 0 }}>
+                <b data-testid="restore-dropped-count">{dropped.length}</b> could <b>not</b> be
+                restored and {dropped.length === 1 ? 'is' : 'are'} at the default:
+              </p>
+              <ul
+                data-testid="restore-dropped"
+                className="notes"
+                style={{ margin: 0, paddingLeft: 18 }}
+              >
+                {dropped.map((d, i) => (
+                  <li key={`${d.field}-${i}`} data-testid="restore-dropped-item">
+                    <b>{d.field}</b> — {d.reason}
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+
+          {restored.length > 0 ? (
+            <details data-testid="restore-list" style={{ color: 'var(--muted)' }}>
+              <summary style={{ cursor: 'pointer' }}>What came back</summary>
+              <p style={{ margin: '4px 0 0' }}>{restored.join(', ')}</p>
+              {/* 🔴 Said every time, not once. The clamp rectangles are gate
+                  P7's keepout and they DO come back; the statement that a human
+                  looked at the machine does not, and cannot. */}
+              <p className="warn" style={{ margin: '6px 0 0' }} data-testid="restore-not-confirmed">
+                Not restored, deliberately: <b>“I have checked the machine is clear”</b>. That checkbox
+                records that somebody looked, and nobody has looked in this session. The clamp
+                positions came back so they do not have to be retyped; the confirmation is asked
+                again.
+              </p>
+            </details>
+          ) : null}
+
+          {saveError ? (
+            <p className="bad" data-testid="restore-save-error" style={{ margin: 0 }}>
+              <b>Settings are NOT being saved.</b> {saveError} — this browser refused the write, so
+              nothing you change now will survive a refresh.
+            </p>
+          ) : null}
+
+          <div className="row" style={{ marginTop: 2 }}>
+            <button data-testid="restore-dismiss" onClick={() => setRestoreDismissed(true)}>
+              Dismiss
+            </button>
+            {/* Clear AND reload, in one act. Clearing alone would be a lie: the
+                next change to any field writes the setup straight back, so the
+                button would appear to have done something it did not. */}
+            <button
+              data-testid="restore-discard"
+              title={`Forget the stored setup (schema v${SESSION_VERSION}) and reload on defaults.`}
+              onClick={() => {
+                clearSession();
+                window.location.reload();
+              }}
+            >
+              Discard and reload with defaults
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {/* The report column's width is a CSS variable, so the layout RULE stays in
+          `styles.css` and only the number lives here. */}
+      <div className="body" style={{ '--report-w': `${reportW}px` } as React.CSSProperties}>
+        {cncView === 'chat' ? (
+          <CncChat
+            config={config}
+            context={askContext}
+            current={askCurrent}
+            planCandidate={planCandidate}
+            onApply={applyAskPatch}
+            empty={drawings.length === 0}
+            designKey={drawings.map((d) => d.name).join(', ')}
+            ownedTools={ownedIds.length}
+            autoAsk={cncAutoAsk}
+            onRegisterTool={registerToolById}
+            onAddClamps={async (text) => {
+              const pick = await aiPickClamp(text);
+              if (!pick) return 'No clamp in the catalogue clears this job\'s safe Z, or the AI did not choose one.';
+              const why = autoClamp(pick.id, pick.count);
+              return why ?? `Added ${pick.count} x ${WORKHOLDING.find((w) => w.id === pick.id)!.name} at the workpiece edges${pick.why ? ` — ${pick.why}` : ''}. The parts are placed around them; fit them where the 3D shows.`;
+            }}
+            onOpenTools={() => setTab('tools')}
+            designs={
+              <>
+              <ObjectPicker
+                label="Design"
+                testid="cnc-chat-design"
+                mode="multi"
+                placeholder="choose a design…"
+                searchPlaceholder="hive, nest, solid, saved…"
+                items={drawingItems}
+                selectedIds={drawings.map((d) => drawingRowId(d.origin, d.name))}
+                onChange={(ids) => void syncDrawings(ids)}
+                onAdd={() => importFileRef.current?.click()}
+                addLabel="+ open a file…"
+              />
+              <DesignPreview names={drawings.map((d) => d.name)} parts={report?.drawing ?? null} />
+              <CncSpec names={drawings.map((d) => d.name)} onOpenIn={onShopOpened} />
+              </>
+            }
+          />
+        ) : null}
+        <aside className="side" data-testid="panels">
+          {/* 🔴 ONE FILE INPUT FOR ALL FOUR INVENTORY PICKERS, because there is
+              ONE inventory document. Four inputs would be four ways to reach the
+              same atomic replace, and the second one somebody wired would be the
+              one that forgot to report `dropped`.
+
+              Mounted here rather than inside a picker's dialog for the same
+              reason the drawing and tool imports are: an input that only exists
+              while a dialog is open cannot be handed a file by anything that has
+              not opened the dialog, and it is unreachable to a driver. */}
+          <input
+            ref={importInventoryRef}
+            className="offscreen"
+            type="file"
+            accept=".json,application/json"
+            aria-hidden="true"
+            tabIndex={-1}
+            data-testid="import-inventory"
+            onChange={async (e) => {
+              const f = e.target.files?.[0];
+              /* Cleared BEFORE the await, so choosing the same file twice fires
+                 again — an operator re-importing after a fix must not be met
+                 with silence. */
+              e.target.value = '';
+              if (!f) return;
+              try {
+                await importInventory(await f.text());
+              } catch (err) {
+                /* A file that could not even be READ. Distinct from a file that
+                   parsed and was refused, and it must not be silent. */
+                setInventoryImport(null);
+                setInventoryImportRefused(
+                  `that file could not be read from disk at all: ${String(
+                    err instanceof Error ? err.message : err
+                  )}. Nothing was imported.`
+                );
+              }
+            }}
+          />
+          {/* 🔴 PANEL ORDER IS THE FOUNDER'S, VERBATIM — 2026-08-10:
+              *"change order : Machine -> Workpeace -> Drawing -> Work holding ->
+              Tooling -> Operation -> Verification -> Import/Export"*.
+
+              ⚠ It SUPERSEDES the same day's *"push the Machine as the 1st group
+              from the top above Drawing"*, which this file carried for one edit.
+              Both are recorded because the first is not wrong — Machine is still
+              first — and a reader finding only the second would not know the
+              order had been ruled on twice.
+
+              His list has EIGHT names and this column holds exactly those eight.
+              `panel-summary`, `panel-sim`, `panel-notes` and `panel-gcode` are
+              NOT missing from it: they live in the other `<aside>`, the results
+              column, so there was nothing to decide about them.
+
+              🔴 Nothing in this app reads a panel's POSITION, checked rather than
+              assumed before moving anything: `Section` takes `defaultOpen` and
+              its testid as PROPS, the session restore keys on field names, the
+              empty state names the Drawing panel rather than "the first one", and
+              the one e2e that enumerates panels asserts PRESENCE, not order. So
+              this is DOM order and nothing else.
+
+              ⚠ One name does not match: the founder's eighth is *"Import/Export"*
+              and this section is titled **Saved data**. It IS that surface —
+              `Export all` / `Import` over the browser store — so it takes the
+              slot; the TITLE is left alone rather than renamed on an inference,
+              and the mismatch is reported rather than quietly resolved. */}
+          {/* 🔴 THE ONE EYE OVER EVERYTHING, ABOVE `Machine` — founder,
+              2026-08-11: *"move the view layers all none above the Machine what
+              will control all hide/view (just an eye)"*.
+
+              It replaces the `all` / `none` pair the canvas used to carry. I had
+              kept that pair on the argument that a GLOBAL control belongs to no
+              panel; he agreed it is global and put it where global lives in this
+              app — the top of the sidebar, in the same eye column every section
+              eye sits in, so the whole set reads as one instrument.
+
+              🔴 IT IS THE SAME COMPONENT as the section eyes, not a lookalike.
+              Tri-state for the same reason: with four of twelve layers hidden, a
+              two-state control has to claim either "all visible" or "all hidden"
+              and both are false. It writes the same lifted `layers` record, so
+              it cannot disagree with the eight eyes below it — that property is
+              what the lift out of `Viewport` was FOR, and reusing the component
+              is how it survives rather than being re-argued.
+
+              🔴 IT GOVERNS `liveLayers`, NEVER `LAYERS`. "Hide everything" must
+              not assert anything about a layer the scene does not contain — the
+              dead-control rule one level up.
+
+              ⚠ THE EMPTY CASE IS GUARDED AND, TODAY, UNREACHABLE. `workpiece`
+              and `travel` have no liveness predicate in `liveLayersOf`, so the
+              set is never empty as the code stands and this guard has never been
+              seen to fire. It is here so that if either ever gains a predicate,
+              the global eye follows the rule instead of becoming the one control
+              that is exempt from it. Said plainly rather than left to read as a
+              tested path. */}
+          {liveLayers.length > 0 && (
+            <div className="panel" data-testid="view-layers-all">
+              {/* 🔴 THE SECTION HEADER'S OWN GEOMETRY, REUSED — not a second
+                  layout that happens to look the same. This row was
+                  `.layers-all` + `.layers-all-title` with its own padding, which
+                  duplicated `.panel-head`'s numbers; two rules describing one
+                  column drift the next time either is touched, and there is no
+                  pixel-alignment test on this box to catch it. Now it is
+                  literally `.panel-head-row` + `.panel-head` + `.eye-slot`, so
+                  the global eye and the eight section eyes cannot fall out of
+                  the same column without every header moving together.
+
+                  ⚠ A `<span>`, not a `<button>`, wearing `.panel-head`. It takes
+                  the header's box and NOT its behaviour: this row does not
+                  collapse, so it renders no chevron and must not offer a
+                  pointer that promises one. `.panel-head-static` removes the
+                  cursor and mutes the colour — the label is scope, not a
+                  control. The only control in the row is the eye. */}
+              <div className="panel-head-row">
+                <span className="panel-head panel-head-static">
+                  <span className="panel-title">View layers</span>
+                </span>
+                <span className="eye-slot">
+                  <SectionEye
+                    testid="section-eye-all"
+                    section="Every layer in the picture"
+                    live={liveLayers}
+                    layers={layers}
+                    onSet={setLayersTo}
+                  />
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* 🔴 THE PROJECTION CONTROL LEFT THIS COLUMN ON 2026-08-11 — TODO
+              #108, and this note is the record that the obligation was
+              discharged rather than forgotten.
+
+              `540bab9d66` put a `Projection` panel here, with its move into a
+              `View` menu written into the code as a condition of keeping it:
+              *"When a CNC menu bar lands, this block moves into its View menu
+              and does NOT stay here as well."* The bar landed; the block moved;
+              nothing stayed. Both items are `View → Orthographic` /
+              `View → Perspective` above, exclusive, driving the same
+              `projection` state through the same `chooseProjection`, persisted
+              under the same key.
+
+              🔴 THE OLD NOTE CLAIMED A TEST IT DID NOT HAVE. It said
+              *"`tests/projection.test.ts` asserts this note exists, so the
+              obligation cannot be lost by deleting a comment"* — and no
+              assertion anywhere read that sentence (measured 2026-08-11: the
+              phrase appears in no file but this one). The obligation was carried
+              by a comment claiming to be carried by a test. It is now asserted
+              in `tests/cnc-menu.test.ts`, in the form that survives the move:
+              the sidebar must NOT hold a second projection control, and the
+              perspective warning must still be rendered on the tab.
+
+              ⚠ THE WARNING DID NOT GO INTO THE MENU. A menu note is visible only
+              while the menu is open, and that sentence exists because a tooltip
+              is something you find after you already believe the picture. It is
+              a strip at the top of this tab, shown exactly while perspective is
+              selected. */}
+
+          <Section
+            title="Machine"
+            testid="panel-machine"
+            eye={sectionEye('panel-machine', 'Machine')}
+            layerRows={sectionLayerRows('panel-machine', 'Machine')}
+          >
+            {/*
+              🔴 ONE LIST — TODO #61, founder 2026-08-09: *"in the machine
+              section remove the: saved… ▼ / Delete / Preset"*. All three are
+              gone from the panel and the CAPABILITY behind each is in this list:
+              `Preset` was the shipped catalogue, `saved… ▼` was a second picker
+              holding the user's own machines, and `Delete` was a button whose
+              enabled-state depended on a name box that had itself already been
+              removed on 2026-08-08 — a control that could only be pressed after
+              loading, wired to a `name` state nothing else set any more.
+
+              ⚠ `Preset` AND `saved…` MERGE, AND THE ORIGIN STAYS PER ROW. A
+              shipped preset states travels somebody measured; a machine the user
+              typed in states travels nobody checked. Collapsing them into one
+              list is right and is exactly #54's shape for drawings; letting the
+              first lend its authority to the second is not. `shipped()` /
+              `yours()` build both, in one place.
+
+              A preset is `builtIn`, so the picker offers no Save-over and no
+              delete on it — there would be no way back to the shipped values.
+            */}
+            {machinePickerEl}
             {inventorySource('machine', machineInv.view)}
             {(() => {
               /* 🔴 THE ONE PICKER THAT COULD NOT RAISE A REFUSAL, AND THE
@@ -9232,10 +10042,9 @@ export default function App() {
                 })
               ) : (
                 <p className="note">
-                  No drawing in the job. DXF (LINE, LWPOLYLINE, ARC, CIRCLE, POLYLINE) or SVG
-                  (rect, circle, polygon, path) or a binary STL, from the list above or your own
-                  file. Anything the importer cannot read is listed in the notes rather than
-                  skipped — a dropped entity is a part cut without a feature.
+                  No drawing in the job. Reads DXF (LINE, LWPOLYLINE, ARC, CIRCLE, POLYLINE), SVG
+                  (rect, circle, polygon, path) and binary STL. Anything unreadable is named in the
+                  notes, never skipped.
                 </p>
               )}
             </div>
@@ -9592,215 +10401,7 @@ export default function App() {
               would be the third time this app re-derived a machining fact in
               TypeScript.
             */}
-            <ObjectPicker
-              label="Tool"
-              testid="tool-picker"
-              mode="multi"
-              items={[...(lib?.tools ?? []).map(  (t: ToolRow) => {
-                /* TWO ANSWERS FROM TWO MODULES, AND THEY DO NOT MERGE.
-                 * `inv` is *do you own it* (TODO #83) — it decides the tags and
-                 * whether the row can be chosen. `v` is *does it work here and
-                 * does this drawing want it* (TODO #66) — it decides the red
-                 * mark and the filter. A cutter can be owned and useless, or
-                 * unowned and perfect for the job, and one word for both would
-                 * hide whichever half the operator needed. */
-                const inv = toolInv.row(t.id);
-                const v = verdictById.get(t.id);
-                return {
-                id: t.id,
-                /* 🔴 THE DRAWING, ON THE PROPERTY PANEL AND NOWHERE ELSE — TODO
-                 * #60, and the row copy removed 2026-08-10 (founder).
-                 *
-                 * A to-scale schematic, not a product photo. Manufacturer images
-                 * are copyrighted and this lane is AGPL — and a photo of a shiny
-                 * bit hides the three facts that matter here anyway: diameter
-                 * against shank, flute length, and which way the flutes spiral.
-                 *
-                 * `ToolShape` already had a `'pane'` frame and nothing had ever
-                 * asked for it, so the drawing existed only at 22x24px in a list
-                 * row — the size at which a shank step and a flute length are
-                 * exactly the facts you cannot see. That row copy is now gone
-                 * rather than kept alongside: a drawing too small to read its own
-                 * subject is decoration wearing the clothes of evidence.
-                 *
-                 * The label is `describeToolShape().title`, which is the SAME
-                 * function the svg's own `aria-label` comes from and is composed
-                 * from the fields the drawing is drawn from. A caption written
-                 * separately would be a second description that drifts. */
-                shape: { node: <ToolShape tool={t} size="pane" />, label: describeToolShape(t).title },
-                // The category is part of the searchable text, not a filter in
-                // front of the list. Typing "drill" or "v-bit" narrows to them.
-                name: `${t.id} · ${t.category}`,
-                /* THE ROW, FRONT TO BACK: what you own · whether it works here ·
-                 * what it is. The red mark carries the CORE's sentence with it
-                 * — `v.why` verbatim — because that is the sentence the planner
-                 * refuses the whole job with, and an operator reading "it does
-                 * not work" without it has to guess which of the four rules
-                 * fired. */
-                detail: (() => {
-                  const facts =
-                    t.fit && t.fit !== 'fitted'
-                      ? t.fit_why
-                      : `${t.category} · ${L(t.diameter_mm)} · ${t.flutes} flute${t.flutes === 1 ? '' : 's'}`;
-                  const mark =
-                    v && v.usability !== 'usable' ? `${usabilityMark(v)}${v.why ? ` — ${v.why}` : ''}` : '';
-                  return [inv ? inv.tags.join(' · ') : '', mark, facts]
-                    .filter((s) => s)
-                    .join(' · ');
-                })(),
-                /* 🔴 `usability` IS NOT ALLOWED TO DISABLE A ROW, and that is a
-                 * decision rather than an omission. `invalidates` is exactly the
-                 * row the operator most needs to reach and read — it is why the
-                 * job will be refused — and a control they cannot select is one
-                 * they cannot inspect the setup against. What disables is the
-                 * CORE's collet verdict (`selectable`) and the OWNERSHIP verdict,
-                 * both of which are facts about the cutter rather than about
-                 * today's drawing. Both reasons ride in `blockFor`'s two labelled
-                 * clauses when both apply. */
-                disabled: inv ? inv.disabled : t.selectable === false,
-                disabledReason: inv ? inv.disabledReason : t.fit_why,
-                /* The ADVICE value the filter narrows on — never `usability`.
-                 * `undefined` when the core has not answered, which the facet
-                 * offers as its own option rather than dropping. */
-                facet: v?.advice,
-                /* TODO #105. ⚠ THE TWO REASONS A CUTTER ROW CAN BE BLOCKED STAY
-                   APART HERE TOO: this control answers *is it in my shop*, and
-                   the collet verdict beside it answers *does it fit this
-                   spindle*. One sends somebody to a purchase order and the other
-                   to the drawer, and `blockFor` prints both when both apply. */
-                claim: ownershipClaim('tool', toolInv.heldInKind, inv, toolIds.includes(t.id)),
-                properties: [
-                  ...(inv ? ownershipProps(inv) : []),
-                  ...verdictProps(v),
-                  ...(colletDisagreement(t, v)
-                    ? [{ label: '⚠ The two collet answers disagree', value: COLLET_DISAGREEMENT_WHY }]
-                    : []),
-                  { label: 'Category', value: t.category },
-                  { label: 'Diameter', value: L(t.diameter_mm) },
-                  { label: 'Flutes', value: t.flutes },
-                  { label: 'Shank', value: L(t.shank_mm) },
-                  { label: 'Cutting length', value: L(t.cutting_length_mm) },
-                  { label: 'Chipload', value: `${L(t.chipload_min_mm)}–${L(t.chipload_max_mm)}` },
-                  { label: 'Rpm', value: `${t.rpm_min}–${t.rpm_max}` },
-                  {
-                    label: 'Fit',
-                    /* Read off `fit`, the four-valued verdict, NOT off
-                       `fit_why || '…'`. `fit_why` is deliberately the empty
-                       string for `Fitted`, and BOTH fields are optional on the
-                       wire — so the `||` could not tell "the core says it fits"
-                       from "this core never answered", and rendered the reassuring
-                       one for both. Same fix as the tool row below. */
-                    value:
-                      t.fit === undefined
-                        ? 'this core did not answer — UNCHECKED'
-                        : t.fit === 'fitted'
-                          ? 'fits the collet in the spindle'
-                          : t.fit_why || t.fit,
-                  },
-                ],
-                };
-              }),
-              /* Cutters the inventory names and this library does not hold.
-                 Listed because a shop that owns one needs to see that this build
-                 cannot plan with it; unselectable because none of its numbers —
-                 diameter, flutes, cutting length, chipload — are here, and the
-                 core substitutes a Ø6mm end mill for an id it cannot find. */
-              ...toolInv.extras,
-              ]}
-              selectedIds={toolIds}
-              onChange={(ids) => { pushSnapshot(); setToolIds(ids); }}
-              /* 🔴 THE FILTER IS ON `advice` AND NEVER ON `usability` — TODO
-                 #66, and the distinction is the safety half of the founder's
-                 request. Hiding the `invalidates` rows would hide exactly the
-                 rows an operator most needs to see, which is rule 1 of this
-                 picker turned against the person using it. `advice` answers a
-                 different question — does THIS DRAWING want the cutter — and
-                 narrowing by it hides nothing about whether a cutter is safe.
-
-                 It is OPT-IN (`''` = every cutter) and the picker states what it
-                 hid, attributed: "N hidden by the Recommendation filter". On
-                 screen a hidden item and a non-existent item are identical, and
-                 in a machining tool that difference decides whether somebody
-                 walks to the drawer or concludes the cutter does not exist. */
-              /* 🔴 A LIST SINCE 2026-08-11. *Selected* and *recommended* are
-                 INDEPENDENT AXES — a tool can be selected and not recommended,
-                 which is exactly the case an operator most wants to look at — so
-                 the built-in Selected facet had to AND with this one, never
-                 replace it. */
-              facets={[{
-                label: 'Recommendation',
-                value: adviceFilter,
-                onChange: setAdviceFilter,
-                options: ADVICE_OPTIONS.map((o) => ({
-                  value: o.value,
-                  label: o.label,
-                  /* Counted over EVERY row this picker shows — the library AND
-                     the inventory-only rows, which state no advice and are
-                     therefore `unknown`, exactly as `matches` reads them. A
-                     count taken over a different set from the one the filter
-                     runs on is a number that disagrees with the list under it.
-                     A count of 0 is still listed: an option that disappears
-                     when nothing matches it hides the fact that nothing does. */
-                  count:
-                    o.value === ''
-                      ? (lib?.tools ?? []).length + toolInv.extras.length
-                      : (lib?.tools ?? []).filter(
-                            (t: ToolRow) => (verdictById.get(t.id)?.advice ?? 'unknown') === o.value
-                        ).length + (o.value === 'unknown' ? toolInv.extras.length : 0),
-                })),
-                /* The host owns the comparison — `ObjectPicker` never learns what
-                   an advice value means. A row that states nothing is `unknown`,
-                   which is a real answer and is reachable through its own
-                   option. */
-                matches: (item: ObjectItem, value: string) => (item.facet ?? 'unknown') === value,
-              }]}
-              /* 🔴 THE TOOL FILE'S CONTROLS ARE IN THE LIST — TODO #55, founder
-                 2026-08-09: *"tooling, remove the Export tools, Choose File
-                 (new) from the left navbar, put this functionality into the
-                 list"*. Tooling was the last panel still carrying its own file
-                 controls; machines, workpieces and drawings had already made
-                 this move. The `<input type="file">` itself stays mounted below
-                 and off screen, for the same reason the drawing import does. */
-              onAdd={() => importToolsRef.current?.click()}
-              addLabel="+ import a tool file…"
-              actions={
-                <button
-                  type="button"
-                  data-testid="export-tools"
-                  title="Write this library as JSON, in the same shape the importer accepts."
-                  onClick={() => {
-                    // Exported in the SAME shape the importer accepts, so a
-                    // round-trip is a round-trip rather than two formats that
-                    // happen to look alike.
-                    const rows = (lib?.tools ?? []).map(  (t: ToolRow) => ({
-                      id: t.id,
-                      category: t.category,
-                      diameter_mm: t.diameter_mm,
-                      flutes: t.flutes,
-                      shank_mm: t.shank_mm,
-                      cutting_length_mm: t.cutting_length_mm,
-                      chipload_mm: t.chipload_mm,
-                      chipload_min_mm: t.chipload_min_mm,
-                      chipload_max_mm: t.chipload_max_mm,
-                      rpm_min: t.rpm_min,
-                      rpm_max: t.rpm_max,
-                      included_angle_deg: t.included_angle_deg,
-                      point_angle_deg: t.point_angle_deg,
-                    }));
-                    const blob = new Blob([JSON.stringify(rows, null, 2)], {
-                      type: 'application/json',
-                    });
-                    const a = document.createElement('a');
-                    a.href = URL.createObjectURL(blob);
-                    a.download = 'tool-library.json';
-                    a.click();
-                    URL.revokeObjectURL(a.href);
-                  }}
-                >
-                  Export tools
-                </button>
-              }
-            />
+            {toolPickerEl}
             {/* The mechanism behind `+ import a tool file…`. See the drawing
                 import above for why it is mounted rather than rendered in the
                 dialog, and why it is hidden from assistive tech rather than
@@ -10213,13 +10814,10 @@ export default function App() {
                   );
                 })}
                 <p className="note">
-                  Every value above is the core's answer about this cutter on this machine, rendered
-                  as it arrived. <b>There is no feed here any more.</b> This panel used to multiply
-                  rpm × flutes × chipload, which ignores the material — the planner scales chipload
-                  by the material and caps the rpm first, so the same row read 3600 mm/min while the
-                  program carried 840 in aluminium. The core knows the number and does not export it
-                  across the wasm boundary yet. The <code>F</code> words the program actually carries
-                  are in the G-code panel, and the rpm the planner settled on is in the notes.
+                  Every value above is the core's answer for this cutter on this machine. No feed is
+                  shown: the planner scales it by material (rpm × flutes × chipload read 3600 mm/min
+                  where the program cut aluminium at 840). The core knows the number and does not export it
+                  yet. The real <code>F</code> words are in the G-code panel.
                 </p>
               </div>
             ) : null}
@@ -10298,6 +10896,16 @@ export default function App() {
             savedDrawings={savedDrawings}
           />
 
+          <Section title="Ask a model" testid="panel-ask" defaultOpen={false}>
+            <CncAskPanel
+              config={config}
+              context={askContext}
+              current={askCurrent}
+              planCandidate={planCandidate}
+              onApply={applyAskPatch}
+            />
+          </Section>
+
           {/* ---- About LEFT THIS COLUMN ON 2026-08-11 — TODO #107 + #108 ----
 
               It was a `Section` here, and its own note said why: *"this is the
@@ -10314,6 +10922,113 @@ export default function App() {
         </aside>
 
         <main className="stage">
+          {(() => {
+            /* Founder 2026-10-16: a pocket no owned cutter can cut is a WARNING (the
+             * core skips that pocket and plans the rest), and a cutter that can do it
+             * is offered: a catalogue one is registered here; a GENERIC spec (no
+             * catalogue cutter fits) goes to cnc.tools, copied, to be bought and added. */
+            const warns = cncView === 'chat' && report?.ok ? cncWarnings(report.notes ?? []) : [];
+            if (!warns.length) return null;
+            return (
+              <div className="cnc-warnings" data-testid="cnc-warnings" role="status">
+                {warns.map((w) => (
+                  <div key={w.op} className="cnc-warning">
+                    <span>⚠ {w.op}: pocket SKIPPED, no owned cutter can cut it.</span>
+                    {w.tool ? (
+                      w.tool.startsWith('GENERIC') ? (
+                        <button
+                          type="button"
+                          data-testid="cnc-warning-generic"
+                          title="No catalogue cutter fits. Buy one to this spec, then add it in cnc.tools."
+                          onClick={() => {
+                            void navigator.clipboard?.writeText(w.tool!).catch(() => {});
+                            setTab('tools');
+                          }}
+                        >
+                          Needs {w.tool.replace(/^GENERIC /, 'a generic ')} — add in cnc.tools (copied)
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="primary"
+                          data-testid="cnc-warning-add"
+                          onClick={() => void registerToolById(w.tool!).then((why) => why && alert(why))}
+                        >
+                          Add {w.tool} to cnc.tools
+                        </button>
+                      )
+                    ) : (
+                      <span className="note">No cutter, catalogue or generic, can cut it: change the pocket.</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+          {cncView === 'chat' && cncShow !== 'toolpath' && drawings.length > 0 && (!report?.ok || (cncShow === 'leftover' && !scene.stockSurface)) ? (
+            /* No result surface = no final product to show. Saying so beats drawing
+             * the uncut sheet under a "Final product" label (founder 2026-10-15:
+             * "seems the final product is not ok in the 3d"). */
+            <div className="cnc-no-product" data-testid="cnc-no-product" role="status">
+              <strong>{cncShow === 'leftover' ? 'No leftover to show' : 'No final product to show'}</strong>
+              {(() => {
+                if (!report) return <span>Planning…</span>;
+                if (report.ok) return <span>This plan produced no simulated surface.</span>;
+                const f = describeFinding(refusalReasons(report)[0] ?? 'see the chat');
+                return (
+                  <>
+                    <span>The plan is refused: {f.text.slice(0, 320)}</span>
+                    <div className="cnc-no-product-fix">
+                      {f.safeZNeeded !== undefined && f.safeZNeeded < travelZ ? (
+                        <button type="button" className="primary" data-testid="cnc-fix-safez" onClick={() => { pushSnapshot(); setSafeZ(f.safeZNeeded!); }}>
+                          Raise safe Z to {formatLength(f.safeZNeeded, unit)}
+                        </button>
+                      ) : null}
+                      {(() => {
+                        /* Founder 2026-10-16: "Than use an other clamp?!". Swap every
+                         * declared clamp too tall for this safe Z for the first catalogue
+                         * clamp that clears it (height - thickness + 2 < safe Z, the core's
+                         * clearance_z) and still holds against lift. The core re-checks. */
+                        if (!f.clamp || !clamps.length) return null;
+                        const clears = (h: number) => h - thickness + 2 < safeZ;
+                        const lower = WORKHOLDING.find((w) => w.obstructs && w.resists.includes('lift') && clears(w.heightMm) && w.footprintMm[0] > 0);
+                        if (!lower || !clamps.some((c) => !clears(c.height_mm))) return null;
+                        return (
+                          <button
+                            type="button"
+                            className={f.safeZNeeded !== undefined && f.safeZNeeded < travelZ ? '' : 'primary'}
+                            data-testid="cnc-fix-lower-clamp"
+                            onClick={() => {
+                              pushSnapshot();
+                              /* Same spot, the lower clamp's own footprint and height. */
+                              setClamps(clamps.map((c, i) => (clears(c.height_mm) ? c : { ...c, name: `${lower.id}-${i + 1}`, w: lower.footprintMm[0], h: lower.footprintMm[1], height_mm: lower.heightMm })));
+                            }}
+                          >
+                            Use a lower clamp: {lower.name} ({formatLength(lower.heightMm, unit)})
+                          </button>
+                        );
+                      })()}
+                      {f.clamp && clamps.length ? (
+                        <button type="button" data-testid="cnc-fix-clamps" onClick={() => { pushSnapshot(); setClamps([]); }}>
+                          Remove the clamps
+                        </button>
+                      ) : null}
+                    </div>
+                    <span className="note">Or ask the assistant, or pick another design.</span>
+                  </>
+                );
+              })()}
+            </div>
+          ) : null}
+          {cncView === 'chat' ? (
+            <div className="cnc-show-toggle" role="tablist" aria-label="What the 3D shows">
+              {(['product', 'leftover', 'toolpath'] as const).map((k) => (
+                <button key={k} type="button" role="tab" aria-selected={cncShow === k} data-testid={`cnc-show-${k}`} onClick={() => setCncShow(k)}>
+                  {k === 'product' ? 'Final product' : k === 'leftover' ? 'Leftover' : 'Toolpath'}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <Viewport
             /* 🔴 STOP RENDERING WHEN THIS TAB IS NOT SHOWING. The panel is
                hidden and never unmounted (see `Tabs.tsx`), and `display: none`
@@ -10405,7 +11120,7 @@ export default function App() {
             loadedMesh={scene.loadedMesh}
             // The machined surface. Asked for at a 3mm display cell on every
             // plan; `null` when a job produced none (refused, or declined).
-            stockSurface={scene.stockSurface}
+            stockSurface={cncView === 'chat' && cncShow === 'leftover' && leftover ? leftover : scene.stockSurface}
             // The touch plate is drawn where it is DECLARED. `probe_x`/`probe_y`
             // of 0,0 means "probe where the tool already is" in the core's own
             // definition, which is why the viewport reports it as not declared
@@ -10423,7 +11138,11 @@ export default function App() {
             // Dragging the sheet writes the SAME datum fields the panel shows,
             // so the drag and the numbers can never disagree about where the
             // board is. There is one place the datum lives.
-            onStockMove={(x, y) => {
+            /* Founder 2026-10-15, cnc chat view: "user should not able to move the
+               objects on the 3d" — every drag handler is off there; placement
+               is automatic (autoPlace below). */
+            machineFrame={cncView === 'chat'}
+            onStockMove={cncView === 'chat' ? null : (x, y) => {
               setOriginX(x);
               setOriginY(y);
             }}
@@ -10503,8 +11222,8 @@ export default function App() {
                over nothing; anything of the shape
                `(id, x, y) => { setX(id, x); setY(id, y); }` would reproduce the
                dead axis exactly, keyed by instance. */
-            onPartMoveAt={movePartAt}
-            onClampMove={(i, x, y) => {
+            onPartMoveAt={cncView === 'chat' ? null : movePartAt}
+            onClampMove={cncView === 'chat' ? null : (i, x, y) => {
               const s = useCncStore.getState();
               s.setClamps(s.clamps.map((c: ClampCfg, j: number) =>
                 j === i
@@ -10514,6 +11233,8 @@ export default function App() {
             }}
             stock={scene.stock}
             clamps={scene.clamps}
+            clampsMoved={phaseView?.movedNames}
+            clampGhosts={phaseView?.ghosts}
             /* The imported drawing, for the extruded-walls layer.
              *
              * 🔴 NOT `?? null`. `ViewportProps.drawing` is a THREE-state
@@ -10583,7 +11304,7 @@ export default function App() {
                `none`, through the callback below. So the sidebar eyes and the
                canvas pair cannot disagree about what is on screen — there is
                one record. */
-            layers={layers}
+            layers={cncView === 'chat' && cncShow === 'product' ? PRODUCT_LAYERS : cncView === 'chat' && cncShow === 'leftover' ? LEFTOVER_LAYERS : layers}
             /* 🔴 DRAWING ONLY, exactly like `layers` — see the prop's own note.
                It reaches the camera and nothing else: not `plan()`, not the
                G-code, not the checks. The default is ORTHOGRAPHIC and it
@@ -10809,6 +11530,51 @@ export default function App() {
                 <span key={i} className={`pm pm-${r.kind}`} style={{ flexGrow: r.n }} />
               ))}
             </div>
+            {/* Founder 2026-10-16: "in the cnc progress show in different color
+                when I have to change the tools/clamps". The STOPS get a legend
+                of their own — the person reads the bar for them, not for the
+                cut/rapid mix — and the clamp instruction is spelled out while
+                the playhead is in the phase it applies to. */}
+            {report && programRuns.some((r) => r.kind === 'change' || r.kind === 'clamp') ? (
+              <div className="pm-legend" data-testid="program-stops">
+                <span><i className="pm-cut" /> cutting</span>
+                {programRuns.some((r) => r.kind === 'change') ? <span><i className="pm-change" /> cutter change (stop)</span> : null}
+                {programRuns.some((r) => r.kind === 'zero') ? <span><i className="pm-zero" /> set Z zero by hand (stop, no Z probe)</span> : null}
+                {programRuns.some((r) => r.kind === 'clamp') ? <span><i className="pm-clamp" /> clamp move (stop)</span> : null}
+                <b data-testid="program-stop-summary">{stopSummary(report.render ?? [], report.intervention_plan)}</b>
+              </div>
+            ) : null}
+            {/* One line per operator stop, in program order — a cutter change on
+                a machine with no Z probe is ONE stop here ("…, then set Z zero
+                by hand") although the program writes two M0. A clamp move after
+                which nothing re-measures Z carries its warning, in the same
+                words the program writes before that stop. */}
+            {report && stopsOf(report.render ?? []).length ? (
+              <ol className="pm-stops" data-testid="program-stop-list">
+                {stopsOf(report.render ?? []).map((st, i) => (
+                  <li key={i} className={`pm-stop pm-stop-${st.kind}${st.zero !== undefined ? ' pm-stop-zero' : ''}`}>
+                    {stopTitle(st)}
+                    {st.warning ? (
+                      <span className="pm-stop-warn" data-testid="clamp-noprobe-warning">
+                        {' '}Warning: {st.warning}.
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ol>
+            ) : null}
+            {phaseView && phaseView.lines.length ? (
+              <p className="pm-clamp-note" data-testid="clamp-phase-note">
+                {clampPhase === 0 ? (
+                  <>Clamps as first fitted. The program stops later to move them: {phaseView.lines.join('; ')}.</>
+                ) : (
+                  <>
+                    <b>Clamps moved at the stop</b> (orange; dashed = where they stood): {phaseView.lines.join('; ')}.
+                    One at a time, the other clamps stay tight.
+                  </>
+                )}
+              </p>
+            ) : null}
             <input
               type="range"
               min={0}
@@ -10886,7 +11652,9 @@ export default function App() {
                   <b data-testid="bar-est-time">{fmtDuration(report.estimated_seconds)}</b>
                   <em>estimate — a floor</em>
                   <b data-testid="bar-tool-changes">
-                    {report.tool_changes} tool change{report.tool_changes === 1 ? '' : 's'}
+                    {report.clamp_changes
+                      ? stopSummary(report.render ?? [], report.intervention_plan)
+                      : `${report.tool_changes} tool change${report.tool_changes === 1 ? '' : 's'}`}
                   </b>
                 </span>
               ) : null}
@@ -10995,6 +11763,94 @@ export default function App() {
             </div>
           </div>
         </main>
+        {/* Founder 2026-10-15: "the machine and tool selection should be below the
+            3d; only the object(s) stays" (left). Same picker elements as the
+            code view's panels. */}
+        {cncView === 'chat' ? (
+          <div className="cnc-below" data-testid="cnc-below">
+            <div className="cnc-card">{machinePickerEl}</div>
+            <div className="cnc-card">{toolPickerEl}</div>
+            {/* Founder 2026-10-16: "on the cnc add material (e.g. plywood?)". The list is
+                the CORE's material library (each carries its chipload / depth-of-cut
+                limits), the same control as the Workpiece panel's; thickness is the
+                workpiece thickness the plan cuts through. */}
+            <div className="cnc-card cnc-material" data-testid="cnc-material">
+              <label className="note" htmlFor="cnc-material-pick">Material</label>
+              <div className="cnc-run-row">
+                <select
+                  id="cnc-material-pick"
+                  value={material}
+                  disabled={!lib}
+                  onChange={(e) => { pushSnapshot(); setMaterial(e.target.value); }}
+                >
+                  {materialLibrary.includes(material) ? null : <option value={material}>{material}{lib ? ' — not in the planner' : ''}</option>}
+                  {materialLibrary.map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+                <input
+                  type="number"
+                  min={1}
+                  step={0.5}
+                  value={thickness}
+                  aria-label="Thickness in mm"
+                  data-testid="cnc-material-thickness"
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    if (Number.isFinite(v) && v > 0) { pushSnapshot(); setThickness(v); }
+                  }}
+                  style={{ width: 70 }}
+                />
+                <span className="note">mm</span>
+              </div>
+            </div>
+            <div className="cnc-card">
+              <SendToRun
+                report={report ? { ...report, gcode: report.gcode ?? '' } : null}
+                config={config}
+                sectionZ={sectionZ}
+                stock={{ x: stockX, y: stockY, t: thickness }}
+                drawings={drawings}
+                factsFor={() =>
+                  setupFactsForImportMany(
+                    drawings.map((d) => ({
+                      id: d.instance,
+                      format: d.format,
+                      bytes: d.bytes ?? new TextEncoder().encode(d.text ?? ''),
+                      z_section_mm: sel >= 0 && d === drawings[sel] ? sectionZ ?? undefined : undefined,
+                      offset_mm: d.offset,
+                      rotation_deg: d.rotation,
+                    })),
+                    config,
+                    simCell,
+                  )
+                }
+                onOpenRun={() => setTab('run')}
+                gates={cncGates}
+                onMachine={setRunMachine}
+              />
+            </div>
+          </div>
+        ) : null}
+        {cncView === 'chat' ? (
+          <GatesPanel
+            gates={cncGates.map((g) =>
+              g.confirm
+                ? {
+                    ...g,
+                    action: {
+                      label: `I checked: held by ${workholdingIds.map((id) => WORKHOLDING.find((w) => w.id === id)?.name ?? id).join(', ')}, nothing else on the table`,
+                      onClick: () => { pushSnapshot(); setConfirmedClear(true); },
+                    },
+                  }
+                : g,
+            )}
+            storeKey="2bee.app.cnc.gates"
+            onFix={() => void fixCnc()}
+            fixing={cncFixing}
+            fixNotes={cncFixNotes}
+          />
+        ) : null}
 
         {/* 🔴 A GRID COLUMN OF ITS OWN, not an absolutely-positioned strip over
             the panel edge. The overlay form is what makes a splitter drift out
@@ -11067,11 +11923,8 @@ export default function App() {
             <div className="empty" data-testid="no-drawing">
               <strong>No drawing yet.</strong>
               <p>
-                Pick one from the <em>Drawing</em> list — the shipped samples and
-                your own saved drawings are in it together — or open a DXF, SVG
-                or STL file of your own from the same list. Nothing is planned
-                until then: a toolpath on screen for a part you did not supply
-                would look like your work.
+                Pick one from the <em>Drawing</em> list, or open your own DXF,
+                SVG or STL there. Nothing is planned until then.
               </p>
             </div>
           ) : null}
@@ -11334,9 +12187,12 @@ export default function App() {
           a "seen" flag the way `cad` is gated would put a fetch and a first
           paint in front of the very first screen. It holds no editable state,
           so nothing is lost by it being cheap. */}
+      {tab === 'make' ? <MakeFlow onExpert={() => setTab('shop')} /> : null}
+      {tab === 'home' ? <Home onPickDesign={() => setTab('make')} onExpert={() => setTab('shop')} onBack={() => setTab(beforeHome.current)} /> : null}
+
       <TabPanel id="shop" tab={tab}><ShopTab onOpened={onShopOpened} /></TabPanel>
 
-      <TabPanel id="cad" tab={tab}>{cadSeen ? <CadTab /> : null}</TabPanel>
+      <TabPanel id="cad" tab={tab}>{cadSeen ? <CadTab onOpenIn={(t) => setTab(t === '3d' ? 'print3d' : 'cnc')} /> : null}</TabPanel>
 
       {/* 🔴 THE REASON WAS WRONG AND THE PROP IS RIGHT — corrected 2026-08-11,
           in that order, because the two are separable and only one of them
@@ -11371,11 +12227,67 @@ export default function App() {
             which is to disable it, per `StreamingSignal`'s own contract. Nothing
             else in this file reads the signal, and nothing may use it to decide
             a motion. */}
-        <RunTab program={programForRunTab(heldProgram, runBuild)} onStreaming={setStreamSignal} />
+        {/* cnc.run, founder 2026-10-15: "ai is on the left side, have a 3d and below
+            the 3d have all the steps … have a play button". RunSimple is the default;
+            the old RunTab stays MOUNTED (its hand-over signal feeds cnc) and is shown
+            with ?run=code. Play goes through cncjob/runDoor.ts beginRun; a real
+            machine stays blocked until ops H5. */}
+        {runView === 'chat' ? <RunSimple active={tab === 'run'} onOpenCnc={() => setTab('cncjob')} /> : null}
+        <div style={runView === 'chat' ? { display: 'none' } : undefined}>
+          <RunTab program={programForRunTab(heldProgram, runBuild)} onStreaming={setStreamSignal} />
+        </div>
       </TabPanel>
 
+      {/* Static text with no editable state, so mounting it eagerly costs nothing
+          and loses nothing. `focusable` because it opens with a banner, not a
+          control — the same APG condition as `run` above. */}
+      <TabPanel id="pcb" tab={tab} focusable>{pcbSeen ? <PcbTab active={tab === 'pcb'} /> : null}</TabPanel>
+      <TabPanel id="pnp" tab={tab} focusable><PnpTab /></TabPanel>
+
+      {/* cnc.machines (founder 2026-10-15). The values stay in the store above, so
+          cnc plans with exactly what this tab shows and edits; the picker is the
+          same element as cnc's. Mounted only once visited, like Tools. */}
+      <TabPanel id="machines" tab={tab}>
+        {machinesSeen ? (
+          <MachinesTab
+            name={
+              (loadedMachine && /^saved:/.test(String((loadedMachine as { id?: string }).id)) ? String((loadedMachine as { id?: string }).id).replace(/^saved:/, '') : null) ??
+              MACHINE_PRESETS.find((m) => m.travel_x_mm === travelX && m.travel_y_mm === travelY)?.name ??
+              'Custom machine'
+            }
+            fields={{ travelX, travelY, travelZ, safeZ, colletMm, spindleMax, supportsArcs }}
+            onPatch={(p) => {
+              if (p.travelX !== undefined) setTravelX(p.travelX);
+              if (p.travelY !== undefined) setTravelY(p.travelY);
+              if (p.travelZ !== undefined) setTravelZ(p.travelZ);
+              if (p.safeZ !== undefined) setSafeZ(p.safeZ);
+              if (p.colletMm !== undefined) setColletMm(p.colletMm);
+              if (p.spindleMax !== undefined) setSpindleMax(p.spindleMax);
+              if (p.supportsArcs !== undefined) setSupportsArcs(p.supportsArcs);
+            }}
+            onSaveAs={(n) => setPendingMachineName(n)}
+            picker={machinePickerEl}
+            active={tab === 'machines'}
+          />
+        ) : null}
+      </TabPanel>
+      {/* 3d (founder 2026-10-15: "migrate the 2bee.3d into this app"). Upload, then remote start/pause/stop (founder 2026-10-20). */}
+      <TabPanel id="print3d" tab={tab} focusable>{print3dSeen ? <Print3dTab active={tab === 'print3d'} /> : null}</TabPanel>
+      <TabPanel id="tools" tab={tab} focusable>{toolsSeen ? <ToolsPage /> : null}</TabPanel>
+
+      {/* 2bee.cnc (founder 2026-10-14): two views, kept mounted once seen. */}
+      {cncJobSeen ? (
+        <div hidden={tab !== 'cncjob'} style={tab === 'cncjob' ? { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 } : { display: 'none' }}>
+          <CncPage onJobs={() => setTab('jobs')} onExpert={() => setTab('cnc')} />
+        </div>
+      ) : null}
+      {cncJobSeen && tab === 'jobs' ? <JobsPage onBack={() => setTab('cncjob')} /> : null}
+
       <footer className="foot">
-        <span>
+        {/* Hidden on the three-step view (founder 2026-10-14, "no extra stuff");
+            the AGPL source link beside it is NEVER hidden — §13 applies to
+            every user of the served page. */}
+        <span hidden={tab === 'make'}>
           core {ver.core} · G-code contract {ver.gcode_contract}
         </span>
         <span>

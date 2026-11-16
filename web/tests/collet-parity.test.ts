@@ -4,7 +4,7 @@
 // THE DEFECT THIS FILE EXISTS FOR
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// `web/src/App.tsx` carries `const SPARE_COLLETS_MM = [3.175, 6.35, 8.0]` under
+// `web/src/App.tsx` carried (until 2026-11-15; now `src/cncjob/machines.ts`, and sent to the core) `const SPARE_COLLETS_MM = [3.175, 6.35, 8.0]` under
 // a comment that says it "mirrors the core's reference machine". The core's
 // value is `spare_collets_mm: vec![3.175, 6.35, 8.0]` in
 // `core/src/fixtures.rs::machine()`. **The mirror was a comment and nothing
@@ -45,13 +45,16 @@ function numbers(literal: string): number[] {
 }
 
 test('the browser and the core declare the SAME spare collets', () => {
-  const app = readFileSync(join(WEB, 'src', 'App.tsx'), 'utf8');
+  // 🔴 2026-11-15: the browser's list moved to src/cncjob/machines.ts and is now SENT to the core as
+  // `spare_collets_mm` by every host (shopFields, App.tsx config), so planning uses the browser's list;
+  // this test still holds it equal to the core's reference machine so the two declarations cannot drift.
+  const app = readFileSync(join(WEB, 'src', 'cncjob', 'machines.ts'), 'utf8');
   const core = readFileSync(join(ROOT, 'core', 'src', 'fixtures.rs'), 'utf8');
 
-  const appM = /const SPARE_COLLETS_MM\s*=\s*(\[[^\]]*\])/.exec(app);
+  const appM = /const SPARE_COLLETS_MM(?:\s*:\s*readonly number\[\])?\s*=\s*(\[[^\]]*\])/.exec(app);
   assert.ok(
     appM,
-    'no `const SPARE_COLLETS_MM = [...]` in web/src/App.tsx — the constant this test compares is ' +
+    'no `const SPARE_COLLETS_MM = [...]` in web/src/cncjob/machines.ts — the constant this test compares is ' +
       'gone or has been reshaped. That is a finding: it must not read as agreement.',
   );
 

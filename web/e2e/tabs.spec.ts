@@ -1,6 +1,10 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
+import { seedCadCode } from './tab';
+
+/* 2bee.cad opens on the chat view since 2026-10-15; these tests drive its code view. */
+test.beforeEach(async ({ page }) => seedCadCode(page));
 /**
  * 🔴 THE STORAGE KEY AND THE DEFAULT ARE TAKEN FROM THE PRODUCT, NOT RETYPED.
  * `Tabs.tsx` exports both. A second copy of a key in a test is a second thing
@@ -195,6 +199,22 @@ async function selectedTab(page: Page) {
   return page.getByTestId('tabbar').getByRole('tab', { selected: true }).getAttribute('data-testid');
 }
 
+/**
+ * What is showing, as `tab-<id>`, including the three-step view, which is
+ * not in the tab bar (founder 2026-10-14). `tab-make` is what
+ * `tab-${DEFAULT_TAB}` reads when the app opens on the three steps.
+ */
+async function currentView(page: Page) {
+  if (await page.getByTestId('make-flow').count()) return 'tab-make';
+  return selectedTab(page);
+}
+
+/** From the three-step view to the expert tabs, through the ONE link. */
+async function toExpert(page: Page) {
+  if (await page.getByTestId('make-flow').count()) await page.getByTestId('make-expert').click();
+  await expect(page.getByTestId('tabbar')).toBeVisible();
+}
+
 /** The testid of whatever has focus, or `null`. */
 async function focusedTestId(page: Page) {
   return page.evaluate(() => document.activeElement?.getAttribute('data-testid') ?? null);
@@ -241,6 +261,7 @@ test.describe('the four tabs', () => {
      * one test below where it was actually needed.
      */
     await page.goto('/');
+    await toExpert(page);
     await panelsReady(page);
     /* The landing tab is Designs (founder 2026-08-31). This test's SUBJECT is the
      * CNC tab, so it goes there explicitly rather than inheriting a default —
@@ -481,6 +502,7 @@ test.describe('the four tabs', () => {
      *             decorative.
      */
     await page.goto('/?fixtures=1');
+    await toExpert(page);
     /* The landing tab is Designs (founder 2026-08-31). This test's SUBJECT is
      * the CNC viewport's render loop, so it goes to that tab explicitly rather
      * than inheriting a default — a stated precondition cannot silently become
@@ -598,10 +620,11 @@ test.describe('the four tabs', () => {
 
     // The default first, so the assertion after the reload is a CHANGE and not a
     // coincidence. `DEFAULT_TAB` comes from the product, not from this file.
-    expect(await selectedTab(page)).toBe(`tab-${DEFAULT_TAB}`);
+    expect(await currentView(page)).toBe(`tab-${DEFAULT_TAB}`);
 
+    await toExpert(page);
     await page.getByTestId('tab-run').click();
-    expect(await selectedTab(page)).toBe('tab-run');
+    expect(await currentView(page)).toBe('tab-run');
     /* ⚠ `tabpanel-run`, NOT anything the Run tab happens to SAY. This file tests
      * the tab machinery; the Run tab's content is being rewritten in `web/src/`
      * as this is written and `run-not-built` — the obvious thing to reach for —
@@ -617,7 +640,7 @@ test.describe('the four tabs', () => {
     await page.reload();
     await panelsReady(page);
 
-    expect(await selectedTab(page), 'the chosen tab did not survive a reload').toBe('tab-run');
+    expect(await currentView(page), 'the chosen tab did not survive a reload').toBe('tab-run');
     await expect(page.getByTestId('tabpanel-run')).toBeVisible();
     await expect(page.getByTestId('tabpanel-cnc')).toBeHidden();
   });
@@ -667,7 +690,7 @@ test.describe('the four tabs', () => {
     await page.reload();
     await panelsReady(page);
     expect(
-      await selectedTab(page),
+      await currentView(page),
       'a stored value that names no tab did not fall back to the default'
     ).toBe(`tab-${DEFAULT_TAB}`);
 
@@ -676,7 +699,7 @@ test.describe('the four tabs', () => {
     await page.reload();
     await panelsReady(page);
     expect(
-      await selectedTab(page),
+      await currentView(page),
       'a JSON-quoted stored value was accepted as a tab id'
     ).toBe(`tab-${DEFAULT_TAB}`);
 
@@ -686,7 +709,7 @@ test.describe('the four tabs', () => {
     await page.reload();
     await panelsReady(page);
     expect(
-      await selectedTab(page),
+      await currentView(page),
       'a VALID stored tab was ignored, so the fallback assertions above prove nothing'
     ).toBe('tab-run');
   });
@@ -734,9 +757,10 @@ test.describe('the four tabs', () => {
      *      it and every following key is still asserted, on both legs.
      */
     await page.goto('/');
+    await toExpert(page);
     await panelsReady(page);
 
-    // Order is shop, cad, cnc, run — the founder's, asserted here as the basis
+    // Order is shop, cad, cnc, run, pcb, pnp, tools, 3d, machines — the founder's (pnp appended 2026-10-11, tools 2026-10-14, 3d and machines 2026-10-15), asserted here as the basis
     // the wrap steps below depend on rather than assumed by them. `Designs` was
     // added at the FRONT on 2026-08-31, which moved both ends of the wrap: this
     // assertion is what turned that into three named failures instead of a
@@ -746,7 +770,7 @@ test.describe('the four tabs', () => {
       .locator('[role=tab]')
       .evaluateAll((els) => els.map((e) => e.getAttribute('data-testid')));
     expect(order, 'the tab order changed, so the wrap assertions below mean something else').toEqual(
-      ['tab-shop', 'tab-cad', 'tab-cnc', 'tab-run']
+      ['tab-shop', 'tab-cad', 'tab-cnc', 'tab-run', 'tab-pcb', 'tab-pnp', 'tab-tools', 'tab-print3d', 'tab-machines']
     );
 
     await page.getByTestId('tab-cnc').click();
@@ -759,10 +783,20 @@ test.describe('the four tabs', () => {
     };
 
     await step('ArrowRight', 'tab-run', 'right from the middle');
+    await step('ArrowRight', 'tab-pcb', 'right from run');
+    await step('ArrowRight', 'tab-pnp', 'right from pcb');
+    await step('ArrowRight', 'tab-tools', 'right onto tools');
+    await step('ArrowRight', 'tab-print3d', 'right onto 3d');
+    await step('ArrowRight', 'tab-machines', 'right to the last tab');
     await step('ArrowRight', 'tab-shop', 'right from the LAST tab must wrap to the first');
-    await step('ArrowLeft', 'tab-run', 'left from the FIRST tab must wrap to the last');
+    await step('ArrowLeft', 'tab-machines', 'left from the FIRST tab must wrap to the last');
     await step('Home', 'tab-shop', 'Home');
-    await step('End', 'tab-run', 'End');
+    await step('End', 'tab-machines', 'End');
+    await step('ArrowLeft', 'tab-print3d', 'left back onto 3d');
+    await step('ArrowLeft', 'tab-tools', 'left back onto tools');
+    await step('ArrowLeft', 'tab-pnp', 'left back onto pnp');
+    await step('ArrowLeft', 'tab-pcb', 'left back onto pcb');
+    await step('ArrowLeft', 'tab-run', 'left back onto run');
 
     // Roving tabindex, in the live DOM: exactly one tab is in the page's tab
     // order and it is the selected one.
@@ -777,7 +811,26 @@ test.describe('the four tabs', () => {
       'tab-cad=-1',
       'tab-cnc=-1',
       'tab-run=0',
+      'tab-pcb=-1',
+      'tab-pnp=-1',
+      'tab-tools=-1',
+      'tab-print3d=-1',
+      'tab-machines=-1',
     ]);
+  });
+
+  test('a work tab with nothing loaded is disabled, and the arrow keys skip it (founder 2026-10-16)', async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('2bee.app.loaded', '{"cad":true}'));
+    await page.goto('/');
+    await toExpert(page);
+    const off = await page
+      .getByTestId('tabbar')
+      .locator('[role=tab]')
+      .evaluateAll((els) => els.filter((e) => (e as HTMLButtonElement).disabled).map((e) => e.getAttribute('data-testid')));
+    expect(off).toEqual(['tab-cnc', 'tab-run', 'tab-pcb', 'tab-pnp', 'tab-print3d']);
+    await page.getByTestId('tab-cad').click();
+    await page.keyboard.press('ArrowRight');
+    expect(await selectedTab(page), 'right from cad must skip cnc, cnc.run, pcb and pnp').toBe('tab-tools');
   });
 
   // =========================================================================
@@ -827,6 +880,7 @@ test.describe('the four tabs', () => {
      *      they are not green — see `CAD1H_BASELINE` in the gate runner.
      */
     await page.goto('/');
+    await toExpert(page);
     await panelsReady(page);
 
     await expect(page.getByTestId('tabpanel-cad')).toHaveCount(1);

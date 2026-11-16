@@ -672,6 +672,17 @@ fn parse_block_entities(pairs: &[(String, String)], tol: f64) -> (Vec<Piece>, Ve
                 .filter_map(|(_, v)| v.parse::<f64>().ok())
                 .collect()
         };
+        // Same OCS refusal as the top-level reader — see the comment there.
+        if matches!(value.as_str(), "CIRCLE" | "ARC" | "LWPOLYLINE" | "POLYLINE" | "INSERT") {
+            let (ex, ey, ez) = (get("210").unwrap_or(0.0), get("220").unwrap_or(0.0), get("230").unwrap_or(1.0));
+            if ex.abs() > 1e-9 || ey.abs() > 1e-9 || (ez - 1.0).abs() > 1e-9 {
+                unsupported.push(format!(
+                    "{value} in a block with extrusion ({ex}, {ey}, {ez}) — mirrored or tilted plane \
+                     (OCS), NOT imported"
+                ));
+                continue;
+            }
+        }
         match value.as_str() {
             "LINE" => {
                 if let (Some(x1), Some(y1), Some(x2), Some(y2)) =
@@ -686,7 +697,28 @@ fn parse_block_entities(pairs: &[(String, String)], tol: f64) -> (Vec<Piece>, Ve
             "LWPOLYLINE" => {
                 let xs = all("10");
                 let ys = all("20");
-                let bulges = all("42");
+                // 🔴 Bulges are SPARSE: a 42 follows only the vertices that have
+                // one. Read positionally (bulge[k] for vertex k) — the defect the
+                // top-level reader fixed and this block reader kept — an arc on the
+                // 3rd vertex landed on the 1st. Matched by scan: a 42 belongs to
+                // the vertex whose 20 came last.
+                let mut bulges = vec![0.0; all("10").len()];
+                {
+                    let mut seen = 0usize;
+                    for (k, v) in &entity_pairs {
+                        match k.as_str() {
+                            "20" => seen += 1,
+                            "42" => {
+                                if let (Ok(b), true) = (v.parse::<f64>(), seen > 0) {
+                                    if seen - 1 < bulges.len() {
+                                        bulges[seen - 1] = b;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 let flags: Vec<i64> = entity_pairs
                     .iter()
                     .filter(|(k, _)| k == "70")
@@ -926,6 +958,49 @@ fn apply_insert(
     }
 }
 
+/// `$INSUNITS` code → (unit name, millimetres per drawing unit), for every code the DXF spec
+/// defines as a LENGTH. `None` for 0 (unitless) and every undefined code.
+///
+/// Source: Autodesk DXF Reference, HEADER section group codes, `$INSUNITS` ("Default drawing
+/// units for AutoCAD DesignCenter blocks"), codes 0-20, and 21-24 (US Survey units) added in
+/// AutoCAD 2018; the same table, codes 0-24, is reproduced by ezdxf
+/// (<https://ezdxf.readthedocs.io/en/stable/concepts/units.html>, checked 2026-11-12).
+/// Factors: international inch = 25.4 mm exactly (foot, yard, mile, mil, microinch from it);
+/// US survey foot = 1200/3937 m exactly (inch, yard, mile from it); astronomical unit =
+/// 149 597 870 700 m exactly (IAU 2012 B2); light year = 9 460 730 472 580 800 m (IAU, Julian
+/// year x c); parsec = 648000/π au (IAU 2015 B2).
+pub fn insunits_to_mm(code: i32) -> Option<(&'static str, f64)> {
+    const AU_MM: f64 = 149_597_870_700.0e3;
+    const US_FT_MM: f64 = 1_200_000.0 / 3937.0;
+    Some(match code {
+        1 => ("inches", 25.4),
+        2 => ("feet", 304.8),
+        3 => ("miles", 1_609_344.0),
+        4 => ("millimetres", 1.0),
+        5 => ("centimetres", 10.0),
+        6 => ("metres", 1_000.0),
+        7 => ("kilometres", 1_000_000.0),
+        8 => ("microinches", 25.4e-6),
+        9 => ("mils", 0.0254),
+        10 => ("yards", 914.4),
+        11 => ("angstroms", 1.0e-7),
+        12 => ("nanometres", 1.0e-6),
+        13 => ("micrometres", 1.0e-3),
+        14 => ("decimetres", 100.0),
+        15 => ("decametres", 10_000.0),
+        16 => ("hectometres", 100_000.0),
+        17 => ("gigametres", 1.0e12),
+        18 => ("astronomical units", AU_MM),
+        19 => ("light years", 9_460_730_472_580_800.0e3),
+        20 => ("parsecs", AU_MM * 648_000.0 / std::f64::consts::PI),
+        21 => ("US survey feet", US_FT_MM),
+        22 => ("US survey inches", US_FT_MM / 12.0),
+        23 => ("US survey yards", US_FT_MM * 3.0),
+        24 => ("US survey miles", US_FT_MM * 5280.0),
+        _ => return None,
+    })
+}
+
 /// Parse the ENTITIES section of a DXF.
 ///
 /// Supports LINE, LWPOLYLINE (bulges included), POLYLINE/VERTEX, ARC, CIRCLE,
@@ -935,36 +1010,57 @@ pub fn parse_dxf(text: &str, tol: f64) -> Imported {
     let mut out = Imported::default();
     let lines: Vec<&str> = text.lines().map(|l| l.trim()).collect();
 
-    // $INSUNITS says what the drawing's numbers mean. 1 = inches, 4 = mm.
+    // $INSUNITS says what the drawing's numbers mean. See [`insunits_to_mm`] for the table.
     //
     // 🔴 When it is ABSENT the units are unknown, and "unknown" is not "mm".
     // Assuming millimetres silently is how an inch drawing imports 25.4x small:
     // every dimension is wrong by the same factor, so the shape looks perfect
     // and only a ruler on the finished part disagrees. The assumption is made
     // (there is nothing else to do) but it is REPORTED, every time.
+    // ⚠ That ABSENT case is the one documented ruling (FUNCTIONAL-SPEC.md F4: "a drawing with no
+    // `$INSUNITS` **says** millimetres were assumed"), and it is kept because 7 tracked DXFs in this
+    // repo carry no $INSUNITS. It does NOT extend to a PRESENT value that is not a length: until
+    // 2026-11-12 every code other than 1 and 4 also imported as millimetres "with a note", so a
+    // centimetre drawing (5) was cut 10x small and a metre drawing (6) 1000x small — the same
+    // perfect-shape, wrong-size part, now with the unit written in the file. A present value is
+    // scaled when the DXF spec defines it as a length and REFUSED otherwise (0 = unitless, an
+    // undefined code, an unparseable value), the way `parse_svg` refuses an unknown coordinate
+    // space: nothing is imported and `unsupported` says why.
     let mut scale = 1.0_f64;
     out.unit_note = "no $INSUNITS in the drawing — millimetres ASSUMED, not read".into();
     for w in lines.windows(4) {
         if w[1] == "$INSUNITS" && w[2] == "70" {
-            match w[3].trim().parse::<i32>() {
-                Ok(1) => {
-                    scale = 25.4;
-                    out.unit_note = "$INSUNITS = inches; scaled by 25.4".into();
+            let raw = w[3].trim();
+            match raw.parse::<i32>().ok().and_then(|code| insunits_to_mm(code).map(|u| (code, u))) {
+                Some((code, (name, mm))) => {
+                    scale = mm;
+                    out.unit_note = if code == 4 {
+                        "$INSUNITS = millimetres".into()
+                    } else {
+                        format!("$INSUNITS = {code} ({name}); scaled by {mm} to millimetres")
+                    };
                 }
-                Ok(4) => {
-                    scale = 1.0;
-                    out.unit_note = "$INSUNITS = millimetres".into();
+                None => {
+                    out.unit_note = format!("$INSUNITS = {raw} — not a length unit; NOT imported");
+                    out.unsupported.push(format!(
+                        "$INSUNITS = {raw}: the drawing declares its units, and the value is not a \
+                         length unit this reader can scale (0 = unitless, or a code the DXF \
+                         $INSUNITS table does not define) — it was NOT imported. Importing it as \
+                         millimetres would cut every dimension wrong by one unknown factor while \
+                         the shape still looks right. Re-export with $INSUNITS = 4 (mm), or 1 (in)"
+                    ));
+                    return out;
                 }
-                Ok(other) => {
-                    out.unit_note =
-                        format!("$INSUNITS = {other}, which is not inches or millimetres — \
-                                 millimetres ASSUMED");
-                }
-                Err(_) => {}
             }
             break;
         }
     }
+
+    // `tol` is MILLIMETRES, but chaining and curve flattening below run on the drawing's own
+    // numbers, before `scale` is applied at the end. Convert it once, here: a metre drawing
+    // otherwise chained at 0.02 m = 20 mm, closing a 15 mm gap into a part edge the drawing
+    // never had (bughunt 2026-11-13).
+    let tol = tol / scale;
 
     // Parse BLOCKS section first, so INSERT entities can resolve them.
     let (blocks, block_problems) = parse_dxf_blocks(&lines, tol);
@@ -1015,6 +1111,24 @@ pub fn parse_dxf(text: &str, tol: f64) -> Imported {
                 .filter_map(|(_, v)| v.parse::<f64>().ok())
                 .collect()
         };
+
+        // 🔴 AN ENTITY IN A FLIPPED OR TILTED PLANE IS REFUSED, NOT READ FLAT.
+        // CIRCLE, ARC, LWPOLYLINE, 2D POLYLINE and INSERT carry their points
+        // in the entity's OCS, defined by the extrusion vector (210/220/230).
+        // AutoCAD's MIRROR writes 230 = -1, which negates X; reading the raw
+        // points cut every mirrored hole and arc at the mirror image of where
+        // it was drawn (a hole at x=+30 that belongs at x=-30), with no note.
+        // LINE, VERTEX and SPLINE points are WCS and are not affected.
+        if matches!(value, "CIRCLE" | "ARC" | "LWPOLYLINE" | "POLYLINE" | "INSERT") {
+            let (ex, ey, ez) = (get("210").unwrap_or(0.0), get("220").unwrap_or(0.0), get("230").unwrap_or(1.0));
+            if ex.abs() > 1e-9 || ey.abs() > 1e-9 || (ez - 1.0).abs() > 1e-9 {
+                out.unsupported.push(format!(
+                    "{value} with extrusion ({ex}, {ey}, {ez}) — drawn in a mirrored or tilted plane \
+                     (OCS); reading its points flat would cut it mirrored, so it is NOT imported"
+                ));
+                continue;
+            }
+        }
 
         match value {
             "LINE" => {
@@ -1376,78 +1490,166 @@ pub fn parse_dxf(text: &str, tol: f64) -> Imported {
 ///
 /// The drawing's coordinate space is the `viewBox` when there is one (user units
 /// are defined by it, and its `minY` shifts the origin), otherwise the `height`
-/// attribute. `None` means the file declares neither — see the refusal in
-/// [`parse_svg`], which does not guess.
-fn svg_flip_height(text: &str) -> Option<f64> {
-    let tag = text.split('<').skip(1).find(|raw| {
-        raw.split('>').next().unwrap_or("").split_whitespace().next().unwrap_or("") == "svg"
-    })?;
-    let tag = tag.split('>').next().unwrap_or("");
-    let attr = |name: &str| -> Option<String> {
-        let pat = format!("{name}=\"");
-        let i = tag.find(&pat)? + pat.len();
-        let rest = &tag[i..];
-        let j = rest.find('"')?;
-        Some(rest[..j].trim().to_string())
+/// attribute. `Err` means the file does not define its space well enough to
+/// place the part — see the refusals in [`parse_svg`], which do not guess.
+///
+/// 🔴 **SCALE (2026-11-14).** This used to return the flip height and nothing
+/// else, so user units were ALWAYS read as millimetres — including when the
+/// file says otherwise. `width="100mm" viewBox="0 0 1000 1000"` (what a
+/// drawing tool emits for a 100 mm part drawn at 10 units/mm) imported a part
+/// TEN TIMES too big, and a `height="210mm"` with no viewBox (user units are
+/// CSS px there) flipped px geometry about 210 and placed it ~3.8x off. Both
+/// are real contours of a wrong-sized part: they post, simulate and gate green.
+/// Now: a physical unit on `width`/`height` DEFINES the scale and is applied;
+/// with no physical unit anywhere the old convention (user unit = mm) stands
+/// and the note says so; a non-uniform pairing is refused, because the
+/// `preserveAspectRatio` fit it implies is not read here.
+struct SvgSpace {
+    /// Bottom edge of the user-unit box, in user units (minY + height).
+    flip_h: f64,
+    /// viewBox minX: the drawing's left edge, moved to machine x=0.
+    min_x: f64,
+    /// Millimetres per user unit.
+    scale: f64,
+    note: String,
+}
+
+/// Millimetres for a length in a physical unit. `None` for a unitless/px
+/// length (user units) or one this reader cannot size (`%`, `em`, junk).
+fn svg_length(v: &str) -> (Option<f64>, Option<f64>) {
+    // (value as written, millimetres if the unit is physical)
+    let v = v.trim();
+    let num_len = v
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))
+        .map(|(i, c)| i + c.len_utf8())
+        .last()
+        .unwrap_or(0);
+    let Ok(n) = v[..num_len].parse::<f64>() else { return (None, None) };
+    if !n.is_finite() || n <= 0.0 {
+        return (None, None);
+    }
+    let mm_per = match v[num_len..].trim() {
+        "" | "px" => return (Some(n), None),
+        "mm" => 1.0,
+        "cm" => 10.0,
+        "q" | "Q" => 0.25,
+        "in" => 25.4,
+        "pt" => 25.4 / 72.0,
+        "pc" => 25.4 / 6.0,
+        _ => return (None, None),
     };
+    (Some(n), Some(n * mm_per))
+}
+
+fn svg_space(text: &str) -> Result<SvgSpace, String> {
+    const MM_PER_PX: f64 = 25.4 / 96.0;
+    let tag = text
+        .split('<')
+        .skip(1)
+        .find(|raw| raw.split('>').next().unwrap_or("").split_whitespace().next().unwrap_or("") == "svg")
+        .ok_or_else(|| "no <svg> element".to_string())?;
+    let tag = tag.split('>').next().unwrap_or("");
+    let attr = |name: &str| -> Option<String> { svg_attr(tag, name).map(|v| v.trim().to_string()) };
+    let (w_raw, w_mm) = attr("width").map(|v| svg_length(&v)).unwrap_or((None, None));
+    let (h_raw, h_mm) = attr("height").map(|v| svg_length(&v)).unwrap_or((None, None));
+    // Once ANY dimension carries a physical unit the document has a physical
+    // size, and a unitless/px dimension beside it is CSS px, not millimetres.
+    let physical = w_mm.is_some() || h_mm.is_some();
+    let to_mm = |raw: Option<f64>, mm: Option<f64>| mm.or_else(|| raw.filter(|_| physical).map(|n| n * MM_PER_PX));
+    let (w_mm, h_mm) = (to_mm(w_raw, w_mm), to_mm(h_raw, h_mm));
+
     // `viewBox` first: it DEFINES the user-unit space the geometry is written
-    // in, and `height` may be a physical size in different units entirely
-    // (`height="210mm" viewBox="0 0 100 50"` is an ordinary pairing).
+    // in, and `height` may be a physical size in different units entirely.
     if let Some(vb) = attr("viewBox") {
         let n: Vec<f64> = vb
             .split(|c: char| c == ',' || c.is_whitespace())
             .filter(|t| !t.is_empty())
             .filter_map(|t| t.parse::<f64>().ok())
             .collect();
-        if n.len() == 4 && n[3].is_finite() && n[3] > 0.0 {
-            // minY + height: the bottom edge of the user-unit box.
-            return Some(n[1] + n[3]);
+        if n.len() == 4 && n.iter().all(|v| v.is_finite()) && n[2] > 0.0 && n[3] > 0.0 {
+            let (min_x, min_y, vb_w, vb_h) = (n[0], n[1], n[2], n[3]);
+            let sx = w_mm.map(|w| w / vb_w);
+            let sy = h_mm.map(|h| h / vb_h);
+            let scale = match (sx, sy) {
+                (None, None) => {
+                    return Ok(SvgSpace {
+                        flip_h: min_y + vb_h,
+                        min_x,
+                        scale: 1.0,
+                        note: "SVG user units treated as millimetres (no physical width/height declared)".into(),
+                    })
+                }
+                (Some(s), None) | (None, Some(s)) => s,
+                (Some(a), Some(b)) => {
+                    if (a - b).abs() > 1e-6 * a.max(b) {
+                        return Err(format!(
+                            "this SVG's width/height ({:.4} x {:.4} mm) and viewBox ({vb_w} x {vb_h})                              have different aspect ratios, so the drawing is fitted by                              `preserveAspectRatio`, which this reader does not apply — it was NOT                              imported. Reading it 1:1 or by either axis would cut a wrong-sized part",
+                            w_mm.unwrap_or(0.0),
+                            h_mm.unwrap_or(0.0)
+                        ));
+                    }
+                    a
+                }
+            };
+            return Ok(SvgSpace {
+                flip_h: min_y + vb_h,
+                min_x,
+                scale,
+                note: format!("SVG user units scaled to {scale:.6} mm each, from its width/height and viewBox"),
+            });
         }
     }
-    let h = attr("height")?;
-    // Strip a unit suffix. `px` and an absent suffix are user units 1:1; a
-    // physical suffix without a viewBox is a scale question this reader does
-    // not answer, and it is reported by `parse_svg` rather than assumed away.
-    let num: String = h.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
-    num.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0)
+    let h_user = h_raw.ok_or_else(|| {
+        "this SVG declares neither a `viewBox` nor a usable `height` on its <svg> element, so \
+         the drawing's own coordinate space is unknown — it was NOT imported. SVG's Y axis \
+         points DOWN and the machine's points UP, so the import has to flip about the \
+         drawing's height; without one, any value is a guess, and a guess MOVES THE PART \
+         while every contour still looks correct"
+            .to_string()
+    })?;
+    if physical {
+        // No viewBox: user units are CSS px, and the height is in mm.
+        let h = h_mm.unwrap_or(0.0);
+        return Ok(SvgSpace {
+            flip_h: h / MM_PER_PX,
+            min_x: 0.0,
+            scale: MM_PER_PX,
+            note: "SVG has a physical size and no viewBox: user units read as CSS px (25.4/96 mm)".into(),
+        });
+    }
+    Ok(SvgSpace {
+        flip_h: h_user,
+        min_x: 0.0,
+        scale: 1.0,
+        note: "SVG user units treated as millimetres (no physical width/height declared)".into(),
+    })
 }
 
 /// `height_mm` is the WORKPIECE height and is no longer used for the Y flip —
-/// see [`svg_flip_height`] for what replaced it and why. It is kept in the
+/// see [`svg_space`] for what replaced it and why. It is kept in the
 /// signature because every caller has one to give and because removing it would
 /// silently change what a future caller passes; it is deliberately unused.
 pub fn parse_svg(text: &str, _height_mm: f64, tol: f64) -> Imported {
     let mut out = Imported::default();
-    out.unit_note = "SVG user units treated as millimetres".into();
     let mut pieces: Vec<Piece> = Vec::new();
 
-    let Some(flip_h) = svg_flip_height(text) else {
-        out.unsupported.push(
-            "this SVG declares neither a `viewBox` nor a usable `height` on its <svg> element, so \
-             the drawing's own coordinate space is unknown — it was NOT imported. SVG's Y axis \
-             points DOWN and the machine's points UP, so the import has to flip about the \
-             drawing's height; without one, any value is a guess, and a guess MOVES THE PART \
-             while every contour still looks correct"
-                .into(),
-        );
-        return out;
+    let space = match svg_space(text) {
+        Ok(s) => s,
+        Err(why) => {
+            out.unsupported.push(why);
+            return out;
+        }
     };
+    out.unit_note = space.note.clone();
+    let flip_h = space.flip_h;
     let fy = |y: f64| flip_h - y;
+    // Geometry is read in user units, so the flattening tolerance (mm) is too.
+    let tol_mm = tol;
+    let tol = tol / space.scale;
 
-    let attr = |tag: &str, name: &str| -> Option<f64> {
-        let pat = format!("{name}=\"");
-        let i = tag.find(&pat)? + pat.len();
-        let rest = &tag[i..];
-        let j = rest.find('"')?;
-        rest[..j].trim().parse::<f64>().ok()
-    };
-    let attr_s = |tag: &str, name: &str| -> Option<String> {
-        let pat = format!("{name}=\"");
-        let i = tag.find(&pat)? + pat.len();
-        let rest = &tag[i..];
-        let j = rest.find('"')?;
-        Some(rest[..j].to_string())
-    };
+    let attr = |tag: &str, name: &str| -> Option<f64> { svg_attr(tag, name)?.trim().parse::<f64>().ok() };
+    let attr_s = |tag: &str, name: &str| -> Option<String> { svg_attr(tag, name).map(str::to_string) };
 
     // 🔴 A `transform` MOVES THE PART, AND THIS READER DOES NOT READ ONE
     // (2026-08-29). Nothing in this file has ever parsed `transform=`. An SVG
@@ -1508,6 +1710,16 @@ pub fn parse_svg(text: &str, _height_mm: f64, tol: f64) -> Imported {
                     out.unsupported.push("rect with missing attributes".into());
                     continue;
                 };
+                // Rounded corners are not drawn by this reader; squaring them
+                // silently cuts a different part. Refused by name.
+                let r = attr(tag, "rx").unwrap_or(0.0).max(attr(tag, "ry").unwrap_or(0.0));
+                if r > 1e-9 {
+                    out.unsupported.push(format!(
+                        "rect with rounded corners (rx/ry {r}) — corner radii are not read, so it is NOT \
+                         imported rather than cut square"
+                    ));
+                    continue;
+                }
                 // Flip: the SVG rect's top edge becomes the bottom.
                 out.contours.push(Contour::rect(x, fy(y + h), w, h));
             }
@@ -1570,13 +1782,18 @@ pub fn parse_svg(text: &str, _height_mm: f64, tol: f64) -> Imported {
                     out.unsupported.push(format!("{name} with no points"));
                     continue;
                 };
-                let nums: Vec<f64> = pts
-                    .split(|c: char| c == ',' || c.is_whitespace())
-                    .filter(|s| !s.is_empty())
-                    .filter_map(|s| s.parse::<f64>().ok())
-                    .collect();
-                if nums.len() < 4 {
-                    out.unsupported.push(format!("{name} with {} numbers", nums.len()));
+                let toks: Vec<&str> =
+                    pts.split(|c: char| c == ',' || c.is_whitespace()).filter(|s| !s.is_empty()).collect();
+                let nums: Vec<f64> = toks.iter().filter_map(|s| s.parse::<f64>().ok()).collect();
+                // 🔴 An odd count panicked on `c[1]` (the browser worker died
+                // instead of naming it), and a token that is not a number was
+                // DROPPED, shifting every later x into a y. Both are refused.
+                if nums.len() != toks.len() || nums.len() % 2 != 0 || nums.len() < 4 {
+                    out.unsupported.push(format!(
+                        "{name} with points that are not x,y pairs ({} token(s), {} number(s)) — NOT imported",
+                        toks.len(),
+                        nums.len()
+                    ));
                     continue;
                 }
                 let verts: Vec<Vertex> =
@@ -1603,7 +1820,7 @@ pub fn parse_svg(text: &str, _height_mm: f64, tol: f64) -> Imported {
                             // edge. Only reachable with a tolerance no
                             // subdivision can meet (0, negative, non-finite).
                             out.unsupported.push(format!(
-                                "path: a cubic could not be flattened to within {tol}mm at the \
+                                "path: a cubic could not be flattened to within {tol_mm}mm at the \
                                  subdivision cap ({MAX_SPLIT_DEPTH} levels) — it WAS imported and \
                                  its chords may exceed that tolerance"
                             ));
@@ -1646,7 +1863,15 @@ pub fn parse_svg(text: &str, _height_mm: f64, tol: f64) -> Imported {
         }
     }
 
-    let (mut chained, open) = chain(pieces, tol);
+    // User units -> millimetres, viewBox left edge -> x=0. A bulge is a ratio
+    // and survives a uniform scale unchanged.
+    let place = |v: &mut Vertex| {
+        v.x = (v.x - space.min_x) * space.scale;
+        v.y *= space.scale;
+    };
+    out.contours.iter_mut().flat_map(|c| c.verts.iter_mut()).for_each(place);
+    pieces.iter_mut().flat_map(|p| p.verts.iter_mut()).for_each(place);
+    let (mut chained, open) = chain(pieces, tol_mm);
     out.contours.append(&mut chained);
     out.open_contours = open;
     out
@@ -2492,6 +2717,28 @@ pub fn parse_bytes(data: &[u8], height_mm: f64, z_section_mm: f64, tol: f64) -> 
 /// 🔴 The hierarchy is the whole point. A flat list of loops has no way to say
 /// "this circle is a hole in that plate", and a CAM that guesses will cut the
 /// hole as a separate part.
+/// The value of attribute `name` in one SVG tag, or `None`.
+///
+/// 🔴 MATCHED AS A WHOLE ATTRIBUTE NAME. The readers searched for the substring
+/// `name="`, so `width="` was found inside `stroke-width="` and `x="` inside
+/// `rx="`: a 100mm rect with stroke-width 0.5 imported 0.5mm wide, and a
+/// rounded rect at x=40 landed at x=5 — no note either way. The name must start
+/// the tag text or follow whitespace.
+fn svg_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let pat = format!("{name}=\"");
+    let mut from = 0;
+    while let Some(k) = tag[from..].find(&pat) {
+        let at = from + k;
+        let whole = at == 0 || tag[..at].chars().next_back().is_some_and(char::is_whitespace);
+        if whole {
+            let rest = &tag[at + pat.len()..];
+            return rest.find('"').map(|j| &rest[..j]);
+        }
+        from = at + pat.len();
+    }
+    None
+}
+
 pub fn to_parts(imported: &Imported, name_prefix: &str) -> Vec<Part> {
     let closed: Vec<&Contour> = imported.contours.iter().filter(|c| c.closed).collect();
     let mut with_area: Vec<(f64, &Contour)> = closed
@@ -2500,34 +2747,89 @@ pub fn to_parts(imported: &Imported, name_prefix: &str) -> Vec<Part> {
         .filter(|(a, _)| *a > 1e-9)
         .collect();
     with_area.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    // 🔴 A COINCIDENT COPY IS NOT A HOLE. The containment test below uses >=/<=,
+    // so a second copy of an outline — a HATCH boundary over the same polyline
+    // is the common one — sat "inside" the first and became a hole the size of
+    // the part: an inside profile 6mm undersize that cut the part free before
+    // its outer profile ran, ok:true. A copy (same area, same bounds) carries no
+    // geometry the first does not, so it is dropped here. Same-size contours that
+    // are NOT the same bounds (two parts side by side) are untouched.
+    let same = |a: &(f64, &Contour), b: &(f64, &Contour)| -> bool {
+        let tol = 1e-6 * a.0.max(1.0);
+        if (a.0 - b.0).abs() > tol {
+            return false;
+        }
+        match (a.1.bounds(), b.1.bounds()) {
+            (Some(p), Some(q)) => {
+                (p.0 - q.0).abs() < 1e-6 && (p.1 - q.1).abs() < 1e-6 && (p.2 - q.2).abs() < 1e-6 && (p.3 - q.3).abs() < 1e-6
+            }
+            _ => false,
+        }
+    };
+    let mut unique: Vec<(f64, &Contour)> = Vec::with_capacity(with_area.len());
+    for c in with_area {
+        if !unique.iter().any(|u| same(u, &c)) {
+            unique.push(c);
+        }
+    }
+    let with_area = unique;
 
+    let bx: Vec<Option<(f64, f64, f64, f64)>> = with_area.iter().map(|c| c.1.bounds()).collect();
+    // The bbox is the cheap filter; a vertex of the inner one inside the outer's
+    // OUTLINE is the answer — a hole beside an L-shaped cutout sits in its bbox,
+    // not in it.
+    let inside = |j: usize, i: usize| match (bx[i], bx[j]) {
+        (Some(o), Some(inner)) => {
+            inner.0 >= o.0
+                && inner.1 >= o.1
+                && inner.2 <= o.2
+                && inner.3 <= o.3
+                && with_area[j].1.verts.first().is_some_and(|v| with_area[i].1.contains_point(v.x, v.y))
+        }
+        _ => false,
+    };
+    // 🔴 NESTING DEPTH, NOT "INSIDE THE FIRST BIG ONE". Every contour inside an
+    // outline used to become ITS hole, at any depth: a disc drawn in a frame's
+    // window (and the disc's own hole) became three holes of the frame. The
+    // window was cut first and freed the slug, the disc was then cut as an
+    // INSIDE profile on a loose piece — 68mm across for an 80mm disc, ok:true
+    // (bughunt 2026-11-15). Now: a contour inside an EVEN number of others is a
+    // part's outline; inside an ODD number it is a hole of its smallest
+    // container. Sorted by area, so every container precedes what it contains.
+    let n = with_area.len();
+    let mut depth = vec![0usize; n];
+    let mut parent: Vec<Option<usize>> = vec![None; n];
+    for j in 0..n {
+        for i in 0..j {
+            if inside(j, i) {
+                depth[j] += 1;
+                parent[j] = Some(i); // later i = smaller area = the nearer container
+            }
+        }
+    }
     let mut parts: Vec<Part> = Vec::new();
-    let mut used = vec![false; with_area.len()];
-
-    for i in 0..with_area.len() {
-        if used[i] {
-            continue;
-        }
-        used[i] = true;
-        let outer = with_area[i].1.clone();
-        let ob = outer.bounds();
-        let mut part = Part::new(format!("{name_prefix}{}", parts.len() + 1), outer);
-        for j in (i + 1)..with_area.len() {
-            if used[j] {
-                continue;
+    let mut part_of: Vec<Option<usize>> = vec![None; n];
+    for j in 0..n {
+        if depth[j] % 2 == 0 {
+            part_of[j] = Some(parts.len());
+            parts.push(Part::new(format!("{name_prefix}{}", parts.len() + 1), with_area[j].1.clone()));
+        } else {
+            // The nearest container that IS a part's outline. With exact nesting
+            // that is the parent; walking up keeps a hole from being DROPPED if an
+            // odd chain ever arises (a hole that silently vanishes is a part cut
+            // without it).
+            let mut up = parent[j];
+            while let Some(p) = up {
+                if part_of[p].is_some() {
+                    break;
+                }
+                up = parent[p];
             }
-            let (Some(o), Some(inner)) = (ob, with_area[j].1.bounds()) else { continue };
-            // Containment by bounding box. Exact containment needs a
-            // point-in-polygon test per candidate; for the flat parts this
-            // toolchain cuts, a bbox test has never been the limiting factor —
-            // and where it would be, the parts overlap and the drawing is
-            // ambiguous anyway.
-            if inner.0 >= o.0 && inner.1 >= o.1 && inner.2 <= o.2 && inner.3 <= o.3 {
-                used[j] = true;
-                part = part.with_hole(with_area[j].1.clone());
+            if let Some(k) = up.and_then(|p| part_of[p]) {
+                let p = std::mem::replace(&mut parts[k], Part::new(String::new(), with_area[j].1.clone()));
+                parts[k] = p.with_hole(with_area[j].1.clone());
             }
         }
-        parts.push(part);
     }
     parts
 }
@@ -2964,19 +3266,52 @@ mod tests {
     #[allow(non_snake_case)]
     #[test]
     fn a_viewBox_defines_the_coordinate_space_and_beats_a_physical_height() {
-        // `height="210mm" viewBox="0 0 100 50"` is an ordinary pairing: the
-        // geometry is written in the viewBox's user units, and the height is a
-        // physical size in different units entirely. Reading `height` there
-        // would flip about 210 and put the part 160 units away.
-        let svg = r#"<svg width="297mm" height="210mm" viewBox="0 0 100 50"><rect x="10" y="10" width="20" height="10"/></svg>"#;
+        // `height="100mm" viewBox="0 0 100 50"`: the geometry is written in the
+        // viewBox's user units, and width/height say what one unit measures
+        // (2 mm here). Reading `height` as the flip would put the part 50 units
+        // away; reading user units as mm would cut it half-size.
+        let svg = r#"<svg width="200mm" height="100mm" viewBox="0 0 100 50"><rect x="10" y="10" width="20" height="10"/></svg>"#;
         let r = parse_svg(svg, 999.0, 0.01);
         assert!(!r.contours.is_empty(), "the rect did not import: {:?}", r.unsupported);
-        let ys: Vec<f64> = r.contours[0].verts.iter().map(|v| v.y).collect();
+        let b = r.contours[0].bounds().expect("a rect");
         assert!(
-            ys.iter().any(|y| (*y - 40.0).abs() < 1e-9),
-            "svg y=10 in a 50-tall viewBox must flip to 40, got {ys:?} — the reader used the \
-             physical height instead of the user-unit space"
+            (b.0 - 20.0).abs() < 1e-9 && (b.1 - 60.0).abs() < 1e-9 && (b.2 - 60.0).abs() < 1e-9 && (b.3 - 80.0).abs() < 1e-9,
+            "svg rect (10,10 20x10) in a 50-tall viewBox at 2 mm/unit must land at x 20..60, y 60..80, got {b:?}"
         );
+    }
+
+    #[test]
+    fn an_svg_physical_size_scales_user_units_and_a_mismatched_aspect_is_refused() {
+        // 🔴 Before 2026-11-14 user units were ALWAYS millimetres: this 100 mm
+        // drawing at 10 units/mm imported a 500 mm square from a 50 mm one.
+        let r = parse_svg(
+            r#"<svg width="100mm" height="100mm" viewBox="0 0 1000 1000"><rect x="0" y="0" width="500" height="500"/></svg>"#,
+            999.0,
+            0.01,
+        );
+        let b = r.contours[0].bounds().expect("a rect");
+        assert!((b.2 - b.0 - 50.0).abs() < 1e-9 && (b.3 - b.1 - 50.0).abs() < 1e-9, "read {b:?}");
+        assert!((b.1 - 50.0).abs() < 1e-9, "flip about the scaled height: {b:?}");
+        // viewBox minX/minY: the drawing's own corner lands at the origin.
+        let r = parse_svg(
+            r#"<svg viewBox="-50 -20 200 100"><rect x="-50" y="60" width="10" height="20"/></svg>"#,
+            999.0,
+            0.01,
+        );
+        let b = r.contours[0].bounds().expect("a rect");
+        assert!(b.0.abs() < 1e-9 && b.1.abs() < 1e-9, "viewBox corner not at origin: {b:?}");
+        // No viewBox + physical height: user units are CSS px.
+        let r = parse_svg(r#"<svg width="96px" height="25.4mm"><rect x="0" y="0" width="96" height="96"/></svg>"#, 999.0, 0.01);
+        let b = r.contours[0].bounds().expect("a rect");
+        assert!((b.2 - 25.4).abs() < 1e-9 && b.1.abs() < 1e-9, "96 px must be 25.4 mm: {b:?}");
+        // Non-uniform: the preserveAspectRatio fit is not read, so refused.
+        let r = parse_svg(
+            r#"<svg width="297mm" height="210mm" viewBox="0 0 100 50"><rect x="10" y="10" width="20" height="10"/></svg>"#,
+            999.0,
+            0.01,
+        );
+        assert!(r.contours.is_empty(), "a non-uniform fit was imported: {:?}", r.contours);
+        assert!(r.unsupported.iter().any(|u| u.contains("preserveAspectRatio")), "{:?}", r.unsupported);
     }
 
     #[test]
@@ -3220,6 +3555,97 @@ mod tests {
     }
 
     #[test]
+    fn svg_attributes_are_whole_names_and_bad_shapes_are_named_not_guessed() {
+        // 🔴 `width="` matched inside `stroke-width="` (a 100mm rect read 0.5mm
+        // wide), `x="` inside `rx="`; an odd <polygon> panicked the reader.
+        let svg = |body: &str| format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 200 200\">{body}</svg>");
+        let r = parse_svg(&svg(r#"<rect stroke-width="0.5" x="10" y="10" width="100" height="50"/>"#), 200.0, 0.01);
+        let b = r.contours[0].bounds().expect("a rect");
+        assert!((b.2 - b.0 - 100.0).abs() < 1e-6, "rect read {} wide", b.2 - b.0);
+        assert!((b.0 - 10.0).abs() < 1e-6, "rect read at x={}", b.0);
+        let rounded = parse_svg(&svg(r#"<rect rx="5" ry="5" x="40" y="40" width="100" height="50"/>"#), 200.0, 0.01);
+        assert!(rounded.contours.is_empty() && rounded.unsupported.iter().any(|u| u.contains("rounded")), "{:?}", rounded.unsupported);
+        let odd = parse_svg(&svg(r#"<polygon points="10,10 100,10 100,100 10"/>"#), 200.0, 0.01);
+        assert!(odd.contours.is_empty() && odd.unsupported.iter().any(|u| u.contains("not x,y pairs")), "{:?}", odd.unsupported);
+        let junk = parse_svg(&svg(r#"<polygon points="10,10 100,abc 100,100 10,100"/>"#), 200.0, 0.01);
+        assert!(junk.contours.is_empty(), "a non-number was dropped and the rest re-paired");
+    }
+
+    #[test]
+    fn a_part_drawn_in_another_parts_window_is_a_part_with_its_own_hole() {
+        // bughunt 2026-11-15: frame + window + disc in the window + hole in the disc
+        // became ONE part with three holes, and the disc was cut as an inside profile.
+        let rect = |x: f64, y: f64, w: f64, h: f64| {
+            Contour::closed(vec![Vertex::line(x, y), Vertex::line(x + w, y), Vertex::line(x + w, y + h), Vertex::line(x, y + h)])
+        };
+        let imp = Imported {
+            contours: vec![rect(0.0, 0.0, 200.0, 200.0), rect(20.0, 20.0, 160.0, 160.0), Contour::circle(100.0, 100.0, 40.0), Contour::circle(100.0, 100.0, 10.0)],
+            ..Default::default()
+        };
+        let parts = to_parts(&imp, "p");
+        assert_eq!(parts.len(), 2, "the disc in the window is not its own part");
+        assert_eq!((parts[0].inners.len(), parts[1].inners.len()), (1, 1));
+        // An L-shaped cutout's BBOX holds a hole that is in the material, not in the cutout.
+        let l = Contour::closed(vec![
+            Vertex::line(10.0, 10.0), Vertex::line(90.0, 10.0), Vertex::line(90.0, 30.0),
+            Vertex::line(30.0, 30.0), Vertex::line(30.0, 90.0), Vertex::line(10.0, 90.0),
+        ]);
+        let imp = Imported { contours: vec![rect(0.0, 0.0, 100.0, 100.0), l, Contour::circle(60.0, 60.0, 5.0)], ..Default::default() };
+        let parts = to_parts(&imp, "p");
+        assert_eq!(parts.len(), 1, "a hole beside the L cutout was made a part");
+        assert_eq!(parts[0].inners.len(), 2);
+    }
+
+    #[test]
+    fn a_second_copy_of_an_outline_is_not_a_hole_the_size_of_the_part() {
+        // 🔴 A HATCH boundary over the same polyline is a coincident copy; the
+        // >=/<= containment test made it a hole equal to the outline.
+        let rect = |x: f64, y: f64, w: f64, h: f64| {
+            Contour::closed(vec![Vertex::line(x, y), Vertex::line(x + w, y), Vertex::line(x + w, y + h), Vertex::line(x, y + h)])
+        };
+        let imp = Imported { contours: vec![rect(0.0, 0.0, 100.0, 60.0), rect(0.0, 0.0, 100.0, 60.0), rect(20.0, 20.0, 10.0, 10.0)], ..Default::default() };
+        let parts = to_parts(&imp, "p");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].inners.len(), 1, "the copy became a hole: {} inner(s)", parts[0].inners.len());
+        // Control: two equal parts side by side are NOT copies.
+        let two = Imported { contours: vec![rect(0.0, 0.0, 50.0, 50.0), rect(80.0, 0.0, 50.0, 50.0)], ..Default::default() };
+        assert_eq!(to_parts(&two, "p").len(), 2, "two equal parts were merged as copies");
+    }
+
+    #[test]
+    fn a_sparse_bulge_inside_a_block_lands_on_its_own_vertex() {
+        // 🔴 The block reader paired code 42 with vertices by position: a bulge
+        // written after the 3rd vertex rounded the edge from the 1st.
+        let dxf = "0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nP\n10\n0\n20\n0\n\
+0\nLWPOLYLINE\n90\n4\n70\n1\n10\n0\n20\n0\n10\n100\n20\n0\n10\n100\n20\n50\n42\n0.5\n10\n0\n20\n50\n\
+0\nENDBLK\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nINSERT\n2\nP\n10\n20\n20\n20\n0\nENDSEC\n0\nEOF\n";
+        let r = parse_dxf(dxf, 0.01);
+        let c = r.contours.iter().find(|c| c.closed).expect("the block's polyline did not import");
+        let bulged: Vec<(f64, f64)> = c.verts.iter().filter(|v| v.bulge.abs() > 1e-9).map(|v| (v.x, v.y)).collect();
+        assert_eq!(bulged, vec![(120.0, 70.0)], "the bulge landed on {bulged:?}, not the 3rd vertex (100,50)+(20,20)");
+    }
+
+    #[test]
+    fn an_entity_in_a_mirrored_plane_is_named_not_read_flat() {
+        // 🔴 AutoCAD's MIRROR writes extrusion 230 = -1 (X negated). The points
+        // were read flat, so a hole drawn at x=-30 was cut at x=+30, no note.
+        let circle = |ext: &str| {
+            format!("0\nSECTION\n2\nENTITIES\n0\nCIRCLE\n10\n30.0\n20\n50.0\n40\n5.0\n{ext}0\nENDSEC\n0\nEOF\n")
+        };
+        // Positive control: the same circle in the default plane imports.
+        let flat = parse_dxf(&circle(""), 0.01);
+        assert_eq!(flat.contours.len(), 1, "the control circle did not import");
+        assert!(flat.unsupported.is_empty(), "{:?}", flat.unsupported);
+        let mirrored = parse_dxf(&circle("210\n0.0\n220\n0.0\n230\n-1.0\n"), 0.01);
+        assert!(mirrored.contours.is_empty(), "a mirrored circle was imported flat");
+        assert!(
+            mirrored.unsupported.iter().any(|u| u.contains("CIRCLE") && u.contains("extrusion")),
+            "the mirrored circle was not named: {:?}",
+            mirrored.unsupported
+        );
+    }
+
+    #[test]
     fn lwpolyline_bulges_land_on_the_right_vertices() {
         // 🔴 Bulges are SPARSE in a DXF — only the vertices that have one carry
         // a code 42. Zipping the 42s positionally against the 10s puts every arc
@@ -3237,6 +3663,88 @@ mod tests {
                 c.verts.iter().map(|v| v.bulge).collect::<Vec<_>>());
         assert!(c.verts[0].bulge.abs() < 1e-9);
         assert!(c.verts[2].bulge.abs() < 1e-9);
+    }
+
+    /// A DXF with `$INSUNITS = code` and one CIRCLE of radius 3 drawing units at (5, 5).
+    fn circle_dxf(insunits: &str) -> String {
+        format!(
+            "0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n{insunits}\n0\nENDSEC\n\
+0\nSECTION\n2\nENTITIES\n0\nCIRCLE\n8\n0\n10\n5\n20\n5\n30\n0\n40\n3\n0\nENDSEC\n0\nEOF\n"
+        )
+    }
+
+    /// The property, as a predicate a planted parser can be fed: a declared length unit is
+    /// SCALED (r = 3 drawing units → Ø 6·unit mm), and a declared non-length value is REFUSED
+    /// (nothing imported, the reason in `unsupported`). `Err` names the first violation.
+    fn insunits_are_honoured(parse: &dyn Fn(&str) -> Imported) -> Result<(), String> {
+        for (code, mm) in [("5", 10.0), ("6", 1000.0), ("4", 1.0), ("1", 25.4), ("14", 100.0), ("9", 0.0254)] {
+            let r = parse(&circle_dxf(code));
+            let Some((x0, _, x1, _)) = r.contours.first().and_then(|c| c.bounds()) else {
+                return Err(format!("$INSUNITS {code}: nothing imported ({:?})", r.unsupported));
+            };
+            let want = 6.0 * mm;
+            if ((x1 - x0) - want).abs() > 1e-9 * want.max(1.0) {
+                return Err(format!("$INSUNITS {code}: Ø{} mm, want Ø{want} mm ({})", x1 - x0, r.unit_note));
+            }
+        }
+        for bad in ["0", "25", "99", "-1", "cm"] {
+            let r = parse(&circle_dxf(bad));
+            if !r.contours.is_empty() || !r.unsupported.iter().any(|u| u.contains("$INSUNITS")) {
+                return Err(format!(
+                    "$INSUNITS {bad}: imported {} contour(s) as '{}' instead of refusing",
+                    r.contours.len(),
+                    r.unit_note
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn insunits_length_codes_scale_and_non_length_codes_refuse() {
+        // Review r3, 2026-11-12: a cm drawing (r = 3 cm) planned Ø6 mm — 10x small.
+        insunits_are_honoured(&|t| parse_dxf(t, 0.01)).unwrap();
+        // Absent stays the documented ruling (F4): mm ASSUMED and said so, not refused.
+        let r = parse_dxf(PLATE_DXF, 0.01);
+        assert!(!r.contours.is_empty() && r.unit_note.contains("ASSUMED"), "{}", r.unit_note);
+        // Every code the spec defines 1..=24 maps; 0 and 25 do not.
+        assert!((1..=24).all(|c| insunits_to_mm(c).is_some()));
+        assert!(insunits_to_mm(0).is_none() && insunits_to_mm(25).is_none());
+        assert!((insunits_to_mm(22).unwrap().1 - 25.4000508).abs() < 1e-6, "US survey inch");
+    }
+
+    /// A square outline in METRES (100 mm) with a 15 mm gap left open at one corner.
+    fn open_square_m(insunits: &str) -> String {
+        let mut s = format!("0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n{insunits}\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n");
+        for (a, b, c, d) in [(0.0, 0.0, 0.1, 0.0), (0.1, 0.0, 0.1, 0.1), (0.1, 0.1, 0.0, 0.1), (0.0, 0.1, 0.0, 0.015)] {
+            s.push_str(&format!("0\nLINE\n8\n0\n10\n{a}\n20\n{b}\n11\n{c}\n21\n{d}\n"));
+        }
+        s.push_str("0\nENDSEC\n0\nEOF\n");
+        s
+    }
+
+    #[test]
+    fn the_chain_tolerance_is_millimetres_whatever_the_drawing_units() {
+        // Bughunt 2026-11-13: tol (0.02 mm) was applied to the drawing's own numbers, so a
+        // metre drawing chained at 20 mm and a 15 mm gap closed into a part edge.
+        let r = parse_dxf(&open_square_m("6"), 0.02);
+        assert!(!r.contours.iter().any(|c| c.closed), "a 15 mm gap was closed: {:?}", r.contours);
+        assert_eq!(r.open_contours, 1, "the open outline must be reported open");
+        // Control: the same outline with the gap shut (0.015 -> 0.0) closes, in metres too.
+        let shut = parse_dxf(&open_square_m("6").replace("21\n0.015\n", "21\n0\n"), 0.02);
+        assert!(shut.contours.len() == 1 && shut.contours[0].closed, "a closed metre outline must still close");
+    }
+
+    #[test]
+    fn plant_insunits_read_as_millimetres_turns_the_unit_test_red() {
+        // 🔴 PLANT: the pre-2026-11-12 reader, reproduced exactly — the declared value is not
+        // honoured, so the drawing imports as millimetres ASSUMED. The predicate above must fail.
+        let planted = |t: &str| {
+            let stripped = t.replacen("9\n$INSUNITS\n70\n", "999\nX\n999\n", 1);
+            parse_dxf(&stripped, 0.01)
+        };
+        let err = insunits_are_honoured(&planted).expect_err("the plant did not turn the unit check red");
+        assert!(err.contains("$INSUNITS 5") && err.contains("want Ø60"), "fired for the wrong reason: {err}");
     }
 
     #[test]

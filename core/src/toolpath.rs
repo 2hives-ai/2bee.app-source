@@ -180,6 +180,50 @@ pub fn nonfinite_refusal(name: &str, path: &Toolpath) -> Option<Refusal> {
     })
 }
 
+/// Area of an OUTER boundary a cutter of `radius_mm` running outside it cannot
+/// produce, beyond the rounded-inside-corner allowance — `(lost, allowance,
+/// concave corners)`, or `None` when nothing is lost. The model is described
+/// on [`unreachable_feature_note`]; `recommend` asks the same question so it
+/// does not pick a cutter wider than a notch (bughunt 2026-11-15).
+pub(crate) fn unreachable_area_mm2(c: &Contour, radius_mm: f64) -> Option<(f64, f64, usize)> {
+    if !c.closed || c.verts.len() < 4 || !(radius_mm > 0.0) {
+        return None;
+    }
+    let area0 = c.signed_area().abs();
+    if !(area0 > 0.0) {
+        return None;
+    }
+    // Out then back. `offset` returns the loops the library kept.
+    let round_trip: f64 = c
+        .offset(radius_mm)
+        .iter()
+        .flat_map(|o| o.offset(-radius_mm))
+        .map(|x| x.signed_area().abs())
+        .sum();
+    if !round_trip.is_finite() || round_trip <= area0 {
+        return None;
+    }
+
+    // The corner-radius budget: (4 - PI)/4 * r^2 per CONCAVE corner, +50%.
+    let n = c.verts.len();
+    let sign = c.signed_area().signum();
+    let mut concave = 0usize;
+    for i in 0..n {
+        let (p, q, r) = (c.verts[(i + n - 1) % n], c.verts[i], c.verts[(i + 1) % n]);
+        let cross = (q.x - p.x) * (r.y - q.y) - (q.y - p.y) * (r.x - q.x);
+        if cross * sign < 0.0 {
+            concave += 1;
+        }
+    }
+    let per_corner = (4.0 - std::f64::consts::PI) / 4.0 * radius_mm * radius_mm;
+    let allowance = (concave as f64 * per_corner * 1.5).max(0.5);
+    let lost = round_trip - area0;
+    if lost <= allowance {
+        return None;
+    }
+    Some((lost, allowance, concave))
+}
+
 /// Refuse an operation whose PARAMETERS are not finite, before any planner reads
 /// them — naming the field.
 ///
@@ -296,42 +340,7 @@ pub fn nonfinite_refusal(name: &str, path: &Toolpath) -> Option<Refusal> {
 /// the operator meant, and refusing every part with an unreachable pocket would
 /// refuse ordinary work. So it says what was lost and how much.
 fn unreachable_feature_note(op: &Operation, radius_mm: f64) -> Option<String> {
-    let c = &op.contour;
-    if !c.closed || c.verts.len() < 4 || !(radius_mm > 0.0) {
-        return None;
-    }
-    let area0 = c.signed_area().abs();
-    if !(area0 > 0.0) {
-        return None;
-    }
-    // Out then back. `offset` returns the loops the library kept.
-    let round_trip: f64 = c
-        .offset(radius_mm)
-        .iter()
-        .flat_map(|o| o.offset(-radius_mm))
-        .map(|x| x.signed_area().abs())
-        .sum();
-    if !round_trip.is_finite() || round_trip <= area0 {
-        return None;
-    }
-
-    // The corner-radius budget: (4 - PI)/4 * r^2 per CONCAVE corner, +50%.
-    let n = c.verts.len();
-    let sign = c.signed_area().signum();
-    let mut concave = 0usize;
-    for i in 0..n {
-        let (p, q, r) = (c.verts[(i + n - 1) % n], c.verts[i], c.verts[(i + 1) % n]);
-        let cross = (q.x - p.x) * (r.y - q.y) - (q.y - p.y) * (r.x - q.x);
-        if cross * sign < 0.0 {
-            concave += 1;
-        }
-    }
-    let per_corner = (4.0 - std::f64::consts::PI) / 4.0 * radius_mm * radius_mm;
-    let allowance = (concave as f64 * per_corner * 1.5).max(0.5);
-    let lost = round_trip - area0;
-    if lost <= allowance {
-        return None;
-    }
+    let (lost, allowance, concave) = unreachable_area_mm2(&op.contour, radius_mm)?;
     Some(format!(
         "{}: {lost:.1}mm² of this outline CANNOT BE PRODUCED by a {:.2}mm cutter and is not in \
          the program — a slot, notch or pocket narrower than the tool is closed by the offset and \
@@ -693,6 +702,43 @@ fn segments(c: &Contour) -> Vec<Seg> {
         let a = c.verts[i];
         let b = c.verts[(i + 1) % n];
         out.push(Seg { to_x: b.x, to_y: b.y, arc: arc_of((a.x, a.y), (b.x, b.y), a.bulge) });
+    }
+    out
+}
+
+/// Length of each segment, starting from `start`. An arc is measured along its
+/// own DIRECTION, the way `point_at` walks it.
+///
+/// 🔴 It used to fold |a1 - a0| to <= 180 deg, which took the short way round:
+/// a bulge arc over 180 deg (LWPOLYLINE bulge > 1) was measured as its
+/// complement, so every tab and the ramp end after it landed at the wrong
+/// distance along the contour, while `auto_tabs` spread them over the TRUE
+/// perimeter from `path_length`. The two must agree.
+fn seg_lengths(start: (f64, f64), segs: &[Seg]) -> Vec<f64> {
+    let mut out = Vec::with_capacity(segs.len());
+    let mut c = start;
+    for s in segs {
+        let l = match s.arc {
+            None => ((s.to_x - c.0).powi(2) + (s.to_y - c.1).powi(2)).sqrt(),
+            Some((cx, cy, cw)) => {
+                let r0 = ((c.0 - cx).powi(2) + (c.1 - cy).powi(2)).sqrt();
+                let a0 = (c.1 - cy).atan2(c.0 - cx);
+                let a1 = (s.to_y - cy).atan2(s.to_x - cx);
+                let mut sweep = a1 - a0;
+                if cw {
+                    while sweep > 0.0 {
+                        sweep -= std::f64::consts::TAU;
+                    }
+                } else {
+                    while sweep < 0.0 {
+                        sweep += std::f64::consts::TAU;
+                    }
+                }
+                r0 * sweep.abs()
+            }
+        };
+        out.push(l);
+        c = (s.to_x, s.to_y);
     }
     out
 }
@@ -1916,7 +1962,12 @@ pub fn plan_profile_with_edge_rule(
             (v.x, v.y)
         };
 
+        // The floor the previous pass left (Z0 before the first). A ramp starts
+        // HERE, not at Z0 — see `entry_z` below.
+        let mut prev_floor = 0.0_f64;
         for z in depth_passes(depth, op.params.depth_per_pass_mm) {
+            let top = prev_floor;
+            prev_floor = z;
             // 🔴 THE RETRACT HEIGHT IS `machine.safe_z_mm` AND NOTHING ELSE —
             // it does NOT account for the declared clamps, and a reader who
             // assumes it does is making the mistake this comment exists to
@@ -1954,7 +2005,15 @@ pub fn plan_profile_with_edge_rule(
             // contour over `ramp_len` and then CONTINUES from where the ramp
             // ended — it never restarts at index 0, which is the defect that cut
             // a full-depth chord across a finished part.
-            let entry_z = if plunging { z } else { 0.0 };
+            //
+            // 🔴 ...AND ON EVERY LATER PASS IT STOPS AT THE PREVIOUS PASS'S FLOOR.
+            // It used to stop at Z0 on every pass, so the ramp re-descended the
+            // whole depth over `ramp_len`: on the last pass of `job plate` the
+            // ramp went X78 Z-16.2 -> X80 Z-18, 42 degrees into fresh ply —
+            // steeper with every pass, and gate ENT stays green because a ramp
+            // is "present". The slot above `top` is already open, so the
+            // vertical descent to it cuts nothing.
+            let entry_z = if plunging { z } else { top };
             let ramping = !plunging;
             // 🔴 The ramp must fit the contour. A 20mm ramp on a 12mm ring
             // never reaches depth, and the pass leaves material everywhere the
@@ -1964,27 +2023,7 @@ pub fn plan_profile_with_edge_rule(
             let ramp_len = op.params.ramp_length_mm.max(1e-6).min(perim * 0.5);
 
             // Per-segment arc length, computed once and shared by both laps.
-            let mut seg_len = Vec::with_capacity(segs.len());
-            {
-                let mut c = start;
-                for s in &segs {
-                    let l = match s.arc {
-                        None => ((s.to_x - c.0).powi(2) + (s.to_y - c.1).powi(2)).sqrt(),
-                        Some((cx, cy, _)) => {
-                            let r0 = ((c.0 - cx).powi(2) + (c.1 - cy).powi(2)).sqrt();
-                            let a0 = (c.1 - cy).atan2(c.0 - cx);
-                            let a1 = (s.to_y - cy).atan2(s.to_x - cx);
-                            let mut d = (a1 - a0).abs();
-                            if d > std::f64::consts::PI {
-                                d = std::f64::consts::TAU - d;
-                            }
-                            r0 * d
-                        }
-                    };
-                    seg_len.push(l);
-                    c = (s.to_x, s.to_y);
-                }
-            }
+            let seg_len = seg_lengths(start, &segs);
 
             // 🔴 THE TAB RULE LIVES IN ONE PLACE AND BOTH LAPS USE IT.
             //
@@ -2054,27 +2093,43 @@ pub fn plan_profile_with_edge_rule(
                     let n = ((l / (op.params.tabs.width_mm.max(1.0) * 0.25)).ceil() as usize)
                         .clamp(1, 512);
                     let mut prev_z: Option<f64> = None;
+                    // The last sample that was SKIPPED (same Z as the one before it).
+                    let mut skipped: Option<f64> = None;
+                    let push = |mv: &mut Vec<Move>, f: f64, z_at: f64| {
+                        let (px, py) = point_at(s, from, f);
+                        match s.arc {
+                            None => mv.push(Move::feed_to(Vec3::new(px, py, z_at), feed)),
+                            Some((cx, cy, cw)) => {
+                                mv.push(Move::arc(cw, Vec3::new(px, py, z_at), Vec2::new(cx, cy), feed))
+                            }
+                        }
+                    };
                     for k in 1..=n {
                         let f = k as f64 / n as f64;
                         let d = travelled + l * f;
-                        let z_ramp = if ramp && d < ramp_len { z * d / ramp_len } else { z };
+                        let z_ramp =
+                            if ramp && d < ramp_len { top + (z - top) * d / ramp_len } else { z };
                         let z_use =
                             if in_tab(d) { (z + tab_height).min(0.0) } else { z_ramp };
                         let is_last = k == n;
+                        let changes = prev_z.map(|p| (p - z_use).abs() > 1e-9).unwrap_or(true);
                         // Emit only where Z changes or at the segment end —
                         // this is what keeps a plain edge one move.
-                        if prev_z.map(|p| (p - z_use).abs() > 1e-9).unwrap_or(true) || is_last {
-                            let (px, py) = point_at(s, from, f);
-                            match s.arc {
-                                None => mv.push(Move::feed_to(Vec3::new(px, py, z_use), feed)),
-                                Some((cx, cy, cw)) => mv.push(Move::arc(
-                                    cw,
-                                    Vec3::new(px, py, z_use),
-                                    Vec2::new(cx, cy),
-                                    feed,
-                                )),
+                        if changes || is_last {
+                            // 🔴 Close the flat run at its OWN Z first. Without this the move
+                            // from the last EMITTED point to here blended Z across the whole
+                            // skipped run: `job plate` cut `X80 Z-18 -> X122 Z-15`, a 42 mm
+                            // wedge where an 8 mm flat tab belonged (bughunt 2026-11-14).
+                            if changes {
+                                if let (Some(fs), Some(pz)) = (skipped, prev_z) {
+                                    push(mv, fs, pz);
+                                }
                             }
+                            push(mv, f, z_use);
                             prev_z = Some(z_use);
+                            skipped = None;
+                        } else {
+                            skipped = Some(f);
                         }
                     }
                     travelled += l;
@@ -2192,11 +2247,20 @@ pub fn plan_profile_with_edge_rule(
             // ---- tangential lead-out -------------------------------------
             // Leaving along the wall marks the finished edge just as arriving
             // along it does, so the exit is an arc away into the waste too.
-            if let Some((a, c, cw)) = lead {
-                mv.push(Move::arc(!cw, Vec3::new(a.0, a.1, z), Vec2::new(c.0, c.1), feed));
-            }
+            //
+            // 🔴 The retract is a pure lift WHERE THE TOOL IS. It used to rapid
+            // to `lap_end` at safe Z — right without a lead, but after a
+            // lead-out the tool sits at `a`, so that one G0 was a diagonal
+            // rapid from full depth back across the uncut waste.
+            let exit = match lead {
+                Some((a, c, cw)) => {
+                    mv.push(Move::arc(!cw, Vec3::new(a.0, a.1, z), Vec2::new(c.0, c.1), feed));
+                    a
+                }
+                None => lap_end,
+            };
 
-            mv.push(Move::rapid(Vec3::new(lap_end.0, lap_end.1, machine.safe_z_mm)));
+            mv.push(Move::rapid(Vec3::new(exit.0, exit.1, machine.safe_z_mm)));
         }
     }
 
@@ -2306,11 +2370,12 @@ pub fn plan_drill(op: &Operation, machine: &Machine, stock: &Stock) -> PlanResul
         return res;
     }
 
-    let feed = if op.params.feed_mm_min > 0.0 {
-        op.params.feed_mm_min
-    } else {
-        op.params.plunge_mm_min
-    };
+    // 🔴 G83's F IS THE Z FEED. This used `feed_mm_min` — the SIDEWAYS cutting
+    // feed — whenever one was set, so on `job plate` / `job socket` an end mill
+    // pecked 18 mm into ply at F3600 while the same tool's profile entry ran at
+    // F300 and the corner reliefs (same cycle, below) at plunge feed. The end of
+    // a router flute is not a drill point: 12x its plunge rate snaps it.
+    let feed = op.params.plunge_mm_min;
     let depth = op.params.depth_total_mm.min(stock.thickness_mm + 0.3);
 
     let mut mv = vec![Move::comment(drill_banner(&op.name, &op.tool.name))];
@@ -2491,6 +2556,21 @@ pub fn group_by_tool(ops: Vec<Operation>) -> Vec<(Tool, Vec<Operation>)> {
 }
 
 /// Build the parts of a plate: outer profile plus one operation per hole.
+/// The most a round hole's DIAMETER may differ from a cutter's and still be
+/// DRILLED with it (plunged to size) rather than interpolated.
+///
+/// 🔴 ONE RULE FOR EVERY DOOR. The planner here and `job.rs` tested the RADIUS
+/// within 0.05 — 0.10 on diameter — while `recommend` tested the diameter within
+/// 0.05, so a Ø6.08 hole with a 6mm cutter was told "interpolated rather than
+/// drilled to the wrong size" and then emitted `G83` with the end mill: a hole
+/// 0.08 under the drawing, described as the opposite (bughunt 2026-11-15).
+pub const DRILL_DIAMETER_TOL_MM: f64 = 0.05;
+
+/// Whether a hole of radius `hole_r` is drilled to size by a cutter of `tool_r`.
+pub fn drills_to_size(hole_r: f64, tool_r: f64) -> bool {
+    (2.0 * (hole_r - tool_r)).abs() <= DRILL_DIAMETER_TOL_MM
+}
+
 pub fn operations_for_part(
     part: &Part,
     tool: &Tool,
@@ -2504,7 +2584,7 @@ pub fn operations_for_part(
         // that has no path to follow.
         let drillable = h
             .as_circle()
-            .map(|(_, _, r)| (r - tool.radius_mm()).abs() <= 0.05)
+            .map(|(_, _, r)| drills_to_size(r, tool.radius_mm()))
             .unwrap_or(false);
         ops.push(Operation {
             name: format!("{}-hole{}", part.name, i + 1),
@@ -2882,6 +2962,44 @@ mod tests {
                 r.refusals
             );
         }
+    }
+
+    /// Bughunt 2026-11-14: the lap emitted a sample only where Z CHANGED, so the move
+    /// into a tab started at the last EMITTED point and blended Z across the whole flat
+    /// run before it — `job plate` cut `X80 Z-18 -> X122 Z-15`, a 42 mm wedge for an 8 mm
+    /// tab. Every move that changes Z must now span at most one sample step (width / 4).
+    #[test]
+    fn a_tab_is_entered_over_one_sample_step_never_blended_across_the_flat_run_before_it() {
+        let mut long = Contour::default();
+        for (x, y) in [(0.0, 0.0), (200.0, 0.0), (200.0, 40.0), (0.0, 40.0)] {
+            long.verts.push(Vertex::line(x, y));
+        }
+        long.closed = true;
+        let mut o = op("p", long, CutSide::Outside);
+        o.params.entry = EntryMode::Plunge;
+        o.params.tabs = TabSpec { enabled: true, height_mm: 2.5, width_mm: 8.0, count: 2, min_spacing_mm: 20.0 };
+        let r = plan_operation(&o, &Machine::default(), &Stock::default());
+        assert!(r.refusals.is_empty(), "{:?}", r.refusals);
+        let step = o.params.tabs.width_mm * 0.25 + 1e-6;
+        let (mut prev, mut tab_moves, mut worst) = (None::<Vec3>, 0, 0.0_f64);
+        for m in &r.path.moves {
+            if matches!(m.kind, MoveKind::Feed | MoveKind::ArcCW | MoveKind::ArcCCW) {
+                if let Some(p) = prev {
+                    if (m.to.z - p.z).abs() > 1e-6 && p.z < -1e-6 && m.to.z < -1e-6 {
+                        let run = (m.to.x - p.x).hypot(m.to.y - p.y);
+                        if run > 0.0 { tab_moves += 1; }
+                        worst = worst.max(run);
+                    }
+                }
+            }
+            prev = Some(m.to);
+        }
+        assert!(tab_moves > 0, "no tab edge was found at all — the check would pass on a path with no tabs");
+        assert!(
+            worst <= step,
+            "a move changed Z over {worst:.3} mm of travel; a tab edge is one sample step ({step:.3} mm) — \
+             the rest is a wedge of uncut ply the part stays joined by"
+        );
     }
 
     #[test]
@@ -3466,6 +3584,45 @@ mod tests {
     }
 
     #[test]
+    fn a_character_reported_unmarked_is_not_cut_as_something_else() {
+        // bughunt 2026-11-15: `ß` has no glyph and was reported "NOT marked", while the label
+        // was cut from `to_uppercase()`, which turns `ß` into `SS` — two letters the operator
+        // was told would not be there.
+        let mk = |name: &str| {
+            let part = Part::new(name, Contour::rect(0.0, 0.0, 200.0, 100.0));
+            marking_ops(&part, &tool6(), 8.0, 0.4, &OperationParams::default())
+        };
+        let (with, bad) = mk("Maß");
+        assert_eq!(bad, vec!['ß']);
+        assert_eq!(with.len(), mk("Ma").0.len(), "the unmarked ß was cut as other strokes");
+    }
+
+    #[test]
+    fn a_label_is_not_placed_on_a_part_that_is_not_its_bounding_box() {
+        // A 100mm disc: the bbox test passed and the label's corners were cut outside the outline.
+        let disc = Part::new("disc", Contour::circle(50.0, 50.0, 50.0));
+        let (ops, _) = marking_ops(&disc, &tool6(), 8.0, 0.4, &OperationParams::default());
+        assert!(ops.is_empty(), "a label was placed by bounding box on a disc");
+        // A hole under the label: the strokes would cut across it.
+        let holed = Part::new("plate", Contour::rect(0.0, 0.0, 200.0, 100.0)).with_hole(Contour::circle(100.0, 12.0, 5.0));
+        assert!(marking_ops(&holed, &tool6(), 8.0, 0.4, &OperationParams::default()).0.is_empty());
+        // The plain rectangle still gets its mark.
+        let plate = Part::new("plate", Contour::rect(0.0, 0.0, 200.0, 100.0));
+        assert!(!marking_ops(&plate, &tool6(), 8.0, 0.4, &OperationParams::default()).0.is_empty());
+    }
+
+    #[test]
+    fn a_hole_is_drilled_only_within_the_diameter_tolerance_recommend_uses() {
+        // Ø6.08 with a 6mm cutter: recommend says "interpolated", so the planner must not drill it.
+        let kind = |d: f64| {
+            let part = Part::new("p", Contour::rect(0.0, 0.0, 100.0, 100.0)).with_hole(Contour::circle(50.0, 50.0, d / 2.0));
+            operations_for_part(&part, &tool6(), &OperationParams::default())[0].params.op_type
+        };
+        assert_eq!(kind(6.08), OpType::Profile, "a Ø6.08 hole was drilled Ø6.00 with the end mill");
+        assert_eq!(kind(6.04), OpType::Drill);
+    }
+
+    #[test]
     fn inner_features_are_cut_before_the_outer_profile() {
         let part = Part::new("plate", Contour::rect(0.0, 0.0, 200.0, 100.0))
             .with_hole(Contour::circle(50.0, 50.0, 10.0))
@@ -3612,6 +3769,63 @@ mod tests {
     }
 
     #[test]
+    fn segment_lengths_sum_to_the_perimeter_with_an_arc_over_180_degrees() {
+        // 🔴 A keyhole: a 270 deg arc (bulge tan(270/4) = 2.414) closed by two
+        // lines. The arc length was folded to its 90 deg complement, so tabs
+        // were placed against a perimeter the contour does not have.
+        for bulge in [2.414_213_562, -2.414_213_562, 0.5, -0.5] {
+            let c = Contour::closed(vec![
+                Vertex::arc(10.0, 0.0, bulge),
+                Vertex::line(0.0, 10.0),
+                Vertex::line(0.0, 0.0),
+            ]);
+            let segs = segments(&c);
+            let sum: f64 = seg_lengths((10.0, 0.0), &segs).iter().sum();
+            let want = c.path_length();
+            assert!(
+                (sum - want).abs() < 1e-6,
+                "bulge {bulge}: segments sum to {sum:.4} mm, the contour is {want:.4} mm"
+            );
+        }
+    }
+
+    #[test]
+    fn every_pass_ramps_one_depth_step_not_the_whole_depth() {
+        // 🔴 The ramp used to restart at Z0 on every pass, so pass N descended
+        // N depth steps over the same ramp length: the last pass of an 18 mm
+        // cut entered fresh ply at 42 degrees (`job plate`: X78 Z-16.2 -> X80
+        // Z-18). Gate ENT stayed green because a ramp was present. Asserted on
+        // the moves: no cutting move descends steeper than one step per ramp.
+        let mut o = op("p", Contour::rect(50.0, 50.0, 120.0, 80.0), CutSide::Outside);
+        o.params.entry = EntryMode::Ramp;
+        o.params.tabs.enabled = false;
+        let r = plan_profile(&o, &Machine::default(), &Stock::default());
+        let ramp = o.params.ramp_length_mm;
+        let limit = o.params.depth_per_pass_mm / ramp * 1.001;
+        let mut at: Option<Vec3> = None;
+        let mut checked = 0;
+        for m in &r.path.moves {
+            if !matches!(m.kind, MoveKind::Rapid | MoveKind::Feed | MoveKind::ArcCW | MoveKind::ArcCCW) {
+                continue;
+            }
+            if let (MoveKind::Feed, Some(p)) = (m.kind, at) {
+                let dxy = ((m.to.x - p.x).powi(2) + (m.to.y - p.y).powi(2)).sqrt();
+                if dxy > 1e-9 && m.to.z < p.z - 1e-9 {
+                    checked += 1;
+                    assert!(
+                        (p.z - m.to.z) / dxy <= limit,
+                        "a ramp descends {:.3} mm over {:.3} mm from Z{:.3} (limit one {} mm \
+                         step per {} mm)",
+                        p.z - m.to.z, dxy, p.z, o.params.depth_per_pass_mm, ramp
+                    );
+                }
+            }
+            at = Some(m.to);
+        }
+        assert!(checked > 0, "no ramp descents were found to check");
+    }
+
+    #[test]
     fn a_lead_enters_and_leaves_on_an_arc_off_the_finished_edge() {
         let c = Contour::rect(50.0, 50.0, 120.0, 80.0);
         let mut o = op("p", c, CutSide::Outside);
@@ -3648,6 +3862,25 @@ mod tests {
             let inside = m.to.x > x0 + 1e-6 && m.to.x < x1 - 1e-6 && m.to.y > y0 + 1e-6
                 && m.to.y < y1 - 1e-6;
             assert!(!inside, "a lead move at ({}, {}) is inside the part", m.to.x, m.to.y);
+        }
+
+        // 🔴 ...and the tool leaves the lead-out straight UP. The retract used to
+        // target the lap end, so after a lead-out it was one diagonal G0 from
+        // full depth back across the uncut waste. Read on the moves, with the
+        // position carried only by moves that move the tool.
+        let mut at: Option<Vec3> = None;
+        for m in &led.path.moves {
+            if !matches!(m.kind, MoveKind::Rapid | MoveKind::Feed | MoveKind::ArcCW | MoveKind::ArcCCW) {
+                continue;
+            }
+            if let (MoveKind::Rapid, Some(p)) = (m.kind, at) {
+                assert!(
+                    p.z >= -1e-9 || ((m.to.x - p.x).abs() < 1e-9 && (m.to.y - p.y).abs() < 1e-9),
+                    "a rapid moves in XY from Z{:.3}: ({:.3},{:.3}) -> ({:.3},{:.3})",
+                    p.z, p.x, p.y, m.to.x, m.to.y
+                );
+            }
+            at = Some(m.to);
         }
     }
 
@@ -4330,7 +4563,9 @@ pub fn marking_ops(
     let Some((x0, y0, x1, y1)) = part.bounds() else {
         return (Vec::new(), unmappable);
     };
-    let label: String = part.name.to_uppercase();
+    // ASCII uppercase, the SAME mapping `engrave::glyph` and `unsupported_chars` use. Unicode
+    // `to_uppercase` turned `ß` into `SS`: cut as two letters while reported "NOT marked".
+    let label: String = part.name.to_ascii_uppercase();
     let w = crate::engrave::text_width(&label, text_height_mm);
     // Centred horizontally, one text-height up from the bottom edge. If the mark
     // will not fit inside the part it is NOT placed: a mark that overruns the
@@ -4340,6 +4575,22 @@ pub fn marking_ops(
     }
     let x = x0 + ((x1 - x0) - w) * 0.5;
     let y = y0 + text_height_mm;
+    // 🔴 THE FIT TEST ABOVE IS A BOUNDING-BOX TEST, so it is only true of a part that IS
+    // its bounding box. On a disc or an L the label's corners sit outside the outline and
+    // are cut through the profile into the waste (bughunt 2026-11-15). Until a real
+    // inside-the-outline test exists, a part that is not a plain rectangle, or a label
+    // that reaches a hole's bounds, is NOT marked — the caller is told nothing was placed
+    // by an empty list, exactly as for a label that does not fit.
+    let rect_area = (x1 - x0) * (y1 - y0);
+    if (part.outer.signed_area().abs() - rect_area).abs() > rect_area * 1e-6 {
+        return (Vec::new(), unmappable);
+    }
+    let r = tool.diameter_mm * 0.5;
+    let (lx0, ly0, lx1, ly1) = (x - r, y - r, x + w + r, y + text_height_mm + r);
+    let hits_hole = part.inners.iter().filter_map(|h| h.bounds()).any(|(a, b, c, d)| a < lx1 && c > lx0 && b < ly1 && d > ly0);
+    if hits_hole {
+        return (Vec::new(), unmappable);
+    }
 
     let ops = crate::engrave::text_contours(&label, x, y, text_height_mm)
         .into_iter()

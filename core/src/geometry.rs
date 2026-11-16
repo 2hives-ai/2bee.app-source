@@ -265,9 +265,55 @@ impl Contour {
     /// Every question this module asks the library — area, length, bounds,
     /// offset — goes through here, so cleaning the polyline at this single point
     /// covers all four rather than only the one that was observed failing.
+    /// Split every arc that sweeps more than 180 deg (|bulge| > 1) into two
+    /// halves at its midpoint.
+    ///
+    /// 🔴 The polyline library measures and offsets bulges in [-1, 1] only.
+    /// Handed a 270 deg arc (bulge 2.414, which a DXF LWPOLYLINE may carry), it
+    /// measured the 90 deg complement: a keyhole read 35.71 mm long against a
+    /// true 67.12 mm. Same arc, same direction, two halves of 135 deg each.
+    fn split_arcs_over_180(&mut self) {
+        let n = self.verts.len();
+        if n < 2 || self.verts.iter().all(|v| v.bulge.abs() <= 1.0 + 1e-12) {
+            return;
+        }
+        let last = if self.closed { n } else { n - 1 };
+        let mut out = Vec::with_capacity(n + 4);
+        for i in 0..n {
+            let a = self.verts[i];
+            if i < last && a.bulge.abs() > 1.0 + 1e-12 {
+                let b = self.verts[(i + 1) % n];
+                let (dx, dy) = (b.x - a.x, b.y - a.y);
+                // Arc midpoint: the chord midpoint, stepped off by the sagitta
+                // (bulge x half-chord) to the right of travel for a positive
+                // (counter-clockwise) bulge.
+                let mid = Vertex {
+                    x: a.x + dx * 0.5 + a.bulge * 0.5 * dy,
+                    y: a.y + dy * 0.5 - a.bulge * 0.5 * dx,
+                    bulge: 0.0,
+                };
+                let half = (a.bulge.atan() * 0.5).tan();
+                out.push(Vertex { bulge: half, ..a });
+                out.push(Vertex { bulge: half, ..mid });
+            } else {
+                out.push(a);
+            }
+        }
+        self.verts = out;
+    }
+
+    /// Whether the point lies inside this CLOSED contour (non-zero winding,
+    /// arcs as arcs). `false` for an open contour.
+    pub fn contains_point(&self, x: f64, y: f64) -> bool {
+        use cavalier_contours::core::math::Vector2;
+        use cavalier_contours::polyline::PlineSource;
+        self.closed && self.to_pline().winding_number(Vector2::new(x, y)) != 0
+    }
+
     fn to_pline(&self) -> Polyline {
         let mut clean = self.clone();
         clean.dedupe_positions();
+        clean.split_arcs_over_180();
         let mut p = Polyline::with_capacity(clean.verts.len(), clean.closed);
         for v in &clean.verts {
             p.add(v.x, v.y, v.bulge);

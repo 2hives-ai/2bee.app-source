@@ -1,0 +1,17 @@
+/* materials tab — only what the shared .cad-simple / .cad-chat / .machine-* classes lack. */
+.materials-list { flex: 0 0 auto; height: 26vh; min-height: 120px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+.materials-list table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.materials-list th { position: sticky; top: 0; background: var(--panel); text-align: left; font-weight: 600; color: var(--muted); padding: 3px 6px; }
+.materials-list table { table-layout: fixed; }
+.materials-list td { padding: 2px 6px; border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.materials-list th:nth-child(1) { width: 34%; } .materials-list th:nth-child(2) { width: 22%; }
+.materials-list td.num { text-align: right; font-family: var(--mono, monospace); }
+.materials-list tr { cursor: pointer; }
+.materials-list tr[aria-selected='true'] td { background: color-mix(in srgb, var(--color-amber) 18%, transparent); }
+.materials-list .bad td:first-child { color: var(--bad); font-weight: 600; }
+.materials-boards { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.materials-boards div { display: flex; flex-direction: column; gap: 2px; }
+.materials-onhand { display: flex; gap: 6px; align-items: center; font-size: 12.5px; }
+.materials-onhand input { width: 9em; }
+.materials-facts-one { grid-template-columns: 1fr; }
+.materials-facts-one dd { text-align: right; overflow-wrap: anywhere; }
