@@ -116,3 +116,53 @@ test('a partial config routes to misconfigured, and misconfigured renders no way
       'and "VITE_COGNITO_REDIRECT_URI is unset" are different facts and only the second is actionable.',
   );
 });
+
+// ── The landing page (founder 2026-11-17, "turn login on! create a landing page") ──
+//
+// A logged-out visitor now meets `Landing.tsx` instead of the bare sign-in card.
+// The failures guarded: (1) the landing page becoming a THIRD way into the app
+// (it rendering the app or anything that imports it); (2) its sign-in button
+// going somewhere other than the gate's own Cognito `login()`; (3) the status
+// paragraph being softened into a hardware claim nobody has earned.
+const LANDING = readFileSync(
+  join(resolve(dirname(fileURLToPath(import.meta.url)), '..'), 'src', 'Landing.tsx'),
+  'utf8',
+);
+const LANDING_CODE = LANDING.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, ' ');
+
+test('unauth renders the landing page, wired to the gate\'s own login()', () => {
+  assert.ok(
+    /if\s*\(\s*state\s*===\s*'unauth'\s*\)\s*\{\s*return\s*<Landing\s+onSignIn=\{handleLogin\}\s*\/>/.test(CODE),
+    "AuthGate no longer renders <Landing onSignIn={handleLogin} /> for state === 'unauth'. A " +
+      'logged-out visitor would get the bare card (or nothing) instead of the landing page.',
+  );
+  assert.ok(
+    /const handleLogin = useCallback\(\(\) => \{ login\(\); \}/.test(CODE),
+    'handleLogin no longer calls login() — the landing page\'s sign-in would not reach Cognito.',
+  );
+});
+
+test('the landing page cannot open the app', () => {
+  assert.ok(!/children/.test(LANDING_CODE), 'Landing.tsx mentions children — it must never render the app.');
+  assert.ok(
+    !/from\s+'\.\/App'|from\s+'\.\/auth'/.test(LANDING_CODE),
+    'Landing.tsx imports App or auth. It is a static page; who gets in is AuthGate\'s decision alone.',
+  );
+  const buttons = [...LANDING_CODE.matchAll(/<button[^>]*>/g)].map((m) => m[0]);
+  assert.ok(buttons.length >= 1, 'the landing page has no sign-in button at all.');
+  for (const b of buttons) {
+    assert.ok(/onClick=\{onSignIn\}/.test(b), `a landing-page button does something other than onSignIn: ${b}`);
+  }
+});
+
+test('the landing page still says nothing has been cut or printed', () => {
+  assert.ok(
+    /Nothing made with 2bee\.app has been cut on a router or\s+printed by its own slicer yet/.test(LANDING_CODE),
+    'the landing page status no longer says nothing has been cut or printed. AGENTS.md § Scope: ' +
+      'no hardware validation claim until the ladder is climbed, and this page is outward copy.',
+  );
+  assert.ok(
+    /github\.com\/2hives-ai\/2bee\.app-source/.test(LANDING_CODE),
+    'the AGPL §13 source link is gone from the landing page — the first page an anonymous visitor sees.',
+  );
+});

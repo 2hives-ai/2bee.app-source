@@ -1467,3 +1467,47 @@ em.warn[data-testid="mm-only-slot"] {
   border-radius: 4px;
   padding: 2px 4px;
 }
+
+/* ── Landing page (logged-out visitors, founder 2026-11-17) ───────────────────
+   Shown by AuthGate in the `unauth` state only. Brand tokens throughout. */
+.landing {
+  position: fixed; inset: 0; z-index: 9999; overflow-y: auto;
+  display: flex; flex-direction: column;
+  background: var(--bg); color: var(--ink);
+}
+.landing-top {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 24px; border-bottom: 1px solid var(--line);
+}
+.landing-brand { font-size: 18px; letter-spacing: .3px; }
+.landing-main {
+  width: 100%; max-width: 980px; margin: 0 auto; padding: 48px 24px 24px;
+  display: flex; flex-direction: column; gap: 40px; box-sizing: border-box;
+}
+.landing-hero { text-align: center; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.landing-hero h1 { margin: 0; font-size: clamp(28px, 5vw, 42px); line-height: 1.15; }
+.landing-lede { margin: 0; max-width: 640px; color: var(--muted); font-size: 17px; line-height: 1.5; }
+.landing-cta { padding: 10px 32px; font-size: 16px; }
+.landing-note { margin: 0; color: var(--muted); font-size: 13px; }
+.landing-shot { margin: 0; }
+.landing-shot img {
+  display: block; width: 100%; height: auto;
+  border: 1px solid var(--line); border-radius: var(--radius);
+}
+.landing-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.landing-step {
+  padding: 20px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.landing-step-n {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 50%;
+  background: var(--accent); color: var(--bg); font-weight: 600;
+}
+.landing-step h2, .landing-why h2, .landing-status h2 { margin: 10px 0 6px; font-size: 18px; }
+.landing-step p, .landing-why p, .landing-status p { margin: 0; color: var(--muted); line-height: 1.55; }
+.landing-why, .landing-status { max-width: 720px; }
+.landing-foot { padding: 24px; }
+@media (max-width: 600px) {
+  .landing-top { padding: 12px 16px; }
+  .landing-main { padding: 32px 16px 16px; gap: 28px; }
+}

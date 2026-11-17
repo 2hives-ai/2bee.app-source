@@ -48,6 +48,11 @@ afterthought.
 > 🔴 **AND THE OFFER IS THE FIRST THING A STRANGER SEES, not a footer.** The whole app is behind
 > `AuthGate`, so an anonymous visitor gets four lines and this link — measured on the built bundle,
 > which is why the dead URL mattered more than a footer would have.
+>
+> ⚠ **2026-11-17: "four lines" is now the landing page** (`web/src/Landing.tsx`, founder *"turn login
+> on! create a landing page"*). The source link is in its footer. From 2026-09-09 until this change
+> the served build was public, with no gate at all, so for that window this paragraph described the
+> code and not the site.
 
 ## Scope — CNC today, designed for a second process (founder, 2026-08-08)
 

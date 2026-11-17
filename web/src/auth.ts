@@ -34,7 +34,7 @@
 //
 // The Cognito User Pool is the existing one from 2bee.farm. The App Client
 // must be registered with:
-//   - callback URL: https://2bee.app/ (or http://localhost:5178/ for dev)
+//   - callback URL: https://2bee.app/ (or the localhost:5178 dev server, plain http)
 //   - Allowed OAuth flows: Authorization code grant
 //   - Allowed OAuth scopes: openid, email, profile
 //   - NO client secret (public client — this is a SPA)

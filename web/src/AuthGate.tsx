@@ -17,7 +17,8 @@
 //
 // When Cognito IS configured:
 //   - On load, check for a callback (?code=...) and exchange it for tokens.
-//   - If no valid token, show a "Sign in" button that redirects to Cognito.
+//   - If no valid token, show the landing page (`Landing.tsx`, 2026-11-17) whose
+//     "Sign in" button redirects to Cognito. Until 2026-11-17 this was a bare card.
 //   - If token exists but is expired, show "Session expired — sign in again".
 //   - If token exists and user is not admin, show "Admin access required".
 //   - If all checks pass, render children (the real app).
@@ -41,6 +42,7 @@ import {
   logout,
   type TokenSet,
 } from './auth';
+import Landing from './Landing';
 
 /** Auth state machine:
  *  'checking'  — initial load, checking URL for callback
@@ -166,6 +168,13 @@ export default function AuthGate({ children }: AuthGateProps) {
     return <>{children}</>;
   }
 
+  // Logged out: the landing page (founder 2026-11-17, "create a landing page").
+  // It renders no app and opens nothing; its only way forward is the same
+  // `login()` redirect the card's button used.
+  if (state === 'unauth') {
+    return <Landing onSignIn={handleLogin} />;
+  }
+
   return (
     <div className="auth-gate">
       <div className="auth-gate-card">
@@ -194,15 +203,6 @@ export default function AuthGate({ children }: AuthGateProps) {
               mode and runs without sign-in. A partly-configured build refuses
               rather than serving the app unauthenticated.
             </p>
-          </>
-        )}
-
-        {state === 'unauth' && (
-          <>
-            <p className="auth-gate-status">Admin access required.</p>
-            <button className="auth-gate-btn" onClick={handleLogin} type="button">
-              Sign in
-            </button>
           </>
         )}
 
