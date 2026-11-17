@@ -109,7 +109,13 @@ export async function loadCatalogue(
 ): Promise<CatalogueState> {
   let r: Response;
   try {
-    r = await fetchImpl(`${SHOP_BASE}/index.json`);
+    // 🔴 `no-cache` (revalidate every time), founder 403 on 2026-11-17. S3 serves
+    // these files with no Cache-Control, so a browser may keep an old index.json
+    // for days on a heuristic (10% of its age). A deploy then deletes a design the
+    // stale index still lists, and opening it returns S3's 403 AccessDenied for a
+    // missing key. The index and the design files are one generated set; they
+    // must be read from the same deploy.
+    r = await fetchImpl(`${SHOP_BASE}/index.json`, { cache: 'no-cache' });
   } catch (e) {
     return { kind: 'absent', why: `the catalogue could not be fetched: ${String(e)}` };
   }
@@ -151,7 +157,15 @@ export async function loadDesign(
   id: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ path: string; sources: Record<string, string> }> {
-  const r = await fetchImpl(`${SHOP_BASE}/d/${id}.json`);
+  const r = await fetchImpl(`${SHOP_BASE}/d/${id}.json`, { cache: 'no-cache' });
+  if (r.status === 403 || r.status === 404) {
+    // S3 answers 403, not 404, for a key that does not exist. Either way the
+    // design is not in the deployed catalogue: say that, not a bare status.
+    throw new Error(
+      `design ${id} is not in the current catalogue (the server answered ${r.status}). ` +
+        'It was listed by an older version of this page. Reload the page to get the current list.',
+    );
+  }
   if (!r.ok) throw new Error(`design ${id} could not be fetched: ${r.status}`);
   const d = (await r.json()) as { path: string; sources: Record<string, string> };
   if (!d.sources || typeof d.sources[d.path] !== 'string') {

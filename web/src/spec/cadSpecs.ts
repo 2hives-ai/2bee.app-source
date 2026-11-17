@@ -49,7 +49,7 @@ export async function ownerSpecFor(entry: ShopEntry | null, fetchImpl: typeof fe
   if (s.kind === 'withheld') return { kind: 'withheld', owner: 'cad', path: s.path ?? '', why: s.why ?? 'withheld by the build' };
   if (!s.file || !s.path) return { kind: 'error', owner: 'cad', why: 'the catalogue names a spec but no file for it' };
   try {
-    const r = await fetchImpl(`${SHOP_BASE}/${s.file}`);
+    const r = await fetchImpl(`${SHOP_BASE}/${s.file}`, { cache: 'no-cache' });
     const text = await r.text();
     if (!r.ok || /^\s*<!doctype html/i.test(text)) return { kind: 'error', owner: 'cad', why: `${s.file} is not there (HTTP ${r.status}) — run \`npm run shop\`` };
     return { kind: s.kind, owner: 'cad', path: `hardware/cad/${s.path}`, text, tracked: s.tracked };

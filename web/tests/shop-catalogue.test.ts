@@ -124,3 +124,28 @@ test('the card line is an EXCERPT of the verdict, never a paraphrase — and nev
   // sentence end, is quoted whole rather than dropped.
   assert.equal(trustShort(entry({ trust: 'untrusted', trustDetail: 'a new cause' })), 'a new cause');
 });
+
+// Founder 2026-11-17: a design opened on https://2bee.app returned S3's raw 403.
+// S3 sends no Cache-Control, so the browser kept an index.json from an older
+// deploy that still listed a design the new deploy had deleted. The index and the
+// design files must be revalidated on every read, and a missing design must say
+// "not in the current catalogue, reload", not a bare status code.
+test('the catalogue index and design files are fetched with cache: no-cache', async () => {
+  const seen: (RequestInit | undefined)[] = [];
+  const f = (async (_u: string, init?: RequestInit) => {
+    seen.push(init);
+    const body = { entries: [], path: 'a.scad', sources: { 'a.scad': 'cube(1);' } };
+    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+  }) as unknown as typeof fetch;
+  await loadCatalogue(f);
+  await loadDesign('x', f);
+  assert.equal(seen.length, 2);
+  for (const init of seen) assert.equal(init?.cache, 'no-cache');
+});
+
+test('a design the server does not have (S3 403 or 404) says reload, not a bare status', async () => {
+  for (const status of [403, 404]) {
+    const f = (async () => ({ ok: false, status })) as unknown as typeof fetch;
+    await assert.rejects(() => loadDesign('gone', f), /not in the current catalogue[\s\S]*Reload the page/);
+  }
+});
