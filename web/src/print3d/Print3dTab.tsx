@@ -25,9 +25,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Assistant } from './Assistant';
 import {
+  applyDiscovery,
   BridgeError,
   client,
   configured,
+  devBridges,
+  discoverBridges,
   LONG_MS,
   readBridges,
   writeBridges,
@@ -42,7 +45,7 @@ import {
   type SlotsReply,
   type UploadReply,
 } from './bridges';
-import { Connections } from './Connections';
+import { Connections, type Look } from './Connections';
 import {
   baseName,
   EMPTY_JOB,
@@ -167,6 +170,24 @@ export function Print3dTab({ active = true, fetchImpl, transport }: Print3dTabPr
       /* storage off */
     }
   };
+  /* ── discovery: every time the tab opens, ask 127.0.0.1 which bridges are there ── */
+  const latestBridges = useRef(bridges);
+  latestBridges.current = bridges;
+  const [look, setLook] = useState<Look>({ busy: false, found: null });
+  const discover = useCallback(async () => {
+    if (devBridges()) return; // the dev server proxies both bridges; nothing to find
+    setLook((l) => ({ ...l, busy: true }));
+    const d = await discoverBridges(fetchImpl);
+    // The reply can land after the person typed: apply it to the LATEST bridges.
+    const next = applyDiscovery(latestBridges.current, d);
+    if (next !== latestBridges.current) setBridges(next);
+    setLook({ busy: false, found: d });
+    // Found a bridge whose key is missing: open Connections so the key field is in view.
+    if ((['engine', 'printer'] as const).some((k) => next[k].url && !configured(next[k]))) setShowConn(true);
+  }, [fetchImpl]);
+  useEffect(() => {
+    if (active) void discover();
+  }, [active, discover]);
   const engine = useMemo(() => client(bridges.engine, 'slicer bridge', fetchImpl), [bridges.engine, fetchImpl]);
   const printer = useMemo(() => client(bridges.printer, 'printer bridge', fetchImpl), [bridges.printer, fetchImpl]);
   const engineSet = configured(bridges.engine);
@@ -508,7 +529,6 @@ export function Print3dTab({ active = true, fetchImpl, transport }: Print3dTabPr
       const { stl: _stl, ...design } = d;
       if (gids.length) setDesigns((old) => [...old, { design, gids, busy: false, note: '' }]);
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incoming, engineSet, slotsReply, profiles]);
   const changeDesignParam = async (k: number, p: Param, v: ParamValue) => {
     const cur = designs[k];
@@ -822,7 +842,6 @@ export function Print3dTab({ active = true, fetchImpl, transport }: Print3dTabPr
       plateObjects(job, showPlate)
         .map((o) => ({ uid: o.uid, tri: tris.current.get(job.files[o.file]?.sha256 ?? '') ?? new Float32Array(0), color: colorOf(o.slot), placement: o.placement }))
         .filter((p) => p.tri.length > 0),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [job, showPlate, slots],
   );
 
@@ -1074,7 +1093,14 @@ export function Print3dTab({ active = true, fetchImpl, transport }: Print3dTabPr
         Nothing has been printed from this tab. Parts are separated, laid flat and arranged by this app; slicing runs on this computer with 2bee.fdm, this app’s own
         engine, which has not printed yet: the first print is a calibration print. It only uploads: the print is started on the printer’s screen, after the checklist.
       </p>
-      {showConn && <Connections bridges={bridges} onChange={setBridges} fetchImpl={fetchImpl} />}
+      {look.found && (
+        <p className="p3d-sub" data-testid="p3d-found">
+          {look.found.all.length
+            ? `On this computer: ${look.found.all.map((a) => `${a.kind === 'engine' ? 'slicer' : 'printer'} bridge at ${a.url}${bridges[a.kind].url === a.url && !configured(bridges[a.kind]) ? ' (key needed)' : ''}`).join(' · ')}`
+            : 'No bridge answered on this computer.'}
+        </p>
+      )}
+      {showConn && <Connections bridges={bridges} onChange={setBridges} look={look} onDiscover={() => void discover()} />}
       {health.kind !== 'ok' && (
         <p className={health.kind === 'bad' ? 'p3d-err' : 'p3d-sub'} data-testid="p3d-health">
           {health.text}

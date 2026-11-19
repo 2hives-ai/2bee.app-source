@@ -3,8 +3,8 @@
 // rule (loopback only) and the discovery rule (fills an empty address only,
 // from a bridge that named itself; never a key).
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { applyDiscovery, cleanUrl, discoverBridges, ENGINE_PORT, PRINTER_PORT, type BridgeConfig, type Bridges, type FetchLike } from './bridges';
+import { useState } from 'react';
+import { cleanUrl, ENGINE_PORT, PRINTER_PORT, type BridgeConfig, type BridgeKind, type Bridges, type Discovery } from './bridges';
 
 function Row({
   title,
@@ -62,38 +62,38 @@ function Row({
   );
 }
 
-export function Connections({ bridges, onChange, fetchImpl }: { bridges: Bridges; onChange: (b: Bridges) => void; fetchImpl?: FetchLike }) {
-  // The reply can land after the person typed: apply it to the LATEST bridges, not the ones at click time.
-  const latest = useRef(bridges);
-  latest.current = bridges;
-  const [look, setLook] = useState<{ busy: boolean; notes: string[] }>({ busy: false, notes: [] });
-  const discover = useCallback(async () => {
-    setLook({ busy: true, notes: [] });
-    const d = await discoverBridges(fetchImpl);
-    const next = applyDiscovery(latest.current, d);
-    if (next !== latest.current) onChange(next);
-    setLook({ busy: false, notes: d.notes });
-  }, [fetchImpl, onChange]);
-  // Opening the panel with an address missing looks once. A set address is never re-checked here.
-  const missing = !bridges.engine.url || !bridges.printer.url;
-  const looked = useRef(false);
-  useEffect(() => {
-    if (missing && !looked.current) {
-      looked.current = true;
-      void discover();
-    }
-  }, [missing, discover]);
+export interface Look {
+  busy: boolean;
+  found: Discovery | null;
+}
+
+/** Discovery itself runs in Print3dTab, every time the tab opens. This panel shows it and can ask again. */
+export function Connections({ bridges, onChange, look, onDiscover }: { bridges: Bridges; onChange: (b: Bridges) => void; look: Look; onDiscover: () => void }) {
+  const pick = (kind: BridgeKind, url: string) => onChange({ ...bridges, [kind]: { ...bridges[kind], url } });
   return (
     <div className="p3d-conns">
       <div className="p3d-discover" data-testid="p3d-discover">
-        <button type="button" onClick={() => void discover()} disabled={look.busy} data-testid="p3d-discover-btn">
-          {look.busy ? 'Looking on this computer…' : 'Look for bridges on this computer'}
+        <button type="button" onClick={onDiscover} disabled={look.busy} data-testid="p3d-discover-btn">
+          {look.busy ? 'Looking on this computer…' : 'Look for bridges again'}
         </button>
-        {look.notes.map((n) => (
+        {look.found?.notes.map((n) => (
           <p key={n} className="p3d-sub" data-testid="p3d-discover-note">
             {n}
           </p>
         ))}
+        {(['engine', 'printer'] as BridgeKind[]).map((k) => {
+          const many = (look.found?.all ?? []).filter((a) => a.kind === k);
+          if (many.length < 2) return null;
+          return (
+            <p key={k} className="p3d-sub">
+              {many.map((a) => (
+                <button key={a.url} type="button" onClick={() => pick(k, a.url)} disabled={bridges[k].url === a.url} data-testid={`p3d-discover-pick-${k}`}>
+                  Use {a.url}
+                </button>
+              ))}
+            </p>
+          );
+        })}
       </div>
       <Row
         title="Slicer bridge"

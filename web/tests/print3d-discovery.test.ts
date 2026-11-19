@@ -58,7 +58,7 @@ test('discovery: two bridges of one kind is ambiguous and fills neither', async 
 });
 
 test('applyDiscovery: fills only EMPTY addresses, never a key, never a typed address', () => {
-  const found = { found: { engine: 'http://127.0.0.1:8789', printer: 'http://127.0.0.1:8788' }, notes: [] };
+  const found = { all: [], found: { engine: 'http://127.0.0.1:8789', printer: 'http://127.0.0.1:8788' }, notes: [] };
   const filled = applyDiscovery(NO_BRIDGES, found);
   assert.equal(filled.engine.url, 'http://127.0.0.1:8789');
   assert.equal(filled.printer.url, 'http://127.0.0.1:8788');
@@ -68,7 +68,22 @@ test('applyDiscovery: fills only EMPTY addresses, never a key, never a typed add
   assert.equal(kept.engine, typed.engine, 'a typed address and its key are untouched');
   assert.equal(kept.printer.url, 'http://127.0.0.1:8788');
   // Nothing found: the same object back, so no write.
-  assert.equal(applyDiscovery(typed, { found: { engine: '', printer: '' }, notes: [] }), typed);
+  assert.equal(applyDiscovery(typed, { all: [], found: { engine: "", printer: "" }, notes: [] }), typed);
   // A non-loopback address can never be filled, even if a fake discovery returned one.
-  assert.equal(applyDiscovery(NO_BRIDGES, { found: { engine: 'http://10.0.0.5:8789', printer: '' }, notes: [] }).engine.url, '');
+  assert.equal(applyDiscovery(NO_BRIDGES, { all: [], found: { engine: "http://10.0.0.5:8789", printer: "" }, notes: [] }).engine.url, '');
+});
+
+test('discovery scans 8780-8799 and lists EVERY bridge; a second printer bridge is listed, not guessed', async () => {
+  const { f, seen } = loopback({ 8789: engineHello, 8788: printerHello, 8795: printerHello, 8787: { ok: true, bridge: 'claude-bridge' } });
+  const d = await discoverBridges(f);
+  assert.deepEqual(
+    seen.map((s) => Number(new URL(s.url).port)).sort((a, b) => a - b),
+    Array.from({ length: 20 }, (_, i) => 8780 + i),
+  );
+  assert.deepEqual(d.all, [
+    { kind: 'printer', url: 'http://127.0.0.1:8788' },
+    { kind: 'engine', url: 'http://127.0.0.1:8789' },
+    { kind: 'printer', url: 'http://127.0.0.1:8795' },
+  ]);
+  assert.deepEqual(d.found, { engine: 'http://127.0.0.1:8789', printer: '' }, 'two printer bridges: the person picks');
 });

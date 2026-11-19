@@ -74,7 +74,7 @@ export const DEV_BRIDGES: Bridges = {
   engine: { url: '/__print3d', token: 'dev-server-proxy-token', remember: false },
   printer: { url: '/__printer', token: 'dev-server-proxy-token', remember: false },
 };
-function devBridges(): boolean {
+export function devBridges(): boolean {
   try {
     return (import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV === true;
   } catch {
@@ -131,13 +131,19 @@ export type BridgeKind = keyof Bridges;
 /** What each bridge says it is in its `/v1/hello` reply. Must match tools/*-bridge/bridge.mjs. */
 export const HELLO_ID: Record<BridgeKind, string> = { engine: '2bee.print3d-bridge', printer: '2bee.printer-bridge' };
 
-/** The ports discovery asks. Only the defaults: a bridge started with another --port is typed in by hand. */
-export const DISCOVERY_PORTS = [ENGINE_PORT, PRINTER_PORT];
+/**
+ * The ports discovery asks: 8780-8799, which holds both defaults and room for more bridges
+ * (founder 2026-11-19: "I open 2bee.app 3d and automatically scans and find all printers/bridges").
+ * A port that answers anything but a bridge's hello is ignored. A bridge outside this range is typed in by hand.
+ */
+export const DISCOVERY_PORTS = Array.from({ length: 20 }, (_, i) => 8780 + i);
 export const DISCOVERY_MS = 1500;
 
 export interface Discovery {
   /** Address found per kind, '' when none (or more than one) answered as that kind. */
   found: Record<BridgeKind, string>;
+  /** Every bridge that answered, in port order. More than one of a kind is listed here for the person to pick. */
+  all: { kind: BridgeKind; url: string }[];
   /** One sentence per thing the person should know: what was found, what was not, what was ambiguous. */
   notes: string[];
 }
@@ -165,6 +171,7 @@ export async function discoverBridges(fetchImpl: FetchLike = (u, i) => fetch(u, 
   const urls = ports.map((p) => `http://127.0.0.1:${p}`);
   const kinds = await Promise.all(urls.map((u) => hello(u, fetchImpl, timeoutMs)));
   const found: Record<BridgeKind, string> = { engine: '', printer: '' };
+  const all = urls.flatMap((url, i) => (kinds[i] ? [{ kind: kinds[i] as BridgeKind, url }] : []));
   const notes: string[] = [];
   for (const k of Object.keys(HELLO_ID) as BridgeKind[]) {
     const at = urls.filter((_, i) => kinds[i] === k);
@@ -172,12 +179,12 @@ export async function discoverBridges(fetchImpl: FetchLike = (u, i) => fetch(u, 
       found[k] = at[0];
       notes.push(`Found the ${KIND_NAME[k]} at ${at[0]}. Paste the key it printed when it started.`);
     } else if (at.length > 1) {
-      notes.push(`More than one ${KIND_NAME[k]} answered (${at.join(', ')}); type the address of the one you mean.`);
+      notes.push(`More than one ${KIND_NAME[k]} answered (${at.join(', ')}); pick the one you mean.`);
     } else {
-      notes.push(`No ${KIND_NAME[k]} answered on ${urls.join(' or ')}. Start it, or type its address if it uses another port.`);
+      notes.push(`No ${KIND_NAME[k]} answered on 127.0.0.1 ports ${ports[0]}-${ports[ports.length - 1]}. Start it, or type its address if it uses another port.`);
     }
   }
-  return { found, notes };
+  return { found, all, notes };
 }
 
 /** Fill only the EMPTY addresses from a discovery. Keys and typed addresses are never touched. */
