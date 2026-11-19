@@ -19,6 +19,8 @@ import net from 'node:net';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+// Bridges started by these tests register in a throwaway dir, never the real one (tools/bridge-registry.mjs).
+process.env.TWOBEE_BRIDGE_REGISTRY = (await import('node:fs')).mkdtempSync((await import('node:path')).join((await import('node:os')).tmpdir(), 'bridge-reg-'));
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BRIDGE = path.join(HERE, 'bridge.mjs');
@@ -547,7 +549,9 @@ test('slice disk budget: copies that need more STL than SLICE_MAX_MB are refused
 test('/v1/hello: the one route without a token, says only what this is; Host + Origin guards still apply', async () => {
   const r = await req(B.port, 'GET', '/v1/hello', { headers: { origin: 'https://2bee.app' } });
   assert.equal(r.status, 200);
-  assert.deepEqual(r.json, { ok: true, bridge: '2bee.print3d-bridge', api: 1, needsToken: true });
+  const { peers, ...rest } = r.json;
+  assert.deepEqual(rest, { ok: true, bridge: '2bee.print3d-bridge', api: 1, needsToken: true });
+  assert.ok(peers.some((x) => x.bridge === '2bee.print3d-bridge' && x.port === B.port), 'a running bridge lists itself among the peers');
   assert.equal(r.headers['access-control-allow-origin'], 'https://2bee.app');
   assert.equal((await req(B.port, 'GET', '/v1/hello', { headers: { origin: 'https://evil.example' } })).status, 403);
   assert.equal((await req(B.port, 'GET', '/v1/hello', { headers: { host: 'evil.example:80' } })).status, 403);

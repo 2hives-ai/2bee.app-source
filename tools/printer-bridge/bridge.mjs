@@ -60,6 +60,7 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { peers as registryPeers, register as registerBridge } from '../bridge-registry.mjs';
 
 export const DEFAULT_PORT = 8788;
 export const BIND_HOST = '127.0.0.1';
@@ -1494,7 +1495,7 @@ export function createBridge(opts) {
     // nothing else — never the printer address, serial or access code — so the page can put this
     // address in the right row. Host guard and Origin allowlist above still apply.
     if (req.method === 'GET' && path === '/v1/hello') {
-      return send(200, { ok: true, bridge: '2bee.printer-bridge', api: 1, needsToken: true });
+      return send(200, { ok: true, bridge: '2bee.printer-bridge', api: 1, needsToken: true, peers: registryPeers() });
     }
 
     const ROUTES = { '/v1/upload': 'upload', '/v1/check': 'check', '/v1/status': 'status', '/v1/start': 'start', '/v1/pause': 'pause', '/v1/resume': 'resume', '/v1/stop': 'stop', '/v1/camera.jpg': 'camera', '/v1/light': 'light', '/v1/fan': 'fan', '/v1/fanmode': 'fanmode', '/v1/speed': 'speed', '/v1/skip': 'skip' };
@@ -1808,8 +1809,11 @@ function main() {
     process.stderr.write(`printer-bridge: ${e.message}\n`);
     process.exit(2);
   });
+  let unregister = () => {};
+  process.on('exit', () => unregister());
   server.listen(o.port, BIND_HOST, () => {
     const { address, port } = server.address();
+    unregister = registerBridge('2bee.printer-bridge', port);
     const p = (s) => process.stdout.write(s + '\n');
     p(`printer-bridge listening on http://${address}:${port} -> printer ${o.printer}:${o.printerPort} (FTPS upload; MQTT ${o.mqttPort} start/pause/resume/stop)`);
     if (tok.printable) p(`  Key      : ${tok.token}    (generated for this run only)`);

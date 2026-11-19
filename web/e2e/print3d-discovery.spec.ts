@@ -16,8 +16,8 @@ async function open3d(page: Page) {
 }
 
 const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization, content-type', 'access-control-allow-methods': 'GET, POST, OPTIONS' };
-const hello = (route: Route, bridge: string) =>
-  route.fulfill({ status: 200, headers: { ...cors, 'content-type': 'application/json' }, body: JSON.stringify({ ok: true, bridge, api: 1, needsToken: true }) });
+const hello = (route: Route, bridge: string, peers: { bridge: string; port: number }[] = []) =>
+  route.fulfill({ status: 200, headers: { ...cors, 'content-type': 'application/json' }, body: JSON.stringify({ ok: true, bridge, api: 1, needsToken: true, peers }) });
 
 test('opening the 3D page with nothing stored finds both bridges, fills their addresses, and asks for the keys', async ({ page }) => {
   const probed: string[] = [];
@@ -36,7 +36,7 @@ test('opening the 3D page with nothing stored finds both bridges, fills their ad
   await expect(page.getByTestId('p3d-conn-engine-url')).toHaveValue('http://127.0.0.1:8789');
   await expect(page.getByTestId('p3d-conn-printer-url')).toHaveValue('http://127.0.0.1:8788');
   await expect(page.getByTestId('p3d-conn-engine-token')).toHaveValue('');
-  expect(new Set(probed).size).toBe(20);
+  expect(new Set(probed)).toEqual(new Set(['8789', '8788'])); // no blind probing: each refused port is a red console line
   expect(authed, 'discovery never sends a key').toEqual([]);
   // The addresses are remembered; the keys are not invented.
   const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('2bee.app.print3d.bridges') ?? 'null'));
@@ -51,7 +51,8 @@ test('a typed address is kept; a second printer bridge is offered, not chosen', 
   await page.route(/127\.0\.0\.1:87\d\d\//, (route) => {
     const u = new URL(route.request().url());
     if (u.pathname === '/v1/hello' && u.port === '8789') return hello(route, '2bee.print3d-bridge');
-    if (u.pathname === '/v1/hello' && (u.port === '8788' || u.port === '8790')) return hello(route, '2bee.printer-bridge');
+    const peers = [{ bridge: '2bee.printer-bridge', port: 8788 }, { bridge: '2bee.printer-bridge', port: 8790 }];
+    if (u.pathname === '/v1/hello' && (u.port === '8788' || u.port === '8790')) return hello(route, '2bee.printer-bridge', peers);
     return route.abort('connectionrefused');
   });
   await open3d(page);

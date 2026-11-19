@@ -21,6 +21,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { peers as registryPeers, register as registerBridge } from '../bridge-registry.mjs';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
@@ -204,7 +205,7 @@ export function createBridge(opts) {
     // Discovery (founder 2026-11-19): the ONE route without a token. It says what this is and
     // nothing else — no engine path, no data dir, no version — so the page can put this address in
     // the right row. Host guard and Origin allowlist above still apply.
-    if (req.method === 'GET' && urlPath === '/v1/hello') return send(200, { ok: true, bridge: '2bee.print3d-bridge', api: 1, needsToken: true });
+    if (req.method === 'GET' && urlPath === '/v1/hello') return send(200, { ok: true, bridge: '2bee.print3d-bridge', api: 1, needsToken: true, peers: registryPeers() });
 
     if (!tokenMatches(req.headers.authorization, token)) {
       req.resume();
@@ -313,8 +314,11 @@ function main() {
     process.stderr.write(`print3d-bridge: ${e.message}\n`);
     process.exit(2);
   });
+  let unregister = () => {};
+  process.on('exit', () => unregister());
   server.listen(o.port, BIND_HOST, () => {
     const { address, port } = server.address();
+    unregister = registerBridge('2bee.print3d-bridge', port);
     const p = (s) => process.stdout.write(s + '\n');
     const fdm = o.engine !== 'orca';
     const binOk = fs.existsSync(fdm ? o.fdmBin : o.orcaBin);

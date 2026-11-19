@@ -132,11 +132,15 @@ export type BridgeKind = keyof Bridges;
 export const HELLO_ID: Record<BridgeKind, string> = { engine: '2bee.print3d-bridge', printer: '2bee.printer-bridge' };
 
 /**
- * The ports discovery asks: 8780-8799, which holds both defaults and room for more bridges
- * (founder 2026-11-19: "I open 2bee.app 3d and automatically scans and find all printers/bridges").
- * A port that answers anything but a bridge's hello is ignored. A bridge outside this range is typed in by hand.
+ * The ports discovery asks first: the two defaults. Every other bridge is found through the
+ * `peers` each bridge lists in its hello (tools/bridge-registry.mjs), never by blind probing:
+ * each port that is not a bridge logs a red net::ERR_CONNECTION_REFUSED in the console that page
+ * code cannot silence (the first version asked 8780-8799 and logged 18 of them; founder 2026-11-19).
+ * A bridge on another port whose registry entry is missing is typed in by hand.
  */
-export const DISCOVERY_PORTS = Array.from({ length: 20 }, (_, i) => 8780 + i);
+export const DISCOVERY_PORTS = [ENGINE_PORT, PRINTER_PORT];
+/** At most this many ports learnt from peers are asked: a corrupt registry cannot make the page probe hundreds. */
+export const MAX_PEER_PORTS = 16;
 export const DISCOVERY_MS = 1500;
 
 export interface Discovery {
@@ -150,38 +154,63 @@ export interface Discovery {
 
 const KIND_NAME: Record<BridgeKind, string> = { engine: 'slicer bridge', printer: 'printer bridge' };
 
-/** Ask one loopback port what it is. Returns the kind, or null for silence, a refusal or anything else. */
-async function hello(url: string, fetchImpl: FetchLike, timeoutMs: number): Promise<BridgeKind | null> {
+interface Hello {
+  kind: BridgeKind | null;
+  /** Loopback ports of the other bridges this one says are running. */
+  peerPorts: number[];
+}
+
+/** Ask one loopback port what it is. kind null for silence, a refusal or anything else. */
+async function hello(url: string, fetchImpl: FetchLike, timeoutMs: number): Promise<Hello> {
+  const none: Hello = { kind: null, peerPorts: [] };
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
     const res = await fetchImpl(url + '/v1/hello', { method: 'GET', credentials: 'omit', signal: ac.signal });
-    if (!res.ok) return null;
-    const j = (await res.json()) as { bridge?: unknown } | null;
-    const id = j && typeof j === 'object' ? j.bridge : null;
-    return (Object.keys(HELLO_ID) as BridgeKind[]).find((k) => HELLO_ID[k] === id) ?? null;
+    if (!res.ok) return none;
+    const j = (await res.json()) as { bridge?: unknown; peers?: unknown } | null;
+    if (!j || typeof j !== 'object') return none;
+    const kind = (Object.keys(HELLO_ID) as BridgeKind[]).find((k) => HELLO_ID[k] === j.bridge) ?? null;
+    if (!kind) return none;
+    const peerPorts = Array.isArray(j.peers)
+      ? j.peers.map((p) => (p && typeof p === 'object' ? (p as { port?: unknown }).port : null)).filter((p): p is number => Number.isInteger(p) && (p as number) > 0 && (p as number) < 65536)
+      : [];
+    return { kind, peerPorts };
   } catch {
-    return null;
+    return none;
   } finally {
     clearTimeout(timer);
   }
 }
 
 export async function discoverBridges(fetchImpl: FetchLike = (u, i) => fetch(u, i), ports: number[] = DISCOVERY_PORTS, timeoutMs = DISCOVERY_MS): Promise<Discovery> {
-  const urls = ports.map((p) => `http://127.0.0.1:${p}`);
-  const kinds = await Promise.all(urls.map((u) => hello(u, fetchImpl, timeoutMs)));
+  const asked = new Map<number, BridgeKind | null>();
+  const ask = async (list: number[]) => {
+    const fresh = [...new Set(list)].filter((p) => !asked.has(p));
+    fresh.forEach((p) => asked.set(p, null));
+    const replies = await Promise.all(fresh.map((p) => hello(`http://127.0.0.1:${p}`, fetchImpl, timeoutMs)));
+    fresh.forEach((p, i) => asked.set(p, replies[i].kind));
+    return replies.flatMap((r) => r.peerPorts);
+  };
+  // Round 1: the defaults. Round 2: whatever they named and was not asked yet. A peer's own peers are
+  // the same registry, so two rounds reach every registered bridge.
+  const learnt = await ask(ports);
+  await ask(learnt.filter((p) => !asked.has(p)).slice(0, MAX_PEER_PORTS));
+  const all = [...asked.entries()]
+    .filter((e): e is [number, BridgeKind] => e[1] !== null)
+    .sort((a, b) => a[0] - b[0])
+    .map(([p, kind]) => ({ kind, url: `http://127.0.0.1:${p}` }));
   const found: Record<BridgeKind, string> = { engine: '', printer: '' };
-  const all = urls.flatMap((url, i) => (kinds[i] ? [{ kind: kinds[i] as BridgeKind, url }] : []));
   const notes: string[] = [];
   for (const k of Object.keys(HELLO_ID) as BridgeKind[]) {
-    const at = urls.filter((_, i) => kinds[i] === k);
+    const at = all.filter((a) => a.kind === k).map((a) => a.url);
     if (at.length === 1) {
       found[k] = at[0];
       notes.push(`Found the ${KIND_NAME[k]} at ${at[0]}. Paste the key it printed when it started.`);
     } else if (at.length > 1) {
       notes.push(`More than one ${KIND_NAME[k]} answered (${at.join(', ')}); pick the one you mean.`);
     } else {
-      notes.push(`No ${KIND_NAME[k]} answered on 127.0.0.1 ports ${ports[0]}-${ports[ports.length - 1]}. Start it, or type its address if it uses another port.`);
+      notes.push(`No ${KIND_NAME[k]} answered on this computer. Start it, or type its address.`);
     }
   }
   return { found, all, notes };

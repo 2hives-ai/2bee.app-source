@@ -9,7 +9,7 @@ is made available to users over a network.
 |---|---|
 | Licence | **AGPL-3.0-or-later** (`LICENSE`) |
 | Mirrored subtree | `software/2bee.app/` |
-| Source revision | `cc1eab6b10d102d7c6df550f193e908bb12c2f5a` |
+| Source revision | `980ac160314fc84cd453854b8e10dc8a6ceeed55` |
 | Mechanism ruling | 2026-09-04, adopting the 2026-08-11 analysis |
 
 ## What is here

@@ -21,6 +21,8 @@ import os from 'node:os';
 import { mkdtempSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+// Bridges started by these tests register in a throwaway dir, never the real one (tools/bridge-registry.mjs).
+process.env.TWOBEE_BRIDGE_REGISTRY = (await import('node:fs')).mkdtempSync((await import('node:path')).join((await import('node:os')).tmpdir(), 'bridge-reg-'));
 import { inflateRawSync, crc32 } from 'node:zlib';
 import { createHash, randomBytes, X509Certificate } from 'node:crypto';
 import {
@@ -1358,7 +1360,9 @@ test('/v1/hello: the one route without a token, names the bridge and never the p
   try {
     const r = await request(b.port, { method: 'GET', path: '/v1/hello', headers: { origin: 'https://2bee.app' } });
     assert.equal(r.status, 200);
-    assert.deepEqual(r.json, { ok: true, bridge: '2bee.printer-bridge', api: 1, needsToken: true });
+    const { peers, ...rest } = r.json;
+    assert.deepEqual(rest, { ok: true, bridge: '2bee.printer-bridge', api: 1, needsToken: true });
+    assert.ok(peers.some((x) => x.bridge === '2bee.printer-bridge' && x.port === b.port), 'a running bridge lists itself among the peers');
     assert.equal(r.headers['access-control-allow-origin'], 'https://2bee.app');
     assert.doesNotMatch(r.text, /127\.0\.0\.1/, 'the printer address is not discovery information');
     assert.equal((await request(b.port, { method: 'GET', path: '/v1/hello', headers: { origin: 'https://evil.example' } })).status, 403);
