@@ -17,7 +17,7 @@
 // One WebGL context, drawn on demand (no animation loop): the tab can sit in a
 // hidden panel without spending a frame.
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { dragMode, noContextMenu, panTarget, type DragMode } from '../view3d/mouse';
 import * as THREE from 'three';
 import type { Placement } from './model';
@@ -88,6 +88,28 @@ function buildPaths(tp: Toolpath, group: THREE.Group, bg: THREE.Color): PathObj[
 }
 
 const FALLBACK_AREA = ['0x0', '256x0', '256x256', '0x256'];
+
+/**
+ * Counts theme changes, so everything coloured from the brand tokens is rebuilt when the light/dark
+ * toggle flips (founder 2026-11-20: "the dark/light does not change the bed of the 3d"). Same signals
+ * as tool3d/Scene3D.tsx: [data-theme]/class/style on <html> and <body>, and the OS colour scheme.
+ */
+export function useThemeTick(): number {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setTick((t) => t + 1);
+    const obs = new MutationObserver(bump);
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'class', 'style'] });
+    if (document.body) obs.observe(document.body, { attributes: true, attributeFilter: ['data-theme', 'class'] });
+    const mql = window.matchMedia?.('(prefers-color-scheme: dark)') ?? null;
+    mql?.addEventListener?.('change', bump);
+    return () => {
+      obs.disconnect();
+      mql?.removeEventListener?.('change', bump);
+    };
+  }, []);
+  return tick;
+}
 
 function cssColor(name: string, fallback: string): string {
   try {
@@ -339,7 +361,9 @@ export function PlateView({ area, extruderAreas = null, parts, selected, onPick,
     if (active) kit.current?.draw();
   }, [active]);
 
-  // The plate: outline, grid, a thin slab.
+  // The plate: outline, grid, a thin slab. Coloured from the brand tokens, so rebuilt on a theme flip.
+  const themeTick = useThemeTick();
+  const framedFor = useRef('');
   const areaKey = (area ?? FALLBACK_AREA).join(';');
   const extruderKey = (extruderAreas ?? []).join(';');
   useEffect(() => {
@@ -354,7 +378,7 @@ export function PlateView({ area, extruderAreas = null, parts, selected, onPick,
       new THREE.MeshStandardMaterial({ color: cssColor('--color-bg-deep', '#1b2a20'), roughness: 0.9 }),
     );
     slab.position.set(x0 + w / 2, y0 + d / 2, -1.05);
-    const grid = new THREE.GridHelper(Math.max(w, d), 16, 0x3a5c4a, 0x2a4a3a);
+    const grid = new THREE.GridHelper(Math.max(w, d), 16, new THREE.Color(cssColor('--color-border', '#3a5c4a')), new THREE.Color(cssColor('--color-border-subtle', '#2a4a3a')));
     grid.rotation.x = Math.PI / 2;
     grid.position.set(x0 + w / 2, y0 + d / 2, 0.02);
     const edge = new THREE.LineLoop(
@@ -379,9 +403,13 @@ export function PlateView({ area, extruderAreas = null, parts, selected, onPick,
       fill.userData.oneNozzle = z.only;
       k.plate.add(fill, lines);
     }
-    k.target.set(x0 + w / 2, y0 + d / 2, 0);
-    k.frame(w, d);
-  }, [areaKey, extruderKey]);
+    // A theme flip recolours; only a new plate shape moves the camera.
+    if (framedFor.current !== areaKey) {
+      framedFor.current = areaKey;
+      k.target.set(x0 + w / 2, y0 + d / 2, 0);
+      k.frame(w, d);
+    } else k.draw();
+  }, [areaKey, extruderKey, themeTick]);
 
   // The parts of this plate.
   useEffect(() => {
@@ -444,7 +472,7 @@ export function PlateView({ area, extruderAreas = null, parts, selected, onPick,
     }
     k.paths.clear();
     pathObjs.current = toolpath ? buildPaths(toolpath, k.paths, new THREE.Color(cssColor('--color-bg-deep', '#1b2a20'))) : [];
-  }, [toolpath]);
+  }, [toolpath, themeTick]);
 
   // Which view, which layers: draw ranges only, no geometry is rebuilt while scrubbing.
   useEffect(() => {
@@ -467,7 +495,7 @@ export function PlateView({ area, extruderAreas = null, parts, selected, onPick,
       }
     }
     k.draw();
-  }, [show, toolpath, layer, travel]);
+  }, [show, toolpath, layer, travel, themeTick]);
 
   return (
     <div className="p3d-view-host" data-testid="p3d-view" title="Drag to orbit · wheel to zoom · click a part to select it">

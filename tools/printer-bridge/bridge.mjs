@@ -60,7 +60,7 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { listenBambu } from './ssdp.mjs';
+import { listenBambu, searchBambu } from './ssdp.mjs';
 import { peers as registryPeers, register as registerBridge } from '../bridge-registry.mjs';
 
 export const DEFAULT_PORT = 8788;
@@ -1814,9 +1814,19 @@ function main() {
     process.stderr.write(`printer-bridge: ${e.message}\n`);
     process.exit(2);
   }
-  const disc = o.discover ? listenBambu({ log: (l) => process.stdout.write(l + '\n') }) : null;
+  // Two ways in, one list: the printers' own announcements (blocked by a deny-incoming firewall) and
+  // the replies to our own search (not blocked). Discovery is "listening" when either one works.
+  const discLog = (l) => process.stdout.write(l + '\n');
+  const heard = o.discover ? listenBambu({ log: discLog }) : null;
+  const asked = heard ? searchBambu({ seen: heard.seen, log: discLog }) : null;
   const server = createBridge({
-    discovery: disc ? () => disc : null,
+    discovery: heard
+      ? () => ({
+          seen: heard.seen,
+          listening: heard.listening || asked.searching,
+          error: [heard.listening ? '' : `listen: ${heard.error || 'starting'}`, asked.searching ? '' : `search: ${asked.error || 'starting'}`].filter(Boolean).join('; ') || null,
+        })
+      : null,
     token: tok.token, code: ac.code, printer: o.printer, printerPort: o.printerPort, certSha256: o.certSha256,
     origins: o.origins, timeoutS: o.timeoutS, maxBody: o.maxBody, serial: o.serial, mqttPort: o.mqttPort, ffmpeg: o.ffmpeg, cameraPort: o.cameraPort,
   });
