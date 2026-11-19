@@ -22,6 +22,7 @@
 
 import type { DocKind, Result, ServerStore } from './serverStore';
 import { DOC_ID_RE } from './serverStore';
+import { SHEETS_KEY } from './materials/stock';
 
 export const MIGRATE_SCHEMA = '2bee.app.migrate/1';
 
@@ -68,7 +69,7 @@ const LS_KINDS: Record<string, { kind: DocKind; id: string }> = {
   '2bee.app.machines.printers': { kind: 'printers', id: 'printers' },
   '2bee.app.router.measured': { kind: 'router-measured', id: 'measured' },
   '2bee.app.shop.archived': { kind: 'shop-archive', id: 'archived' },
-  '2bee.app.materials.sheets': { kind: 'stock', id: 'sheets' },
+  [SHEETS_KEY]: { kind: 'stock', id: 'flat-stock' },
   '2bee.app.materials.filaments': { kind: 'stock', id: 'filaments' },
   '2bee.app.materials.onhand': { kind: 'components-onhand', id: 'onhand' },
   '2bee.app.cad.session': { kind: 'cad-session', id: 'session' },

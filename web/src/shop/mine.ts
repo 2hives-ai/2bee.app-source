@@ -177,6 +177,7 @@ export function mineSubject(m: MineItem): ViewerSubject {
     id: m.id,
     title: m.title,
     path: d ? `your design · ${d.path}` : 'your drawing',
+    thumbKey: m.title,
     parts: m.rec ? m.rec.cad.solids : null,
     badge: { cls: m.rec ? (m.rec.cad.complete ? 'trusted' : 'suspect') : 'nothing', text: m.rec ? (m.rec.cad.complete ? 'mine · mesh closed' : 'mine · suspect') : 'mine' },
     note: mineNote(m),

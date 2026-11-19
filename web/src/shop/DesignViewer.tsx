@@ -19,19 +19,18 @@
 // terminates the worker, and a build that runs past VIEWER_GIVE_UP_MS is stopped
 // and reported — never left spinning.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import { CadPreview } from '../cad/preview';
 import { ParamsPanel } from '../cad/ParamsPanel';
 import { setParam } from '../cad/params';
 import { requestOpenIn } from './handoff';
-import { captureCanvas, saveThumbnail } from '../cnc/thumbnail';
+import { captureCanvas, saveThumbnail, THUMB_SAVED_EVENT } from '../cnc/thumbnail';
 import type { MeshResult } from '../cad/mesh';
 import { loadDesign, trustLine, type ShopEntry } from './catalogue';
 
 import { DESIGN_GIVE_UP_MS, runDesignWorker } from './designWorker';
 import { DesignSpec } from './DesignSpec';
 import { ARCHIVE_TITLE } from './archive';
-import { readThumbnail } from '../cnc/thumbnail';
 import './DesignViewer.css';
 
 /** After this long the dialog says the build is slow, and why. */
@@ -61,6 +60,11 @@ export interface ViewerSubject {
   saved?: () => MeshResult;
   /** A cad catalogue design: it has a functional specification (keyed by `path`). */
   catalogue?: boolean;
+  /** The key "Save thumbnail" stores the picture under: the key the CARD reads
+   *  (`savedPicture`). Defaults to `path`. A saved design's `path` is a label
+   *  ("your design · X.scad") while its card reads its title, so the two must be
+   *  named here, or the picture is saved where no card looks (bug fixed 2026-11-19). */
+  thumbKey?: string;
 }
 
 export function catalogueSubject(e: ShopEntry, fetchImpl?: typeof fetch): ViewerSubject {
@@ -84,34 +88,32 @@ type Phase =
   | { kind: 'ready'; result: MeshResult }
   | { kind: 'failed'; why: string };
 
-/**
- * A picture the user saved for this design, if any (`cnc/thumbnail.ts` store).
- * Keys, in order: the catalogue PATH (what cad's Save thumbnail uses for a
- * catalogue design, its selfPath), then the TITLE (a saved model's name, and
- * what pictures saved from cnc used before 2026-10-15).
- */
-export function savedPicture(e: { title: string; path?: string }): { dataUrl: string } | null {
-  for (const k of [e.path, e.title]) {
-    if (!k) continue;
-    try {
-      const t = readThumbnail(k);
-      if (t) return t;
-    } catch {
-      /* storage blocked: fall back to the catalogue picture */
-    }
-  }
-  return null;
+export { savedPicture } from './savedPicture';
+import { savedPicture } from './savedPicture';
+
+/** Re-render whenever a picture is saved anywhere on the page. */
+export function useThumbSaves(): void {
+  const [, bump] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    window.addEventListener(THUMB_SAVED_EVENT, bump);
+    return () => window.removeEventListener(THUMB_SAVED_EVENT, bump);
+  }, []);
 }
 
 /** The clickable thumbnail. Its only job is to open the viewer. */
 export function ThumbButton<E extends { id: string; title: string; thumb: string | null; path?: string }>({
   entry,
   onView,
+  fallback,
 }: {
   entry: E;
   onView: (e: E) => void;
+  /** A picture drawn by this page when there is neither a saved nor a catalogue one. */
+  fallback?: () => string | null;
 }) {
+  useThumbSaves();
   const saved = savedPicture(entry);
+  const auto = !saved && !entry.thumb && fallback ? fallback() : null;
   return (
     /* 🔴 role="button", NOT <button>, and on purpose: every card already has its action as
      * a <button>, and journeys/make/designs specs (other lanes' files) find "the card's
@@ -143,6 +145,13 @@ export function ThumbButton<E extends { id: string; title: string; thumb: string
         </>
       ) : entry.thumb ? (
         <img src={`shop/${entry.thumb}`} alt="" loading="lazy" />
+      ) : auto ? (
+        <>
+          <img src={auto} alt="" data-testid={`thumb-auto-${entry.id}`} />
+          <span className="shop-thumb-src" aria-hidden="true">
+            default picture
+          </span>
+        </>
       ) : (
         <span className="shop-thumb-none">no picture</span>
       )}
@@ -419,7 +428,7 @@ export function DesignViewer({
                     const stage = (e.currentTarget as HTMLElement).closest('.dv-stage');
                     const cv = stage?.querySelector<HTMLCanvasElement>('[data-testid="cad-preview-canvas"]');
                     const url = cv ? captureCanvas(cv) : null;
-                    const ok = !!url && saveThumbnail(entry.path, url);
+                    const ok = !!url && saveThumbnail(entry.thumbKey ?? entry.path, url);
                     setThumbNote(ok ? 'Saved as this design’s picture.' : 'Not saved: this browser refused it, or nothing was drawn yet.');
                   }}
                 >

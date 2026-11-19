@@ -3,11 +3,12 @@
 // and what a saved item does NOT carry.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { DesignViewer, savedPicture, ThumbButton } from './DesignViewer';
+import { DesignViewer, savedPicture, ThumbButton, useThumbSaves } from './DesignViewer';
+import { cachedPicture } from './autoPicture';
 import { requestOpenIn, type HandoffTarget, type OpenTarget } from './handoff';
 import { designToCnc, recordStandsUp } from './toCnc';
 import { ARCHIVE_TITLE } from './archive';
-import { listMine, mineCnc, mineDesign, mineNote, mineSubject, type MineItem } from './mine';
+import { listMine, meshFromRecord, mineCnc, mineDesign, mineNote, mineSubject, type MineItem } from './mine';
 
 /** The user's saved items, re-read on every store change. Lifted so the page can show the count. */
 export function useMine(): { items: MineItem[] | null; error: string | null } {
@@ -51,6 +52,8 @@ export function MineShelf({
   onArchive?: (m: MineItem) => void;
 }) {
   const [viewing, setViewing] = useState<MineItem | null>(null);
+  /* The drawing-file cards read saved pictures directly; redraw them after a save too. */
+  useThumbSaves();
   const [failed, setFailed] = useState<string | null>(null);
   const subject = useMemo(() => (viewing ? mineSubject(viewing) : null), [viewing]);
 
@@ -131,7 +134,11 @@ export function MineShelf({
             return (
               <li key={m.id} className={`shop-card shop-card-split shop-card-mine`} data-testid="shop-mine-card">
                 {can3d ? (
-                  <ThumbButton entry={m} onView={setViewing} />
+                  <ThumbButton
+                    entry={m}
+                    onView={setViewing}
+                    fallback={() => cachedPicture(`${m.id}@${m.savedAt}`, () => meshFromRecord(m).parts[0]?.positions ?? null)}
+                  />
                 ) : (
                   <span className="shop-thumb" style={{ position: 'relative' }}>
                     {savedPicture(m) ? (

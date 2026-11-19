@@ -27,9 +27,20 @@ export function captureCanvas(src: HTMLCanvasElement): string | null {
 }
 
 /** Store it; false when the browser refused (quota, storage disabled). */
+/** Fired on `window` after every successful save, detail `{ key }`. A card that
+ *  shows a saved picture listens to it, so a picture saved in the 3D viewer
+ *  replaces the card's picture at once (founder 2026-11-19: "save thumbnail ->
+ *  image is not updated on the main screen"). */
+export const THUMB_SAVED_EVENT = '2bee-thumb-saved';
+
 export function saveThumbnail(design: string, dataUrl: string): boolean {
   try {
     globalThis.localStorage?.setItem(THUMB_PREFIX + design, JSON.stringify({ dataUrl, savedAt: Date.now(), from: 'cnc' }));
+    try {
+      globalThis.dispatchEvent?.(new CustomEvent(THUMB_SAVED_EVENT, { detail: { key: design } }));
+    } catch {
+      /* no window (node): the save itself succeeded */
+    }
     return true;
   } catch {
     return false;
