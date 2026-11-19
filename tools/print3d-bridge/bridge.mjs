@@ -201,6 +201,11 @@ export function createBridge(opts) {
       return res.end();
     }
 
+    // Discovery (founder 2026-11-19): the ONE route without a token. It says what this is and
+    // nothing else — no engine path, no data dir, no version — so the page can put this address in
+    // the right row. Host guard and Origin allowlist above still apply.
+    if (req.method === 'GET' && urlPath === '/v1/hello') return send(200, { ok: true, bridge: '2bee.print3d-bridge', api: 1, needsToken: true });
+
     if (!tokenMatches(req.headers.authorization, token)) {
       req.resume();
       return fail(401, 'missing or wrong bearer token', { 'WWW-Authenticate': 'Bearer' });

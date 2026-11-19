@@ -543,3 +543,15 @@ test('slice disk budget: copies that need more STL than SLICE_MAX_MB are refused
   }
 });
 
+
+test('/v1/hello: the one route without a token, says only what this is; Host + Origin guards still apply', async () => {
+  const r = await req(B.port, 'GET', '/v1/hello', { headers: { origin: 'https://2bee.app' } });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json, { ok: true, bridge: '2bee.print3d-bridge', api: 1, needsToken: true });
+  assert.equal(r.headers['access-control-allow-origin'], 'https://2bee.app');
+  assert.equal((await req(B.port, 'GET', '/v1/hello', { headers: { origin: 'https://evil.example' } })).status, 403);
+  assert.equal((await req(B.port, 'GET', '/v1/hello', { headers: { host: 'evil.example:80' } })).status, 403);
+  // Negative control: hello opens nothing else. POST to it, and every other route, still needs the token.
+  assert.equal((await req(B.port, 'POST', '/v1/hello')).status, 401);
+  assert.equal((await req(B.port, 'GET', '/v1/health')).status, 401);
+});

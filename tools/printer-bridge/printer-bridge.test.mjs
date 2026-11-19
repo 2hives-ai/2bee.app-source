@@ -1352,3 +1352,19 @@ test('objectFootprints on real Orca G-code: every label has an outline, and two 
   assert.ok(b > bMin);
   assert.deepEqual(m.printableArea, [[0, 0], [256, 0], [256, 256], [0, 256]]);
 });
+
+test('/v1/hello: the one route without a token, names the bridge and never the printer; guards still apply', async () => {
+  const b = await start(['--printer', '127.0.0.1', '--printer-port', '1']);
+  try {
+    const r = await request(b.port, { method: 'GET', path: '/v1/hello', headers: { origin: 'https://2bee.app' } });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json, { ok: true, bridge: '2bee.printer-bridge', api: 1, needsToken: true });
+    assert.equal(r.headers['access-control-allow-origin'], 'https://2bee.app');
+    assert.doesNotMatch(r.text, /127\.0\.0\.1/, 'the printer address is not discovery information');
+    assert.equal((await request(b.port, { method: 'GET', path: '/v1/hello', headers: { origin: 'https://evil.example' } })).status, 403);
+    assert.equal((await request(b.port, { method: 'GET', path: '/v1/hello', headers: { host: 'evil.example:80' } })).status, 403);
+    // Negative control: every other route still needs the token, and GET is still refused elsewhere.
+    assert.equal((await request(b.port, { path: '/v1/check' })).status, 401);
+    assert.equal((await request(b.port, { method: 'GET', path: '/v1/status' })).status, 405);
+  } finally { await b.stop(); }
+});

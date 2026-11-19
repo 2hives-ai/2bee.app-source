@@ -1074,7 +1074,7 @@ export function Print3dTab({ active = true, fetchImpl, transport }: Print3dTabPr
         Nothing has been printed from this tab. Parts are separated, laid flat and arranged by this app; slicing runs on this computer with 2bee.fdm, this app’s own
         engine, which has not printed yet: the first print is a calibration print. It only uploads: the print is started on the printer’s screen, after the checklist.
       </p>
-      {showConn && <Connections bridges={bridges} onChange={setBridges} />}
+      {showConn && <Connections bridges={bridges} onChange={setBridges} fetchImpl={fetchImpl} />}
       {health.kind !== 'ok' && (
         <p className={health.kind === 'bad' ? 'p3d-err' : 'p3d-sub'} data-testid="p3d-health">
           {health.text}

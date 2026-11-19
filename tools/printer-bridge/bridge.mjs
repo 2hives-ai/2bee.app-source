@@ -1479,7 +1479,7 @@ export function createBridge(opts) {
 
     if (req.method === 'OPTIONS') {
       const extra = {
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'authorization, content-type',
         'Access-Control-Max-Age': '600',
       };
@@ -1488,6 +1488,13 @@ export function createBridge(opts) {
       }
       res.writeHead(204, { ...cors, ...extra, 'Content-Length': '0' });
       return res.end();
+    }
+
+    // Discovery (founder 2026-11-19): the ONE route without a token. It says what this is and
+    // nothing else — never the printer address, serial or access code — so the page can put this
+    // address in the right row. Host guard and Origin allowlist above still apply.
+    if (req.method === 'GET' && path === '/v1/hello') {
+      return send(200, { ok: true, bridge: '2bee.printer-bridge', api: 1, needsToken: true });
     }
 
     const ROUTES = { '/v1/upload': 'upload', '/v1/check': 'check', '/v1/status': 'status', '/v1/start': 'start', '/v1/pause': 'pause', '/v1/resume': 'resume', '/v1/stop': 'stop', '/v1/camera.jpg': 'camera', '/v1/light': 'light', '/v1/fan': 'fan', '/v1/fanmode': 'fanmode', '/v1/speed': 'speed', '/v1/skip': 'skip' };
