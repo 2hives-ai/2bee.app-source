@@ -83,6 +83,9 @@ export interface PrinterCardState {
 
 export type PrinterCheckState = { kind: 'unset' } | { kind: 'checking' } | { kind: 'done'; reachable: boolean; haveCode: boolean; printer: string } | { kind: 'failed'; why: string };
 
+/** How often an unreachable printer is asked about again. */
+export const RECHECK_OFFLINE_MS = 10_000;
+
 type Check = { kind: 'idle' } | { kind: 'checking' } | { kind: 'done'; r: PrinterCheck } | { kind: 'failed'; why: string };
 type Up = { kind: 'idle' } | { kind: 'uploading' } | { kind: 'done'; r: PrinterUpload; plate: number; rec: UploadRecord } | { kind: 'failed'; why: string };
 type Act = { kind: 'idle' } | { kind: 'busy'; what: string } | { kind: 'done'; text: string } | { kind: 'failed'; why: string };
@@ -171,6 +174,27 @@ export function PrinterCard(p: PrinterCardProps) {
     void runCheck();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.printerBridge.url, p.printerBridge.token, p.recheck]);
+  // A printer that is off or asleep comes back by itself (founder 2026-11-19: "automatically ... find
+  // all printers"). While it is not reachable, ask again every 10 s WITHOUT the "CHECKING" flicker; the
+  // badge only changes when the answer does. Stops once reachable, on a bridge error, or on unmount.
+  const offline = check.kind === 'done' && !check.r.reachable;
+  useEffect(() => {
+    if (!ready || !offline) return;
+    let gone = false;
+    const t = setTimeout(async () => {
+      try {
+        const r = await p.printer.json<PrinterCheck>('POST', '/v1/check', {});
+        if (!gone) setCheck({ kind: 'done', r });
+      } catch {
+        /* keep the last answer; "Check again" shows the error */
+      }
+    }, RECHECK_OFFLINE_MS);
+    return () => {
+      gone = true;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, offline, check]);
 
   // The checklist is for ONE plate as sliced now: anything that changes it starts the list again.
   const items = [
@@ -350,6 +374,7 @@ export function PrinterCard(p: PrinterCardProps) {
         </div>
         {!ready && <p className="p3d-sub">Set up the printer bridge under Connections to upload. Slicing works without it.</p>}
         {check.kind === 'failed' && <p className="p3d-err">{check.why}</p>}
+        {check.kind === 'done' && <SeenOnLan r={check.r} />}
         {check.kind === 'done' && !check.r.haveCode && (
           <p className="p3d-warn">The printer bridge has no access code, so an upload would be refused. Start it with --code-file.</p>
         )}
@@ -732,5 +757,42 @@ export function PrinterCard(p: PrinterCardProps) {
         </div>
       </div>
     </section>
+  );
+}
+
+/**
+ * The printers the bridge heard announce themselves on the LAN (founder 2026-11-19: "automatically
+ * scans and find all printers"). Reported only: the bridge keeps talking to the address it was started
+ * with, because the access code goes wherever that points. A move is said plainly, with the restart.
+ */
+function SeenOnLan({ r }: { r: PrinterCheck }) {
+  if (r.seen == null) {
+    return (
+      <p className="p3d-sub" data-testid="p3d-seen">
+        {r.discovery && r.discovery !== 'off' ? `Printer discovery is ${r.discovery}.` : 'This printer bridge does not listen for printers on the network (restart it to update).'}
+      </p>
+    );
+  }
+  const moved = r.seen.find((x) => x.isThisPrinter && x.ip !== r.printer);
+  return (
+    <div className="p3d-sub" data-testid="p3d-seen">
+      {r.seen.length === 0 ? (
+        <p>No printer announced itself on the network in the last minute. A Bambu printer that is on, awake and in LAN mode does so every few seconds.</p>
+      ) : (
+        <ul>
+          {r.seen.map((x) => (
+            <li key={x.ip + x.serialTail}>
+              Heard on the network: {x.name || 'Bambu printer'} {x.model ? `(${x.model}) ` : ''}at {x.ip}, serial …{x.serialTail}
+              {x.isThisPrinter ? (x.ip === r.printer ? ' · this printer' : ' · this printer, at a NEW address') : ' · another printer'}
+            </li>
+          ))}
+        </ul>
+      )}
+      {moved && (
+        <p className="p3d-warn" data-testid="p3d-seen-moved">
+          This X2D now answers at {moved.ip}; the printer bridge still points at {r.printer}. Restart the bridge with --printer {moved.ip}.
+        </p>
+      )}
+    </div>
   );
 }

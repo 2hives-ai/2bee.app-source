@@ -63,3 +63,35 @@ test('a typed address is kept; a second printer bridge is offered, not chosen', 
   await page.getByRole('button', { name: 'Use http://127.0.0.1:8790' }).click();
   await expect(page.getByTestId('p3d-conn-printer-url')).toHaveValue('http://127.0.0.1:8790');
 });
+
+test('printers heard on the LAN are listed; a moved X2D is said plainly; an offline printer is re-checked until it answers', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      '2bee.app.print3d.bridges',
+      JSON.stringify({ engine: { url: '', remember: false }, printer: { url: 'http://127.0.0.1:8788', token: 'e2e-printer-token-0123456789', remember: true } }),
+    );
+  });
+  let checks = 0;
+  const seen = [
+    { ip: '192.168.50.77', model: 'N6', name: 'Workshop X2D', connect: 'lan', serialTail: '1217', isThisPrinter: true, ageS: 2 },
+    { ip: '192.168.50.80', model: 'C12', name: 'P1S', connect: 'lan', serialTail: '9999', isThisPrinter: false, ageS: 5 },
+  ];
+  await page.route(/127\.0\.0\.1:87\d\d\//, (route) => {
+    const u = new URL(route.request().url());
+    const json = (b: unknown) => route.fulfill({ status: 200, headers: { ...cors, 'content-type': 'application/json' }, body: JSON.stringify(b) });
+    if (route.request().method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
+    if (u.port === '8788' && u.pathname === '/v1/hello') return hello(route, '2bee.printer-bridge');
+    if (u.port === '8788' && u.pathname === '/v1/check') {
+      checks++;
+      return json({ reachable: checks >= 2, haveCode: true, haveSerial: false, printer: '192.168.50.151', seen, discovery: 'listening' });
+    }
+    return route.abort('connectionrefused');
+  });
+  await open3d(page);
+  await expect(page.getByTestId('p3d-printer-badge')).toHaveText('NOT REACHABLE');
+  await expect(page.getByTestId('p3d-seen')).toContainText('Workshop X2D (N6) at 192.168.50.77, serial …1217 · this printer, at a NEW address');
+  await expect(page.getByTestId('p3d-seen')).toContainText('at 192.168.50.80, serial …9999 · another printer');
+  await expect(page.getByTestId('p3d-seen-moved')).toContainText('Restart the bridge with --printer 192.168.50.77');
+  // Nobody clicks anything: the card asks again by itself.
+  await expect(page.getByTestId('p3d-printer-badge')).toHaveText('REACHABLE', { timeout: 15_000 });
+});

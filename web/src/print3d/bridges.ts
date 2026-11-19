@@ -428,6 +428,25 @@ export interface PrinterCheck {
   printer: string;
   /** True when the bridge was started with --serial, so start/pause/stop/status can reach the printer. Absent from an older bridge. */
   haveSerial?: boolean;
+  /**
+   * Every Bambu printer the bridge heard announce itself on the LAN in the last minute (SSDP, UDP 2021).
+   * null = the bridge is not listening (or an older bridge): unknown, NOT "none heard".
+   */
+  seen?: SeenPrinter[] | null;
+  /** 'listening' | 'off' | 'not listening: <reason>'. */
+  discovery?: string;
+}
+
+export interface SeenPrinter {
+  ip: string;
+  model: string;
+  name: string;
+  connect: string;
+  /** Last 4 characters of the announced serial, as on the printer's label. */
+  serialTail: string;
+  /** The announced serial equals the bridge's --serial: this is the printer the bridge is set up for. */
+  isThisPrinter: boolean;
+  ageS: number;
 }
 
 export interface PrinterUpload {

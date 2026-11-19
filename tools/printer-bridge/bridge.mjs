@@ -60,6 +60,7 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { listenBambu } from './ssdp.mjs';
 import { peers as registryPeers, register as registerBridge } from '../bridge-registry.mjs';
 
 export const DEFAULT_PORT = 8788;
@@ -110,6 +111,7 @@ export function parseArgs(argv) {
     certSha256: null,
     timeoutS: DEFAULT_TIMEOUT_S,
     maxBody: DEFAULT_MAX_BODY,
+    discover: true,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -131,6 +133,7 @@ export function parseArgs(argv) {
     else if (a === '--printer-port') o.printerPort = int(val(), '--printer-port', 1);
     else if (a === '--mqtt-port') o.mqttPort = int(val(), '--mqtt-port', 1);
     else if (a === '--serial') o.serial = val();
+    else if (a === '--no-discover') o.discover = false;
     else if (a === '--ffmpeg') o.ffmpeg = val();
     else if (a === '--camera-port') o.cameraPort = int(val(), '--camera-port', 1);
     else if (a === '--printer-cert-sha256') o.certSha256 = normaliseFingerprint(val());
@@ -1411,6 +1414,8 @@ export function createBridge(opts) {
     mqttPort = DEFAULT_MQTT_PORT,
     ffmpeg = 'ffmpeg',
     cameraPort = DEFAULT_CAMERA_PORT,
+    /** () => { listening, error, seen: SeenPrinters } from ssdp.mjs listenBambu, or null (no discovery). */
+    discovery = null,
     log = (line) => process.stdout.write(line + '\n'),
   } = opts;
   if (!token) throw new Error('createBridge needs a token');
@@ -1531,7 +1536,15 @@ export function createBridge(opts) {
 
       if (route === 'check') {
         const reachable = await tcpReachable(printer, printerPort);
-        return send(200, { reachable, haveCode: !!code, haveSerial: !!serial, printer });
+        // Every Bambu printer heard on the LAN (ssdp.mjs). Reported, never acted on: the bridge keeps
+        // talking to --printer. `isThisPrinter` compares the announced serial with --serial; the serial
+        // itself is not sent, only its last 4 characters, as on the printer's own label.
+        const d = discovery ? discovery() : null;
+        const seen = d
+          ? d.seen.list().map((x) => ({ ip: x.ip, model: x.model, name: x.name, connect: x.connect, serialTail: x.serial.slice(-4), isThisPrinter: !!serial && x.serial === serial, ageS: Math.round((Date.now() - x.at) / 1000) }))
+          : null;
+        const discoveryState = !d ? 'off' : d.listening ? 'listening' : `not listening: ${d.error || 'starting'}`;
+        return send(200, { reachable, haveCode: !!code, haveSerial: !!serial, printer, seen, discovery: discoveryState });
       }
 
       if (route === 'camera') {
@@ -1801,7 +1814,9 @@ function main() {
     process.stderr.write(`printer-bridge: ${e.message}\n`);
     process.exit(2);
   }
+  const disc = o.discover ? listenBambu({ log: (l) => process.stdout.write(l + '\n') }) : null;
   const server = createBridge({
+    discovery: disc ? () => disc : null,
     token: tok.token, code: ac.code, printer: o.printer, printerPort: o.printerPort, certSha256: o.certSha256,
     origins: o.origins, timeoutS: o.timeoutS, maxBody: o.maxBody, serial: o.serial, mqttPort: o.mqttPort, ffmpeg: o.ffmpeg, cameraPort: o.cameraPort,
   });
