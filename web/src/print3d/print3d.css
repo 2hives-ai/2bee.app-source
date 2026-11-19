@@ -45,6 +45,8 @@
 .p3d-conn legend { font-weight: 600; padding: 0 4px; }
 .p3d-conn label { display: flex; flex-direction: column; gap: 2px; font-size: var(--type-label); color: var(--color-text-muted); }
 .p3d-conn label.p3d-inline { flex-direction: row; align-items: center; gap: 6px; }
+/* The whole address and key are visible: the field spans the card (founder 2026-11-19: "I do not see the whole url"). */
+.p3d-conn input[type='text'], .p3d-conn input[type='password'] { width: 100%; min-width: 0; font-family: var(--font-mono, ui-monospace, monospace); }
 
 /* parts */
 .p3d-drop { border: 2px dashed var(--color-border); border-radius: var(--radius-default); padding: 18px; text-align: center; color: var(--color-text-muted); cursor: pointer; transition: var(--motion-fast); }

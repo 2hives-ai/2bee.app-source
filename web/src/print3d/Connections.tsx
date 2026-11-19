@@ -106,8 +106,8 @@ export function Connections({ bridges, onChange, look, onDiscover }: { bridges: 
         testid="p3d-conn-engine"
       />
       <Row
-        title="Printer bridge (upload only)"
-        what="Copies a sliced plate onto the X2D over the network. It cannot start, pause or stop a print."
+        title="Printer bridge"
+        what="Copies a sliced plate onto the X2D over the network, and starts, pauses, resumes and stops it there (started with --serial). Start needs you at the printer."
         start={`node tools/printer-bridge/bridge.mjs --printer <X2D IP> --code-file <file>`}
         port={PRINTER_PORT}
         key={`printer:${bridges.printer.url}`}
