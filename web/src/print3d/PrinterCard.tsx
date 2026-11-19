@@ -777,7 +777,17 @@ function SeenOnLan({ r }: { r: PrinterCheck }) {
   return (
     <div className="p3d-sub" data-testid="p3d-seen">
       {r.seen.length === 0 ? (
-        <p>No printer announced itself on the network in the last minute. A Bambu printer that is on, awake and in LAN mode does so every few seconds.</p>
+        r.reachable ? (
+          /* The printer answers but its announcements never arrived: something between them and the
+           * bridge drops them (measured 2026-11-20: ufw "deny (incoming)" on the bridge's computer).
+           * Saying "is it on?" here would send the person to the wrong place. */
+          <p data-testid="p3d-seen-blocked">
+            {r.printer} answers, but no printer announcement reached the bridge in the last minute, so other printers on the network are not listed. A firewall that blocks incoming UDP 2021 on this computer does this
+            (Linux: sudo ufw allow from &lt;your LAN&gt; to any port 2021 proto udp).
+          </p>
+        ) : (
+          <p>No printer announced itself on the network in the last minute. A Bambu printer that is on, awake and in LAN mode does so every few seconds.</p>
+        )
       ) : (
         <ul>
           {r.seen.map((x) => (
