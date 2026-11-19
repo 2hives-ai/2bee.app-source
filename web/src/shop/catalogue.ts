@@ -14,6 +14,7 @@
 //
 // That is why {@link CatalogueState} has a `kind` and not just an array.
 
+import type { Variant } from './variants';
 import type { Resolution } from '../cad/resolution';
 
 export interface ShopEntry {
@@ -37,6 +38,8 @@ export interface ShopEntry {
    */
   describes?: { part: string; text: string }[];
   partNames?: string[];
+  /** The parts this one file makes and the defines that select each (src/shop/variants.ts). Absent for a one-part file. */
+  variants?: Variant[];
   /** Top-level solids the mesher produced. */
   parts: number;
   triangles: number;

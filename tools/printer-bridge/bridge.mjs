@@ -1555,7 +1555,14 @@ export function createBridge(opts) {
           res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': jpeg.length, 'Cache-Control': 'no-store', 'X-Frame-Age-Ms': String(ageMs), ...cors });
           return res.end(jpeg);
         } catch (e) {
-          return fail(e.status ?? 502, redact(String(e.message), code));
+          // "no frame within 12 s" names the symptom. Measured 2026-11-20 during a print: upload (990)
+          // and MQTT (8883) open, live view (322) CLOSED, so ffmpeg had nothing to read. Ask the port
+          // only now, after a failure: a connect per frame would hit the printer's RTSP server twice a second.
+          let msg = redact(String(e.message), code);
+          if (!(await tcpReachable(printer, cameraPort, 1500))) {
+            msg = `the printer does not offer its live view: port ${cameraPort} on ${printer} is closed, while the printer itself answers. Turn on LAN live view in the printer's settings. If it is on, a camera fault stops it too: see the printer's camera messages (codes 0500-0600-…). (${msg})`;
+          }
+          return fail(e.status ?? 502, msg);
         }
       }
       if (route !== 'upload') return printerCommand(route, chunks, send, fail);

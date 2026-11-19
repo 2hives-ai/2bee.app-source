@@ -1372,3 +1372,25 @@ test('/v1/hello: the one route without a token, names the bridge and never the p
     assert.equal((await request(b.port, { method: 'GET', path: '/v1/status' })).status, 405);
   } finally { await b.stop(); }
 });
+
+test('camera: when the live view port is closed the failure SAYS so (measured on the X2D 2026-11-20); an open port keeps the reader error', async () => {
+  // A closed port: bind one, note it, close it.
+  const closed = await new Promise((r) => { const s = net.createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
+  const b = await start(['--printer', '127.0.0.1', '--ffmpeg', '/bin/false', '--camera-port', String(closed)]);
+  try {
+    const r = await request(b.port, { path: '/v1/camera.jpg', headers: good, body: {} });
+    assert.ok(r.status >= 500, r.text);
+    assert.match(r.json.error.message, new RegExp(`port ${closed} on 127\\.0\\.0\\.1 is closed`));
+    assert.match(r.json.error.message, /LAN live view/);
+    assert.ok(!r.text.includes(CODE), 'the access code leaked');
+  } finally { await b.stop(); }
+  // Positive control: the port IS open (something listens), so the message must NOT blame the port.
+  const open = net.createServer((c) => c.destroy());
+  await new Promise((r) => open.listen(0, '127.0.0.1', r));
+  const b2 = await start(['--printer', '127.0.0.1', '--ffmpeg', '/bin/false', '--camera-port', String(open.address().port)]);
+  try {
+    const r = await request(b2.port, { path: '/v1/camera.jpg', headers: good, body: {} });
+    assert.ok(r.status >= 500, r.text);
+    assert.doesNotMatch(r.json.error.message, /is closed/);
+  } finally { await b2.stop(); open.close(); }
+});

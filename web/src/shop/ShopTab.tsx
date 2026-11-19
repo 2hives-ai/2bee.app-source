@@ -185,7 +185,7 @@ export default function ShopTab({ onOpened, fetchImpl }: ShopTabProps) {
 
   const open = useCallback(
     /** Resolves to the failure sentence, or null when the design was handed over. */
-    async (e: ShopEntry, target: HandoffTarget = 'cad'): Promise<string | null> => {
+    async (e: ShopEntry, target: HandoffTarget = 'cad', as?: { source: string; label: string }): Promise<string | null> => {
       const where = target === 'cad' ? '2bee.cad' : target;
       setOpening(`${e.id}:${target}`);
       setFailed(null);
@@ -193,7 +193,10 @@ export default function ShopTab({ onOpened, fetchImpl }: ShopTabProps) {
       setProgress({ phase: `fetching ${e.title} and its imports`, step: 1, steps });
       try {
         const d = await loadDesign(e.id, fetchImpl ?? fetch);
-        const design = { id: e.id, title: e.title, path: d.path, source: d.sources[d.path], files: d.sources };
+        /* `as`: the source as the viewer set it (a chosen part, edited variables), not the catalogue file. */
+        const source = as ? as.source : d.sources[d.path];
+        const title = as?.label ? `${e.title} (${as.label})` : e.title;
+        const design = { id: e.id, title, path: d.path, source, files: { ...d.sources, [d.path]: source } };
         if (target === 'cnc') {
           /* 🔴 The CNC tab plans from the DRAWINGS list, so the design is meshed and saved
            * there first, through 2bee.cad's own Save route (toCnc.ts) — refusals included. */
@@ -201,7 +204,7 @@ export default function ShopTab({ onOpened, fetchImpl }: ShopTabProps) {
           const r = await designToCnc(design, { parts: e.parts });
           if (!r.ok) throw new Error(`it was NOT sent to cnc: ${r.why}`);
           setProgress({ phase: `saved as "${r.cnc.drawingName}" — handing over to cnc`, step: 3, steps });
-          requestOpenIn('cnc', { id: e.id, title: e.title, cnc: r.cnc });
+          requestOpenIn('cnc', { id: e.id, title, cnc: r.cnc });
         } else if (target === '3d') {
           /* The 3d tab slices STL; the design is meshed off the page and handed over as one. */
           setProgress({ phase: `${Object.keys(d.sources).length} file(s) read — building the solid as an STL`, step: 2, steps });
@@ -523,6 +526,7 @@ export default function ShopTab({ onOpened, fetchImpl }: ShopTabProps) {
           entry={viewingSubject}
           onClose={() => setViewing(null)}
           onOpenInCad={() => onOpened('cad')}
+          onOpenWith={(t, source, label) => open(viewing, t, { source, label })}
           onArchive={() => archive.archive(archiveKeyOfEntry(viewing))}
         />
       ) : null}

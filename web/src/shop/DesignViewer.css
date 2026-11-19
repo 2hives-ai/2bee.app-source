@@ -91,3 +91,8 @@
   gap: 8px;
   justify-content: flex-end;
 }
+
+/* Which part of a multi-part file to build (variants.ts), and where to send it. */
+.dv-variants, .dv-openwith { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; padding: 0 16px; }
+.dv-variants-label, .dv-variants-note { font-size: var(--type-label); color: var(--color-text-muted); }
+.dv-variants button[aria-pressed='true'] { border-color: var(--color-amber); color: var(--color-text-primary); font-weight: 600; }

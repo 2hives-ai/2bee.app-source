@@ -23,6 +23,7 @@ import { useEffect, useReducer, useRef, useState } from 'react';
 import { CadPreview } from '../cad/preview';
 import { ParamsPanel } from '../cad/ParamsPanel';
 import { setParam } from '../cad/params';
+import { applyVariant, currentVariant, variantLabel, type Variant } from './variants';
 import { requestOpenIn } from './handoff';
 import { captureCanvas, saveThumbnail, THUMB_SAVED_EVENT } from '../cnc/thumbnail';
 import type { MeshResult } from '../cad/mesh';
@@ -56,6 +57,8 @@ export interface ViewerSubject {
   note: string;
   /** Fetch the source and its import closure. */
   load: () => Promise<{ path: string; sources: Record<string, string> }>;
+  /** The parts this one file makes (fleet_parts.yaml defines), for the "which part" switch. */
+  variants?: Variant[];
   /** A mesh that already exists (a user's saved model) — shown instead of building one. */
   saved?: () => MeshResult;
   /** A cad catalogue design: it has a functional specification (keyed by `path`). */
@@ -76,6 +79,7 @@ export function catalogueSubject(e: ShopEntry, fetchImpl?: typeof fetch): Viewer
     badge: { cls: e.trust, text: e.trust === 'trusted' ? 'mesh closed' : e.trust },
     note: trustLine(e),
     load: () => loadDesign(e.id, fetchImpl ?? fetch),
+    ...(e.variants ? { variants: e.variants } : {}),
     catalogue: true,
   };
 }
@@ -167,12 +171,18 @@ export function DesignViewer({
   onClose,
   onOpenInCad,
   onArchive,
+  onOpenWith,
 }: {
   entry: ViewerSubject;
   onClose: () => void;
   onOpenInCad?: () => void;
   /** Hide this design from the list in this browser (`archive.ts`); the dialog closes. Nothing is deleted. */
   onArchive?: () => void;
+  /**
+   * Send THIS source (the variables as set here, the chosen part included) to the 3d or cnc tab.
+   * Resolves to the failure sentence, or null when it was handed over.
+   */
+  onOpenWith?: (target: '3d' | 'cnc', source: string, label: string) => Promise<string | null>;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const [phase, setPhase] = useState<Phase>({ kind: 'fetching' });
@@ -370,6 +380,25 @@ export function DesignViewer({
           ) : null}
         </div>
 
+        {loaded && mainSrc !== null && entry.variants && entry.variants.length > 1 ? (
+          <VariantSwitch
+            variants={entry.variants}
+            source={mainSrc}
+            base={loaded.sources[loaded.path]}
+            busy={phase.kind === 'building'}
+            onSource={setMainSrc}
+          />
+        ) : null}
+        {loaded && mainSrc !== null && onOpenWith ? (
+          <OpenWith
+            label={entry.variants ? (() => { const v = currentVariant(mainSrc, entry.variants); return v ? variantLabel(v, entry.variants) : 'as set here'; })() : changed ? 'as set here' : ''}
+            onOpen={async (t) => {
+              const why = await onOpenWith(t, mainSrc, entry.variants ? (currentVariant(mainSrc, entry.variants)?.part ?? 'edited') : changed ? 'edited' : '');
+              if (!why) ref.current?.close();
+              return why;
+            }}
+          />
+        ) : null}
         {loaded && mainSrc !== null ? (
           <div className="dv-params">
             <ParamsPanel
@@ -462,3 +491,62 @@ export function DesignViewer({
     </dialog>
   );
 }
+
+/**
+ * Which of this file's registered parts to build (founder 2026-11-20: "a Variable to switch to buck
+ * holder"). The choices are cad's rows in fleet_parts.yaml; picking one rewrites the variables it
+ * defines, exactly as the Variables panel would. A part that cannot be applied is shown, disabled, with why.
+ */
+function VariantSwitch({ variants, source, base, busy, onSource }: { variants: Variant[]; source: string; base: string; busy: boolean; onSource: (s: string) => void }) {
+  const now = currentVariant(source, variants);
+  const tried = variants.map((v) => ({ v, r: applyVariant(base, v) }));
+  return (
+    <div className="dv-variants" role="group" aria-label="Which part" data-testid="design-viewer-variants">
+      <span className="dv-variants-label">This file makes {variants.length} parts. Build:</span>
+      {tried.map(({ v, r }) => (
+        <button
+          key={v.part}
+          type="button"
+          aria-pressed={now?.part === v.part}
+          disabled={busy || !r.ok}
+          title={r.ok ? `${v.part}: ${Object.entries(v.defines).map(([k, t]) => `${k} = ${t}`).join(', ') || 'the file as it stands'}` : r.why}
+          onClick={() => {
+            // Onto the variables as set now (other edits kept); onto the catalogue file if that fails.
+            const a = applyVariant(source, v);
+            if (a.ok) onSource(a.source);
+            else if (r.ok) onSource(r.source);
+          }}
+          data-testid={`design-viewer-variant-${v.part}`}
+        >
+          {variantLabel(v, variants)}
+        </button>
+      ))}
+      {now === null ? <span className="dv-variants-note">(variables changed by hand: none of these exactly)</span> : null}
+    </div>
+  );
+}
+
+/** Send what is built here, as set here, to the 3d or cnc tab. */
+function OpenWith({ label, onOpen }: { label: string; onOpen: (t: '3d' | 'cnc') => Promise<string | null> }) {
+  const [busy, setBusy] = useState<'' | '3d' | 'cnc'>('');
+  const [why, setWhy] = useState('');
+  const go = async (t: '3d' | 'cnc') => {
+    setBusy(t);
+    setWhy('');
+    const w = await onOpen(t);
+    setBusy('');
+    if (w) setWhy(w);
+  };
+  return (
+    <div className="dv-openwith" data-testid="design-viewer-open-with">
+      <button type="button" className="primary" disabled={!!busy} onClick={() => void go('3d')} data-testid="design-viewer-open-3d">
+        {busy === '3d' ? 'Building the STL…' : `3D print${label ? ` (${label})` : ''}`}
+      </button>
+      <button type="button" disabled={!!busy} onClick={() => void go('cnc')} data-testid="design-viewer-open-cnc">
+        {busy === 'cnc' ? 'Saving for cnc…' : `Open in cnc${label ? ` (${label})` : ''}`}
+      </button>
+      {why ? <p className="p3d-err" role="alert">{why}</p> : null}
+    </div>
+  );
+}
+

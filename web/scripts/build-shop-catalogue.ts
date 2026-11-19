@@ -58,6 +58,7 @@ import { parseScad, type SceneNode } from '../src/cad/scad.ts';
 import { makeLibraryHost, normalisePath, importEdges, type ScadLibrary } from '../src/cad/library.ts';
 import { meshScene } from '../src/cad/mesh.ts';
 import { machineMeasure, type Resolution } from '../src/cad/machine.ts';
+import { parseDefines, type Variant } from '../src/shop/variants.ts';
 
 const WEB = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CAD_ROOT = join(WEB, '..', '..', '..', 'hardware', 'cad');
@@ -537,6 +538,22 @@ function readRegisteredParts(text: string): Map<string, string> {
   return byName;
 }
 
+/** name -> its `defines:` (see src/shop/variants.ts). 🔴 A `defines:` this reader cannot parse STOPS the
+ *  build: a variant read wrong builds the default part under the variant's name. */
+function readPartDefines(text: string): Map<string, Record<string, string>> {
+  const out = new Map<string, Record<string, string>>();
+  for (const line of text.split('\n')) {
+    if (/^\s*#/.test(line)) continue;
+    const n = /^\s*-\s*\{\s*name:\s*([A-Za-z0-9_]+)\s*,/.exec(line);
+    const d = /defines:\s*\{([^}]*)\}/.exec(line);
+    if (!n || !d) continue;
+    const parsed = parseDefines(d[1]);
+    if (!parsed) throw new Error(`fleet_parts.yaml: cannot read the defines of ${n[1]}: {${d[1]}}`);
+    out.set(n[1], parsed);
+  }
+  return out;
+}
+
 /** The `descriptions:` map. Keys at one indent level, values folded (`>`) or
  *  plain. Written here rather than pulled in: a YAML dependency in an AGPL tree
  *  is a licence question (see AGENTS.md), and this reads two known shapes.
@@ -572,7 +589,15 @@ function readDescriptions(text: string): { map: Map<string, string>; unread: str
   return { map, unread };
 }
 
-const registered = readRegisteredParts(readFileSync(join(CAD_ROOT, 'fleet_parts.yaml'), 'utf8'));
+const FLEET_PARTS_TEXT = readFileSync(join(CAD_ROOT, 'fleet_parts.yaml'), 'utf8');
+const registered = readRegisteredParts(FLEET_PARTS_TEXT);
+const partDefines = readPartDefines(FLEET_PARTS_TEXT);
+/** The variants of one file: its registered rows, when there are two or more and one sets a define. */
+function variantsOf(names: string[]): Variant[] | undefined {
+  if (names.length < 2) return undefined;
+  const vs = names.map((part) => ({ part, defines: partDefines.get(part) ?? {} }));
+  return vs.some((v) => Object.keys(v.defines).length > 0) ? vs : undefined;
+}
 const { map: DESCRIPTIONS, unread: DESC_UNREAD } = readDescriptions(
   readFileSync(join(CAD_ROOT, 'shop_descriptions.yaml'), 'utf8'),
 );
@@ -1149,6 +1174,8 @@ interface Entry {
   describes: { part: string; text: string }[];
   /** Registered part names this file produces; empty if it is not registered. */
   partNames: string[];
+  /** The parts this ONE file makes, each with the defines that select it (fleet_parts.yaml). Absent for a one-part file. */
+  variants?: Variant[];
   /** cad's functional specification for this design — see `SpecRef`. */
   spec: SpecRef;
 }
@@ -1496,6 +1523,7 @@ for (const fam of FAMILIES) {
       resolution: forMachine.resolution,
       sizeMm, files: closure.length, bytes, thumb: shot ? `t/${id}.png` : null,
       partNames: pathToNames.get(path) ?? [],
+      ...(variantsOf(pathToNames.get(path) ?? []) ? { variants: variantsOf(pathToNames.get(path) ?? []) } : {}),
       describes: (pathToNames.get(path) ?? [])
         .filter((n) => DESCRIPTIONS.has(n))
         .map((n) => ({ part: n, text: DESCRIPTIONS.get(n)! })),
