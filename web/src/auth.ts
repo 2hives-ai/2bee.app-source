@@ -201,8 +201,9 @@ export interface TokenSet {
 /** Decode the payload of a JWT without verifying the signature.
  *  Signature verification is not needed here: we received this token directly
  *  from Cognito over HTTPS (the .app TLD is HSTS-preloaded), and the token
- *  is used only for client-side gating — it is never sent to a backend as
- *  proof of identity. If we ever add a backend, verify the signature there. */
+ *  is used here only for client-side gating. Since 2026-11-18 src/serverStore.ts
+ *  sends the ID token to the backend document store; there API Gateway's Cognito
+ *  authorizer verifies the signature, and this decode decides nothing. */
 function decodeJwtPayload(jwt: string): Record<string, unknown> {
   const parts = jwt.split('.');
   if (parts.length !== 3) return {};

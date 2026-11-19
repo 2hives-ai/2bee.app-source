@@ -11718,6 +11718,20 @@ if (SELF_PLANT === 'pend-unbudgeted' || SELF_PLANT === 'pend-budgeted') {
         return a >= 0 ? t.slice(a, t.indexOf('</p>', a) + 4) : null;
       },
     },
+    {
+      // Added 2026-11-19. Since e4ca392013 (login ON, 2026-11-17) the landing
+      // page is the FIRST thing an anonymous visitor on https://2bee.app/ sees,
+      // so it is the offer most users meet. It shipped undeclared and this gate
+      // went red on it (gate run 2026-11-19, tree 834b1e7789) — the sweep below
+      // is what caught it.
+      file: 'web/src/Landing.tsx',
+      what: 'the landing page',
+      region: (t) => {
+        const a = t.indexOf('<footer');
+        const b = t.indexOf('</footer>', a + 1);
+        return a >= 0 && b > a ? t.slice(a, b) : null;
+      },
+    },
   ];
 
   const surfaceProblems = [];
