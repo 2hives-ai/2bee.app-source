@@ -110,6 +110,15 @@ function fail(reason: FailReason, status: number, message: string, extra: Partia
 
 const NOT_DONE = 'Nothing was stored on the server.';
 
+/** The network error behind a thrown fetch, in brackets. Node's fetch throws
+ *  a bare "fetch failed" and keeps the reason in `cause`; dropping it hid a
+ *  307 from S3's global endpoint behind "Could not upload" (2026-11-20). */
+function why(e: unknown): string {
+  const err = e as { message?: unknown; cause?: { message?: unknown; code?: unknown } } | null;
+  const parts = [err?.message, err?.cause?.code, err?.cause?.message].filter((x) => typeof x === 'string' && x);
+  return parts.length ? ` (${parts.join(': ')})` : '';
+}
+
 async function readJson(r: Response): Promise<unknown> {
   try {
     return JSON.parse(await r.text());
@@ -172,8 +181,8 @@ export function createServerStore(opts: StoreOptions = {}) {
         body: body !== undefined ? JSON.stringify(body) : undefined,
         cache: 'no-store',
       });
-    } catch {
-      return fail('offline', 0, `Could not reach the server. ${NOT_DONE}`);
+    } catch (e) {
+      return fail('offline', 0, `Could not reach the server${why(e)}. ${NOT_DONE}`);
     }
     const json = await readJson(r);
     if (r.status < 200 || r.status > 299) return failFrom(r.status, json);
@@ -211,8 +220,8 @@ export function createServerStore(opts: StoreOptions = {}) {
       let b: Response;
       try {
         b = await fetchImpl(doc.download_url, { cache: 'no-store' });
-      } catch {
-        return fail('offline', 0, 'Could not download the document body.');
+      } catch (e) {
+        return fail('offline', 0, `Could not download the document body${why(e)}.`);
       }
       if (!b.ok) return fail('unexpected', b.status, `The document body download answered ${b.status}.`);
       const data = await readJson(b);
@@ -247,8 +256,8 @@ export function createServerStore(opts: StoreOptions = {}) {
       let s3: Response;
       try {
         s3 = await fetchImpl(up.upload_url, { method: 'PUT', headers: up.headers ?? { 'Content-Type': 'application/json' }, body: bytes });
-      } catch {
-        return fail('offline', 0, `Could not upload the document body. ${NOT_DONE}`);
+      } catch (e) {
+        return fail('offline', 0, `Could not upload the document body${why(e)}. ${NOT_DONE}`);
       }
       if (!s3.ok) return fail('unexpected', s3.status, `The body upload answered ${s3.status}. ${NOT_DONE}`);
       r = await call('PUT', path, { body_key: up.body_key, base_version: baseVersion, ...(meta !== undefined ? { meta } : {}) });

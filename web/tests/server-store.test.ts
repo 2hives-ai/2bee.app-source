@@ -69,6 +69,17 @@ test('network failure is offline, not saved', async () => {
   assert.match(saveStatusText(r), /NOT saved: .*Nothing was stored/);
 });
 
+test('a thrown S3 upload names its network cause and is still NOT saved', async () => {
+  // 2026-11-20: Node fetch threw a bare "fetch failed" on S3's 307 from the
+  // global endpoint; the cause was dropped and the report read like a DNS fault.
+  const err = new TypeError('fetch failed', { cause: new Error('Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer') });
+  const { f, calls } = mock([resp(200, { upload_url: 'https://s3.test/put', body_key: 'k' }), err]);
+  const r = await store(f).put('drawing', 'd1', { x: 'y'.repeat(INLINE_LIMIT) }, 0);
+  assert.equal(!r.ok && r.reason, 'offline');
+  assert.match(!r.ok ? r.message : '', /Could not upload the document body \(fetch failed: .*detached ArrayBuffer\)\. Nothing was stored/);
+  assert.equal(calls.length, 2);
+});
+
 test('409 version_conflict carries the current version', async () => {
   const { f } = mock([resp(409, { error: 'version_conflict', current_version: 7 })]);
   const r = await store(f).put('drawing', 'd1', {}, 5);

@@ -25,19 +25,20 @@ test('parseDefines reads every defines: in the real fleet_parts.yaml (a misread 
   assert.equal(parseDefines('board "bucks"'), null);
 });
 
-test('the CNC PCB holder: three parts, and "bucks" rewrites board = "bucks" in the real file', () => {
+test('the CNC PCB holder: three parts, defaults to "bucks", and "skr_pi" rewrites board = "skr_pi" in the real file', () => {
   const vs = rowsFor('2bee_cnc_table/cnc_pcb_holder_3d.scad');
   assert.deepEqual(vs.map((v) => v.part), ['cnc_pcb_holder_skr_pi', 'cnc_pcb_holder_bucks', 'cnc_pcb_holder_hbs57_usb6']);
   assert.deepEqual(vs.map((v) => variantLabel(v, vs)), ['skr pi', 'bucks', 'hbs57 usb6']);
-  assert.equal(currentVariant(HOLDER, vs)?.part, 'cnc_pcb_holder_skr_pi', 'the file as committed is the SKR + Pi holder');
-  const bucks = vs.find((v) => v.part === 'cnc_pcb_holder_bucks')!;
-  const r = applyVariant(HOLDER, bucks);
+  // Founder 2026-11-20: "make the app default to bucks variant" — cad set the file's default to bucks.
+  assert.equal(currentVariant(HOLDER, vs)?.part, 'cnc_pcb_holder_bucks', 'the file as committed is the bucks holder');
+  const skr = vs.find((v) => v.part === 'cnc_pcb_holder_skr_pi')!;
+  const r = applyVariant(HOLDER, skr);
   assert.ok(r.ok, r.ok ? '' : r.why);
   if (!r.ok) return;
-  assert.equal(scanParams(r.source).params.find((p) => p.name === 'board')?.value, 'bucks');
-  assert.equal(currentVariant(r.source, vs)?.part, 'cnc_pcb_holder_bucks');
+  assert.equal(scanParams(r.source).params.find((p) => p.name === 'board')?.value, 'skr_pi');
+  assert.equal(currentVariant(r.source, vs)?.part, 'cnc_pcb_holder_skr_pi');
   // Only that one value changed: the rest of the file is byte-identical.
-  assert.equal(r.source.replace('board      = "bucks";', 'board      = "skr_pi";'), HOLDER);
+  assert.equal(r.source.replace('board      = "skr_pi";', 'board      = "bucks";'), HOLDER);
 });
 
 test('a define the file does not assign at top level is REFUSED, not appended; a type mismatch too', () => {
@@ -50,5 +51,5 @@ test('a define the file does not assign at top level is REFUSED, not appended; a
 
 test('a hand-edited source matches no variant', () => {
   const vs = rowsFor('2bee_cnc_table/cnc_pcb_holder_3d.scad');
-  assert.equal(currentVariant(HOLDER.replace('board      = "skr_pi";', 'board      = "buck48_24";'), vs), null);
+  assert.equal(currentVariant(HOLDER.replace('board      = "bucks";', 'board      = "buck48_24";'), vs), null);
 });

@@ -19,8 +19,12 @@ test('the CNC PCB holder offers its three parts; "bucks" rebuilds and is what re
   await expect(dlg).toBeVisible();
   const sw = dlg.getByTestId('design-viewer-variants');
   await expect(sw).toContainText('This file makes 3 parts');
-  // The file as committed is the SKR + Pi holder: that button is the pressed one.
-  await expect(sw.getByTestId('design-viewer-variant-cnc_pcb_holder_skr_pi')).toHaveAttribute('aria-pressed', 'true', { timeout: 60_000 });
+  // The file as committed is the bucks holder (founder 2026-11-20: "make the app default to bucks
+  // variant"): that button is the pressed one. Switch away and back so the rebuild path still runs.
+  await expect(sw.getByTestId('design-viewer-variant-cnc_pcb_holder_bucks')).toHaveAttribute('aria-pressed', 'true', { timeout: 60_000 });
+  await sw.getByTestId('design-viewer-variant-cnc_pcb_holder_skr_pi').click();
+  await expect(sw.getByTestId('design-viewer-variant-cnc_pcb_holder_skr_pi')).toHaveAttribute('aria-pressed', 'true');
+  await expect(dlg.getByTestId('param-board')).toHaveValue('skr_pi');
   await sw.getByTestId('design-viewer-variant-cnc_pcb_holder_bucks').click();
   await expect(sw.getByTestId('design-viewer-variant-cnc_pcb_holder_bucks')).toHaveAttribute('aria-pressed', 'true');
   await expect(sw.getByTestId('design-viewer-variant-cnc_pcb_holder_skr_pi')).toHaveAttribute('aria-pressed', 'false');
