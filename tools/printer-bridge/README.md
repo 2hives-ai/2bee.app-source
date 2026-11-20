@@ -151,6 +151,7 @@ Every route is `POST`, need `Authorization: Bearer <bridge token>`, and answer J
 
 | Route | Body | Answer |
 |---|---|---|
+| `/v1/progress` | anything (ignored) | `{upload: {remote, phase, sent, total} \| null, queued}`. The upload on the printer link now, from the bridge's own counter: `sent` is bytes handed to the FTPS data socket (64 KB steps), `confirming` = all sent, waiting on the printer's 226 + SIZE. Never contacts the printer, takes no lock. The page draws the Upload button as a bar from it (founder 2026-11-20). |
 | `/v1/check` | anything (ignored) | `{reachable, haveCode, printer}`. `reachable` is a plain TCP connect to the printer's port 990. No TLS, no login, no FTP command. |
 | `/v1/upload` | `{"name": "feeder lid", "gcode": "<G-code text>"}` | 200 `{ok:true, remote, bytes, remoteBytes, md5, started:false}` |
 | `/v1/status` | anything | `{ok, state, task, percent, layer, layers, remainMin, nozzle, nozzleTarget, bed, bedTarget, error, slots, light, fanMode, fans}`, read from the printer. Absent values are `null` |

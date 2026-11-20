@@ -30,12 +30,13 @@
 // bridge was started with --serial (check says haveSerial). Without it the
 // card shows no printer state and Start stays off with that reason.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { BridgeError, configured, type BridgeConfig, type Client, type PrinterCheck, type PrinterStart, type PrinterStatus, type PrinterUpload } from './bridges';
 import type { ReportedSlot, SlotDecl } from './model';
 import { hoursMin } from './model';
 import { plateMap } from './plateMap';
 import { startBlock, startBody, type UploadRecord } from './startGate';
+import { uploadProgressView, type ProgressReply } from './uploadProgress';
 
 export interface PrinterCardProps {
   printerBridge: BridgeConfig;
@@ -114,6 +115,27 @@ export function PrinterCard(p: PrinterCardProps) {
   /* The object under the pointer, in the plate picture or the list: the two light up together. */
   const [hotObj, setHotObj] = useState<number | null>(null);
   const [up, setUp] = useState<Up>({ kind: 'idle' });
+  /** The bridge's /v1/progress while uploading; null = no numbers (not yet, or an older bridge). */
+  const [prog, setProg] = useState<ProgressReply | null>(null);
+  const uploading = up.kind === 'uploading';
+  useEffect(() => {
+    if (!uploading) return;
+    let stop = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const r = await p.printer.json<ProgressReply>('POST', '/v1/progress', {}, 2000);
+        if (!stop) setProg(r);
+      } catch (e) {
+        // A bridge without the route: stay on plain "Uploading…" and stop asking.
+        if (e instanceof BridgeError && e.status === 404) return;
+      }
+      if (!stop) timer = setTimeout(() => void poll(), 500);
+    };
+    void poll();
+    return () => { stop = true; clearTimeout(timer); setProg(null); };
+  }, [uploading, p.printer]);
+  const pv = uploading ? uploadProgressView(prog) : null;
   const [ticks, setTicks] = useState<Record<string, boolean>>({});
   const [draft, setDraft] = useState<{ bedPlate: string; slots: SlotDecl[] } | null>(null);
   const [saveMsg, setSaveMsg] = useState('');
@@ -709,12 +731,14 @@ export function PrinterCard(p: PrinterCardProps) {
           )}
           <button
             type="button"
-            className="p3d-primary"
-            disabled={!ready || !p.plateReady || !allTicked || !!p.blocked || up.kind === 'uploading'}
+            disabled={!ready || !p.plateReady || !allTicked || !!p.blocked || uploading}
             onClick={() => void upload()}
             data-testid="p3d-upload-btn"
+            className={`p3d-primary${pv && pv.pct !== null ? ' p3d-progress' : ''}`}
+            style={pv && pv.pct !== null ? ({ '--p3d-pct': `${pv.pct}%` } as CSSProperties) : undefined}
+            {...(pv && pv.pct !== null ? { role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': pv.pct, 'aria-valuetext': pv.label } : {})}
           >
-            {up.kind === 'uploading' ? 'Uploading…' : `Upload${p.plate ? ` plate ${p.plate}` : ''} to the printer`}
+            {pv ? pv.label : `Upload${p.plate ? ` plate ${p.plate}` : ''} to the printer`}
           </button>
           {p.blocked && p.plateReady && allTicked ? (
             <p className="p3d-err" data-testid="p3d-upload-blocked">

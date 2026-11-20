@@ -27,7 +27,7 @@ import { inflateRawSync, crc32 } from 'node:zlib';
 import { createHash, randomBytes, X509Certificate } from 'node:crypto';
 import {
   buildGcode3mf, remoteName, ENTRY_NAMES, FTP_VERBS, FtpsClient, parseArgs, resolveAccessCode, isLanIp, tlsOptionsFor,
-  MQTT_COMMANDS, MqttClient, startCommand, fanCommand, fansFromReport, gcodeMeta, hmsFromReport, stageFromReport, statusFromReport, STAGES, hmsCode, splitJpegs, slotsFromReport, trayColor, gcodeFilamentTypes,
+  uploadToPrinter, MQTT_COMMANDS, MqttClient, startCommand, fanCommand, fansFromReport, gcodeMeta, hmsFromReport, stageFromReport, statusFromReport, STAGES, hmsCode, splitJpegs, slotsFromReport, trayColor, gcodeFilamentTypes,
 } from './bridge.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -528,6 +528,64 @@ test('a 504 upload CLOSES its printer session: the stalled control and data sock
     const r2 = await request(b.port, { path: '/v1/upload', headers: good, body: job });
     assert.equal(r2.status, 200, r2.text);
     assert.equal(fp.rec.maxConcurrent, 1);
+  } finally { await b.stop(); fp.rec.stallSock?.destroy(); fp.rec.stallServer?.close(); await fp.close(); }
+});
+
+test('upload progress: connecting -> sending in STOR_CHUNK steps -> confirming, monotonic, ending at the full size the printer stored', async (t) => {
+  // Founder 2026-11-20: "When it is Uploading... can the button became a progress bar?" The bar is only
+  // honest if the count is the bytes handed to the printer's data socket, in order, and stops at the file size.
+  if (!needCert(t)) return;
+  const fp = await fakePrinter();
+  try {
+    // Random comments do not deflate, so the package is several chunks long.
+    const big = GCODE + Array.from({ length: 8000 }, () => `; ${randomBytes(48).toString('hex')}`).join('\n') + '\n';
+    const { zip } = buildGcode3mf(big);
+    assert.ok(zip.length > 3 * 64 * 1024, `test package too small: ${zip.length}`);
+    const ev = [];
+    const r = await uploadToPrinter({ printerIp: '127.0.0.1', printerPort: fp.port, certSha256: null, code: CODE, remote: 'p.gcode.3mf', zip, timeoutMs: 10000, onProgress: (e) => ev.push(e) });
+    assert.equal(r.remoteBytes, zip.length);
+    assert.ok(fp.rec.files['p.gcode.3mf'].equals(zip));
+    assert.deepEqual(ev[0], { phase: 'connecting', sent: 0, total: zip.length });
+    const sending = ev.filter((e) => e.phase === 'sending' && e.sent > 0);
+    assert.ok(sending.length >= 3, `expected several sending steps, got ${sending.length}`);
+    for (let i = 1; i < ev.length; i++) assert.ok(ev[i].sent >= ev[i - 1].sent, `sent went backwards at ${i}: ${JSON.stringify(ev.slice(i - 1, i + 1))}`);
+    for (const e of ev) assert.ok(e.sent <= zip.length && e.total === zip.length);
+    assert.deepEqual(ev.at(-1), { phase: 'confirming', sent: zip.length, total: zip.length });
+    assert.ok(ev.every((e) => e.phase !== 'confirming' || e.sent === zip.length), 'confirming before every byte was sent');
+  } finally { await fp.close(); }
+});
+
+test('/v1/progress: shows the upload in flight from the bridge own counter, null after it ends, and never contacts the printer', async (t) => {
+  if (!needCert(t)) return;
+  const fp = await fakePrinter();
+  fp.rec.stall = true; // the printer never closes the data channel, so the upload hangs at "confirming"
+  const b = await start([...printerArgs(fp.port), '--timeout', '3']);
+  try {
+    const idle = await request(b.port, { path: '/v1/progress', headers: good, body: {} });
+    assert.equal(idle.status, 200, idle.text);
+    assert.deepEqual(idle.json, { upload: null, queued: 0 });
+    assert.equal(fp.rec.connections, 0, '/v1/progress contacted the printer');
+
+    const upP = request(b.port, { path: '/v1/upload', headers: good, body: job });
+    const { zip, md5 } = buildGcode3mf(GCODE);
+    let seen = null;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 2500) {
+      const r = await request(b.port, { path: '/v1/progress', headers: good, body: {} });
+      if (r.json?.upload?.phase === 'confirming') { seen = r.json; break; }
+      await new Promise((r2) => setTimeout(r2, 50));
+    }
+    assert.ok(seen, 'never saw the upload in flight');
+    assert.deepEqual(seen, { upload: { remote: remoteName(job.name, md5), phase: 'confirming', sent: zip.length, total: zip.length }, queued: 0 });
+    assert.equal(fp.rec.connections, 1, 'progress reads opened printer sessions');
+
+    const up = await upP;
+    assert.equal(up.status, 504, up.text);
+    const after = await request(b.port, { path: '/v1/progress', headers: good, body: {} });
+    assert.deepEqual(after.json, { upload: null, queued: 0 }, 'a finished (failed) upload still shows as in flight');
+
+    const anon = await request(b.port, { path: '/v1/progress', headers: { origin: ORIGIN, 'content-type': 'application/json' }, body: {} });
+    assert.equal(anon.status, 401);
   } finally { await b.stop(); fp.rec.stallSock?.destroy(); fp.rec.stallServer?.close(); await fp.close(); }
 });
 

@@ -100,6 +100,13 @@
 .p3d-input { width: 100%; resize: vertical; padding: 8px 10px; font: inherit; color: var(--color-text-primary); background: var(--color-bg-secondary); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
 .p3d .p3d-send, .p3d .p3d-primary { background: var(--color-amber); color: var(--color-on-amber); border-color: var(--color-amber); font-weight: 600; }
 .p3d .p3d-send:hover:not(:disabled), .p3d .p3d-primary:hover:not(:disabled) { background: var(--color-interactive-hover); border-color: var(--color-interactive-hover); }
+/* Upload as a progress bar (founder 2026-11-20). Filled share = bytes the bridge has sent to the
+   printer; it is a disabled button, so it keeps full opacity to stay readable. */
+.p3d .p3d-primary.p3d-progress:disabled {
+  opacity: 1; cursor: progress; color: var(--color-text-high); border-color: var(--color-amber);
+  background: linear-gradient(to right, var(--color-amber) var(--p3d-pct, 0%), var(--color-bg-secondary) var(--p3d-pct, 0%));
+  font-variant-numeric: tabular-nums;
+}
 .p3d-hint { font-size: var(--type-caption); color: var(--color-text-faint); }
 .p3d-applied { display: flex; flex-direction: column; gap: 8px; margin: 6px 0; }
 .p3d-entry { padding: 8px 10px; background: var(--color-bg-secondary); border: 1px solid var(--color-border-subtle); border-left: 3px solid var(--color-amber); border-radius: var(--radius-sm); font-size: var(--type-body-sm); }

@@ -8,6 +8,7 @@
 // remote stop"; supersedes 2026-10-14 "Upload only").
 //
 //   POST /v1/upload  {name, gcode, amsMapping?, expectTypes?}  -> {ok, remote, bytes, remoteBytes, md5, started:false}
+//   POST /v1/progress {}            -> {upload: {remote, phase, sent, total} | null, queued}; never contacts the printer
 //   POST /v1/check   {}             -> {reachable, haveCode, haveSerial, printer}
 //   POST /v1/status  {}             -> the printer's own report, by name
 //   POST /v1/start   {remote, amsMapping, expectTypes, bedType, confirm:'at-printer'}
@@ -71,6 +72,9 @@ export const DEFAULT_MAX_BODY = 64 * 1024 * 1024;
 export const DEFAULT_PRINTER_PORT = 990; // Bambu LAN FTPS, implicit TLS
 export const FTP_USER = 'bblp';
 export const MAX_QUEUE = 4;
+/** STOR writes in pieces this big so the page can show how far the upload got (founder 2026-11-20:
+ *  "When it is Uploading... can the button became a progress bar?"). */
+export const STOR_CHUNK = 64 * 1024;
 
 /**
  * 🔴 THE ONLY FTP VERBS THIS CLIENT CAN SEND. Upload + size check + polite exit.
@@ -805,7 +809,9 @@ export class FtpsClient {
     return Number(m[5]) * 256 + Number(m[6]);
   }
 
-  async stor(remote, data) {
+  /** `onSent(bytes)` after each chunk is handed to the socket. That is bytes SENT, not
+   *  bytes the printer has: the printer's word is the 226 reply and the SIZE check after. */
+  async stor(remote, data, onSent = null) {
     const port = await this.passivePort();
     this.session = this.session || this.sock.getSession();
     const dataSockP = this._tls(port);
@@ -820,7 +826,18 @@ export class FtpsClient {
     await new Promise((resolve, reject) => {
       ds.once('error', reject);
       ds.once('close', resolve);
-      ds.end(data);
+      let off = 0;
+      const pump = () => {
+        while (off < data.length) {
+          const end = Math.min(off + STOR_CHUNK, data.length);
+          const chunk = data.subarray(off, end);
+          off = end;
+          const ok = ds.write(chunk, (err) => { if (!err && onSent) onSent(end); });
+          if (!ok) { ds.once('drain', pump); return; }
+        }
+        ds.end();
+      };
+      pump();
     });
     const done = await this._reply();
     if (done.code !== 226 && done.code !== 250) throw new Error(`STOR (completion) -> ${done.text}`);
@@ -850,14 +867,18 @@ export class FtpsClient {
  *  🔴 `signal` aborts it: the route's 504 used to leave this client RUNNING (control + data sockets, no timeout on the
  *  data socket's end), so the queue moved on and the next upload ran beside a stalled session to the same printer
  *  (2026-11-14). Aborting closes both sockets. */
-export async function uploadToPrinter({ printerIp, printerPort, certSha256, code, remote, zip, timeoutMs, signal }) {
+export async function uploadToPrinter({ printerIp, printerPort, certSha256, code, remote, zip, timeoutMs, signal, onProgress = null }) {
+  const tell = (phase, sent) => { if (onProgress) onProgress({ phase, sent, total: zip.length }); };
   const c = new FtpsClient({ host: printerIp, port: printerPort, printerIp, certSha256, timeoutMs });
   const onAbort = () => c.close();
   if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
   try {
+    tell('connecting', 0);
     await c.connect();
     await c.login(FTP_USER, code);
-    await c.stor(remote, zip);
+    tell('sending', 0);
+    await c.stor(remote, zip, (n) => tell(n >= zip.length ? 'confirming' : 'sending', n));
+    tell('confirming', zip.length);
     const s = await c.size(remote);
     await c.quit();
     return { remoteBytes: s.size, sizeReply: s.text };
@@ -1430,6 +1451,8 @@ export function createBridge(opts) {
    *  (or null), amsMapping: the tray per filament the page uploaded it for (or null) }. A start must ask for
    *  exactly these (START-STALE). */
   const uploaded = new Map();
+  /** The upload on the printer link now, for /v1/progress: { remote, phase, sent, total } or null. */
+  let progress = null;
   const camera = new Camera({ ffmpeg, printerIp: printer, port: cameraPort, code });
   /** One printer command at a time: two Starts racing would both read IDLE. */
   let printerBusy = false;
@@ -1503,7 +1526,7 @@ export function createBridge(opts) {
       return send(200, { ok: true, bridge: '2bee.printer-bridge', api: 1, needsToken: true, peers: registryPeers() });
     }
 
-    const ROUTES = { '/v1/upload': 'upload', '/v1/check': 'check', '/v1/status': 'status', '/v1/start': 'start', '/v1/pause': 'pause', '/v1/resume': 'resume', '/v1/stop': 'stop', '/v1/camera.jpg': 'camera', '/v1/light': 'light', '/v1/fan': 'fan', '/v1/fanmode': 'fanmode', '/v1/speed': 'speed', '/v1/skip': 'skip' };
+    const ROUTES = { '/v1/upload': 'upload', '/v1/progress': 'progress', '/v1/check': 'check', '/v1/status': 'status', '/v1/start': 'start', '/v1/pause': 'pause', '/v1/resume': 'resume', '/v1/stop': 'stop', '/v1/camera.jpg': 'camera', '/v1/light': 'light', '/v1/fan': 'fan', '/v1/fanmode': 'fanmode', '/v1/speed': 'speed', '/v1/skip': 'skip' };
     const route = ROUTES[path] ?? null;
     if (!route) return fail(404, `no route ${path}; this bridge serves POST ${Object.keys(ROUTES).join(', ')}`);
     if (req.method !== 'POST') return fail(405, 'use POST', { Allow: 'POST, OPTIONS' });
@@ -1565,6 +1588,9 @@ export function createBridge(opts) {
           return fail(e.status ?? 502, msg);
         }
       }
+      // Progress is read from this bridge's own counter. It never contacts the printer, so it
+      // takes no lock and cannot delay a Stop.
+      if (route === 'progress') return send(200, { upload: progress ? { ...progress } : null, queued: Math.max(0, pending - (progress ? 1 : 0)) });
       if (route !== 'upload') return printerCommand(route, chunks, send, fail);
 
       let body;
@@ -1613,9 +1639,11 @@ export function createBridge(opts) {
         // a start during the overwrite is refused too. It comes back only below,
         // after the printer has confirmed the size.
         uploaded.delete(remote);
+        progress = { remote, phase: 'connecting', sent: 0, total: bytes };
         try {
           const r = await Promise.race([
-            uploadToPrinter({ printerIp: printer, printerPort, certSha256, code, remote, zip: built.zip, timeoutMs: timeoutS * 1000, signal: ac.signal }),
+            uploadToPrinter({ printerIp: printer, printerPort, certSha256, code, remote, zip: built.zip, timeoutMs: timeoutS * 1000, signal: ac.signal,
+              onProgress: (p) => { if (progress && progress.remote === remote) progress = { remote, ...p }; } }),
             new Promise((_, rej) => { timer = setTimeout(() => { ac.abort(); rej(new HttpError(504, `upload did not finish within ${timeoutS} s`)); }, timeoutS * 1000); }),
           ]);
           if (r.remoteBytes !== bytes) {
@@ -1628,6 +1656,7 @@ export function createBridge(opts) {
           fail(e instanceof HttpError ? e.status : 502, `printer upload failed: ${redact(e.message, code)}`, {}, { remote, bytes });
         } finally {
           clearTimeout(timer);
+          progress = null;
         }
       });
       chain = job.finally(() => { pending--; });
