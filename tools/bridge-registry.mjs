@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export const KINDS = ['2bee.print3d-bridge', '2bee.printer-bridge'];
+export const KINDS = ['2bee.print3d-bridge', '2bee.printer-bridge', '2bee.claude-bridge'];
 
 export function registryDir(env = process.env) {
   return env.TWOBEE_BRIDGE_REGISTRY || path.join(os.homedir(), '.local', 'state', '2bee-bridges');

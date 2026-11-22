@@ -32,6 +32,7 @@ import {
   type AskConfig,
   type Bounds,
 } from './ask';
+import { isAiBridgeEndpoint } from '../ai/aiBridge';
 import type { ScadOptions } from './scad';
 
 type Msg =
@@ -121,7 +122,10 @@ export function CadChat({ source, scad, onApply, onUndo, cfg, onPatch, autoAsk =
   const latestSource = useRef(source);
   latestSource.current = source;
   const log = useRef<HTMLDivElement>(null);
-  const connected = askConfigured(cfg);
+  /* A claude-bridge found on this computer (ai/aiBridge.ts) still needs its key once.
+   * Until then the panel says exactly that, instead of "AI ready" and a 401 on the first ask. */
+  const needsKey = askConfigured(cfg) && cfg.apiKey.trim() === '' && isAiBridgeEndpoint(cfg.endpoint);
+  const connected = askConfigured(cfg) && !needsKey;
 
   useEffect(() => () => abort.current?.abort(), []);
   useEffect(() => {
@@ -317,7 +321,7 @@ export function CadChat({ source, scad, onApply, onUndo, cfg, onPatch, autoAsk =
           title="AI connection settings"
         >
           <span className={connected ? 'dot ok' : 'dot'} aria-hidden="true" />
-          {connected ? 'AI ready' : 'Connect AI'}
+          {connected ? 'AI ready' : needsKey ? 'Paste AI key' : 'Connect AI'}
         </button>
       </header>
 
@@ -334,10 +338,12 @@ export function CadChat({ source, scad, onApply, onUndo, cfg, onPatch, autoAsk =
               'Tell me what to change on the model, in your own words. I change the design and the 3D view updates.'
             ) : (
               <>
-                The AI is not connected yet.{' '}
+                {needsKey
+                  ? 'Claude is running on this computer. Paste its key once (it is in ~/.config/claude-bridge.token) and tick Remember.'
+                  : 'The AI is not connected yet.'}{' '}
                 {setup ? null : (
                   <button type="button" className="cad-chat-undo" data-testid="cad-chat-connect" onClick={() => setSetup(true)}>
-                    Set up AI
+                    {needsKey ? 'Paste key' : 'Set up AI'}
                   </button>
                 )}
               </>
@@ -411,7 +417,7 @@ export function CadChat({ source, scad, onApply, onUndo, cfg, onPatch, autoAsk =
           ref={promptBox}
           rows={2}
           value={prompt}
-          placeholder={connected ? 'Describe the change…' : 'Connect the AI first'}
+          placeholder={connected ? 'Describe the change…' : needsKey ? 'Paste the AI key first (Paste AI key, above)' : 'Connect the AI first'}
           disabled={!connected}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => {

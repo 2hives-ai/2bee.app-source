@@ -24,7 +24,7 @@ function start(args = [], env = {}) {
   const dir = mkdtempSync(join(os.tmpdir(), 'bridge-test-'));
   const record = join(dir, 'record.json');
   const proc = spawn(process.execPath, [BRIDGE, '--port', '0', ...args], {
-    env: { ...process.env, CLAUDE_BIN: FAKE, CLAUDE_BRIDGE_TOKEN: TOKEN, FAKE_RECORD: record, ...env },
+    env: { ...process.env, CLAUDE_BIN: FAKE, CLAUDE_BRIDGE_TOKEN: TOKEN, FAKE_RECORD: record, TWOBEE_BRIDGE_REGISTRY: join(dir, 'registry'), ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';
@@ -84,6 +84,23 @@ const askBody = {
   temperature: 0,
   stream: false,
 };
+
+test('GET /v1/hello names the bridge with no token, never says the token, and registers for discovery', async () => {
+  const b = await start();
+  try {
+    const r = await request(b.port, { path: '/v1/hello', headers: { origin: 'https://2bee.app' } });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.bridge, '2bee.claude-bridge');
+    assert.equal(r.json.needsToken, true);
+    assert.ok(r.json.models.includes('claude-sonnet'));
+    assert.equal(r.headers['access-control-allow-origin'], 'https://2bee.app', 'the live page must be able to read the hello');
+    assert.ok(!JSON.stringify(r.json).includes(TOKEN), 'hello must never carry the token');
+    assert.ok(r.json.peers.some((p) => p.bridge === '2bee.claude-bridge' && p.port === b.port), 'the bridge must list itself in the registry');
+    const evil = await request(b.port, { path: '/v1/hello', headers: { origin: 'https://evil.example' } });
+    assert.equal(evil.status, 403, 'a page not on the allowlist learns nothing');
+    assert.equal(existsSync(b.record), false, 'hello must not run claude');
+  } finally { await b.stop(); }
+});
 
 test('401 without a token, and with a wrong one', async () => {
   const b = await start();

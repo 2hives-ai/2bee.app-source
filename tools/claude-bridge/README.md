@@ -28,6 +28,27 @@ Env: `CLAUDE_BRIDGE_TOKEN` (the bridge token, see below) · `CLAUDE_BIN` (path t
 executable; default `claude` on `PATH`. **This exists for the tests** — it lets them put a fake
 in place of the CLI).
 
+**On this machine it runs as a systemd user service**, like the printer bridge (founder
+2026-11-22: *"It should be automatically connected via bridge like the printer?"*). The unit is
+`~/.config/systemd/user/2bee-claude-bridge.service`: port 8787, `--token-file
+~/.config/claude-bridge.token` (the same file the dev server's `/__claude` proxy reads, so there is
+one key), `--timeout 180`, `Nice=10`. `systemctl --user restart 2bee-claude-bridge` ·
+`journalctl --user -u 2bee-claude-bridge`.
+
+## Found by the app: `GET /v1/hello`
+
+`GET /v1/hello` needs no token and returns `{ ok, bridge: "2bee.claude-bridge", api, needsToken,
+models, peers }`. It never contains the token. A page whose Origin is not allowed gets 403. The bridge
+also records itself in `tools/bridge-registry.mjs`, so the printer and slicer bridges list it in their
+own hellos.
+
+When no AI address is stored in the browser, 2bee.app (`web/src/ai/aiBridge.ts`, run once in
+`main.tsx` before the app renders) asks `127.0.0.1:8787/v1/hello`. If that gets no answer, it asks
+the peers the printer and slicer bridges list. It believes only a hello naming `2bee.claude-bridge`,
+and then it fills the Endpoint and Model below. It never fills or stores a key, never replaces an
+address the person typed, and does not run on the dev server. **The key is pasted once** in "Set up
+AI", with Remember ticked, just as for the printer.
+
 ## Paste into the app's Ask settings (File → Settings…)
 
 | Field | Value |

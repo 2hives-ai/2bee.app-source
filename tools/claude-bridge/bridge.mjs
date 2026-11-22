@@ -39,9 +39,13 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { peers as registryPeers, register as registerBridge } from '../bridge-registry.mjs';
 
 export const DEFAULT_PORT = 8787;
 export const BIND_HOST = '127.0.0.1';
+/** What GET /v1/hello names this bridge. Must match web/src/cad/aiBridge.ts. */
+export const HELLO_ID = '2bee.claude-bridge';
+
 export const DEFAULT_ORIGINS = ['http://localhost:5178', 'http://127.0.0.1:5178', 'https://2bee.app'];
 export const DEFAULT_TIMEOUT_S = 120;
 export const DEFAULT_MAX_BODY = 2 * 1024 * 1024;
@@ -454,6 +458,7 @@ export function createBridge(opts) {
     maxBody = DEFAULT_MAX_BODY,
     bin = 'claude',
     caveman = true,
+    peersOf = () => [],
     log = (line) => process.stdout.write(line + '\n'),
   } = opts;
   if (!token) throw new Error('createBridge needs a token');
@@ -515,9 +520,18 @@ export function createBridge(opts) {
       return res.end();
     }
 
+    // Founder 2026-11-22: "It should be automatically connected via bridge like the printer?"
+    // GET /v1/hello says what this is, with no token and no body, exactly like the printer
+    // and slicer bridges, so 2bee.app can fill the address by itself. It never says the token:
+    // the key is still pasted once (and remembered only if the person ticks it).
+    if (path === '/v1/hello') {
+      if (req.method !== 'GET') return fail(405, 'use GET', { Allow: 'GET, OPTIONS' });
+      return send(200, { ok: true, bridge: HELLO_ID, api: 1, needsToken: true, models: Object.keys(MODELS), peers: peersOf() });
+    }
+
     const route =
       path === '/v1/models' ? 'models' : path === '/v1/chat/completions' ? 'chat' : null;
-    if (!route) return fail(404, `no route ${path}; this bridge serves /v1/models and /v1/chat/completions`);
+    if (!route) return fail(404, `no route ${path}; this bridge serves /v1/hello, /v1/models and /v1/chat/completions`);
     if (route === 'models' && req.method !== 'GET') return fail(405, 'use GET', { Allow: 'GET, OPTIONS' });
     if (route === 'chat' && req.method !== 'POST') return fail(405, 'use POST', { Allow: 'POST, OPTIONS' });
 
@@ -622,13 +636,16 @@ function main() {
     process.exit(2);
   }
   const bin = process.env.CLAUDE_BIN || 'claude';
-  const server = createBridge({ token: tok.token, origins: o.origins, timeoutS: o.timeoutS, maxBody: o.maxBody, bin, caveman: o.caveman });
+  const server = createBridge({ token: tok.token, origins: o.origins, timeoutS: o.timeoutS, maxBody: o.maxBody, bin, caveman: o.caveman, peersOf: () => registryPeers() });
+  let unregister = () => {};
+  process.on('exit', () => unregister());
   server.on('error', (e) => {
     process.stderr.write(`claude-bridge: ${e.message}\n`);
     process.exit(2);
   });
   server.listen(o.port, BIND_HOST, () => {
     const { address, port } = server.address();
+    unregister = registerBridge(HELLO_ID, port);
     const p = (s) => process.stdout.write(s + '\n');
     p(`claude-bridge listening on http://${address}:${port} (claude binary: ${bin})`);
     p('Paste into the app\'s Ask settings:');
