@@ -261,25 +261,31 @@ export function isTokenExpired(token: TokenSet): boolean {
 //
 // "Only admins can log in" — founder, TODO #29.
 //
-// Cognito can enforce this server-side (Pre Token Generation Lambda trigger,
-// or a custom authoriser), but the task says CLIENT-SIDE check. The id_token
-// carries a `cognito:groups` claim when the user belongs to a Cognito group.
-// We check for an "admin" group membership.
+// 🔴 CHANGED 2026-11-23 (ceo ticket 11-23-46). Until today this read
+// `cognito:groups`, and when the claim was absent it let the user in. The pool
+// has NO groups that anyone is in, so the claim was always absent and EVERY
+// signed-in pool user passed: 13 accounts, client accounts among them, and the
+// pool allows self sign-up. A malformed token passed too.
 //
-// If the Cognito User Pool is set up without groups (e.g. only one user),
-// ANY authenticated user is treated as admin. This is the "only admins can
-// log in" constraint applied at the client — the pool itself should restrict
-// membership to admins only.
+// The admin fact is now `custom:role === 'admin'`. Backend's other admin paths
+// already use it (functions/api/geo_tiles.py, ambassador.py). Since H-073 no app
+// client can write it: 2bee-app-oidc's WriteAttributes are email, locale, name
+// only (measured 2026-11-23), and it is in the client's ReadAttributes, so it
+// rides in the ID token. 1 admin in the pool (the founder's account), 4 client,
+// 8 with no role. Anything else (no claim, other role, unreadable token) is NOT
+// admin: this check fails closed.
+//
+// ⚠ This is the BROWSER gate. It hides the app; it protects no data by itself.
+// The only server-side action reachable from 2bee.app is /app/docs, whose
+// Cognito authorizer accepts any pool user and keys every document on that
+// user's own `sub`. Requiring admin there is backend's change.
+
+export const ADMIN_ROLE_CLAIM = 'custom:role';
 
 export function isAdmin(token: TokenSet): boolean {
   const payload = decodeJwtPayload(token.id_token);
-  const groups = payload['cognito:groups'];
-  // If no groups claim exists, the pool might have a single admin user — allow it.
-  // If groups DO exist, require "admin" membership.
-  if (Array.isArray(groups)) {
-    return groups.includes('admin');
-  }
-  return true;
+  const role = payload[ADMIN_ROLE_CLAIM];
+  return typeof role === 'string' && role.trim().toLowerCase() === 'admin';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

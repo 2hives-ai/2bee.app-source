@@ -28,6 +28,7 @@ import { createHash, randomBytes, X509Certificate } from 'node:crypto';
 import {
   buildGcode3mf, remoteName, ENTRY_NAMES, FTP_VERBS, FtpsClient, parseArgs, resolveAccessCode, isLanIp, tlsOptionsFor,
   uploadToPrinter, MQTT_COMMANDS, MqttClient, startCommand, fanCommand, fansFromReport, gcodeMeta, hmsFromReport, stageFromReport, statusFromReport, STAGES, hmsCode, splitJpegs, slotsFromReport, trayColor, gcodeFilamentTypes,
+  Camera,
 } from './bridge.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -1237,6 +1238,31 @@ process.on('SIGTERM', () => { clearInterval(t); process.exit(0); });
     const r = await request(nc.port, { path: '/v1/camera.jpg', headers: good, body: {} });
     assert.equal(r.status, 409, r.text);
   } finally { await nc.stop(); }
+});
+
+test('camera: a reader that stays alive but sends nothing is replaced on a later ask, and the new one serves frames', async () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'fake-ffmpeg-'));
+  const runs = join(dir, 'runs');
+  const fake = join(dir, 'ffmpeg');
+  // First run: connected to nothing, sends no byte, ignores nothing (the 2026-11-22 live state).
+  // Every later run: frames.
+  writeFileSync(fake, `#!${process.execPath}
+const fs = require('fs');
+let n = 0; try { n = Number(fs.readFileSync(${JSON.stringify(runs)}, 'utf8')); } catch {}
+fs.writeFileSync(${JSON.stringify(runs)}, String(n + 1));
+if (n === 0) { setInterval(() => {}, 1000); }
+else { const jpg = Buffer.from([0xff, 0xd8, 0x77, 0xff, 0xd9]); setInterval(() => process.stdout.write(jpg), 50); }
+process.on('SIGTERM', () => process.exit(0));
+`, { mode: 0o755 });
+  const cam = new Camera({ ffmpeg: fake, printerIp: '127.0.0.1', code: 'c0de', stallMs: 300 });
+  try {
+    await assert.rejects(cam.latest(4000, 400), (e) => e.status === 504, 'the stalled reader gives no frame');
+    const { jpeg } = await cam.latest(4000, 3000);
+    assert.deepEqual([...jpeg], [0xff, 0xd8, 0x77, 0xff, 0xd9]);
+    assert.equal(readFileSync(runs, 'utf8'), '2', 'exactly one replacement reader');
+  } finally {
+    cam.proc?.kill('SIGKILL');
+  }
 });
 
 test('light: chamber light off then on, read back from the printer report; 400 without a boolean', async (t) => {

@@ -948,8 +948,14 @@ export function splitJpegs(buf) {
 }
 
 export class Camera {
-  constructor({ ffmpeg = 'ffmpeg', printerIp, port = DEFAULT_CAMERA_PORT, code, idleMs = 20000, log = () => {} }) {
-    Object.assign(this, { ffmpeg, printerIp, port, code, idleMs, log });
+  // stallMs (founder 2026-11-22: "Camera: no camera frame within 12 s"): a reader that is alive
+  // but has sent no frame for this long is killed and a new one started on the next ask. The
+  // idle kill above only runs when data arrives, so a reader whose connection went dead (the
+  // printer changed Wi-Fi) sent nothing, was never killed, and every ask waited on it for
+  // 1 day 19 h. Measured: ffmpeg pid 2358026, etime 1-19:50:04, every /v1/camera.jpg a 504.
+  constructor({ ffmpeg = 'ffmpeg', printerIp, port = DEFAULT_CAMERA_PORT, code, idleMs = 20000, stallMs = 15000, log = () => {} }) {
+    Object.assign(this, { ffmpeg, printerIp, port, code, idleMs, stallMs, log });
+    this.startedAt = 0;
     this.proc = null;
     this.frame = null;
     this.frameAt = 0;
@@ -967,6 +973,7 @@ export class Camera {
       '-vf', 'fps=2,scale=960:-1', '-f', 'image2pipe', '-vcodec', 'mjpeg', '-q:v', '6', '-'];
     const p = spawn(this.ffmpeg, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.proc = p;
+    this.startedAt = Date.now();
     this.error = '';
     const drop = () => rmSync(dir, { recursive: true, force: true });
     this.drop = drop;
@@ -987,8 +994,10 @@ export class Camera {
     const done = (why) => {
       clearTimeout(dropTimer);
       drop();
-      if (this.proc === p) this.proc = null;
-      if (why) this.error = redact(why, this.code);
+      const mine = this.proc === p;
+      if (mine) this.proc = null;
+      // A reader replaced after a stall must not write its exit over the new reader's state.
+      if (why && (mine || !this.proc)) this.error = redact(why, this.code);
       for (const w of [...this.waiters]) w();
     };
     p.on('error', (e) => done(`camera reader could not start: ${e.message}`));
@@ -998,6 +1007,12 @@ export class Camera {
   /** The newest frame, at most `freshMs` old, waiting up to `waitMs` for one. */
   async latest(freshMs = 4000, waitMs = 12000) {
     this.lastAsk = Date.now();
+    if (this.proc && Date.now() - Math.max(this.frameAt, this.startedAt) > this.stallMs) {
+      const dead = this.proc;
+      this.proc = null;
+      this.log(`camera reader sent no frame for ${Math.round(this.stallMs / 1000)} s: restarting it`);
+      dead.kill('SIGKILL');
+    }
     if (!this.proc) this._start();
     const deadline = Date.now() + waitMs;
     while (!(this.frame && Date.now() - this.frameAt <= freshMs)) {

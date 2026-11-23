@@ -21,27 +21,23 @@ function token(payload: Record<string, unknown>, over: Partial<TokenSet> = {}): 
   return { id_token: jwt(payload), access_token: 'x', expires_in: 3600, received_at: Date.now(), ...over };
 }
 
-test('a user in the "admin" group is admin; any other group is NOT', () => {
-  assert.equal(isAdmin(token({ 'cognito:groups': ['admin'] })), true);
-  assert.equal(isAdmin(token({ 'cognito:groups': ['admin', 'ops'] })), true);
-  assert.equal(isAdmin(token({ 'cognito:groups': ['ops'] })), false);
-  assert.equal(isAdmin(token({ 'cognito:groups': [] })), false);
+test('only custom:role=admin is admin (the server-written role, H-073)', () => {
+  assert.equal(isAdmin(token({ 'custom:role': 'admin' })), true);
+  assert.equal(isAdmin(token({ 'custom:role': 'Admin' })), true);
 });
 
-test('🔴 no groups claim at all means ANY authenticated user is admin — the single-user-pool rule', () => {
-  /* This is the behaviour backend flagged 2026-08-21: the pool has no admin
-   * group, so the claim is absent and the gate passes everyone. If the pool
-   * grows a second user, this rule is the whole "only admins" enforcement —
-   * a regression here opens the app to every authenticated account. */
-  assert.equal(isAdmin(token({ sub: 'user-1', email: 'a@b.c' })), true);
+test('🔴 a signed-in NON-admin does not pass: client role, no role, groups alone (ceo 2026-11-23)', () => {
+  /* Until 2026-11-23 a token with no groups claim passed, and the pool has no
+   * groups, so every one of its 13 users reached the app. */
+  assert.equal(isAdmin(token({ sub: 'u', email: 'a@b.c', 'custom:role': 'client' })), false);
+  assert.equal(isAdmin(token({ sub: 'u', email: 'a@b.c' })), false, 'no role claim is not admin');
+  assert.equal(isAdmin(token({ sub: 'u', 'custom:role': '' })), false);
+  assert.equal(isAdmin(token({ sub: 'u', 'custom:role': ['admin'] })), false, 'only a string role counts');
+  assert.equal(isAdmin(token({ 'cognito:groups': ['admin'] })), false, 'a group alone is not the admin fact any more');
 });
 
-test('a malformed id_token is NOT admin-by-default — the claim is unreadable, not absent', () => {
-  /* decodeJwtPayload returns {} on garbage, and {} has no groups claim, which
-   * the single-user rule reads as "allow". That composition means a corrupt
-   * token is treated as an admin with no identity at all. Pinned so a change
-   * here is a deliberate decision, not an accident. */
-  assert.equal(isAdmin({ ...token({}), id_token: 'not-a-jwt' }), true); // lint-allow: synthetic-credential — deliberately malformed JWT fixture, not a real token
+test('a malformed id_token is NOT admin — the check fails closed', () => {
+  assert.equal(isAdmin({ ...token({}), id_token: 'not-a-jwt' }), false); // lint-allow: synthetic-credential — deliberately malformed JWT fixture, not a real token
 });
 
 test('expiry: 30 s buffer — a token about to expire is already unusable', () => {
