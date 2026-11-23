@@ -18,6 +18,10 @@
 
 interface LandingProps {
   onSignIn: () => void;
+  /** Present only once the passkey server answered (AuthGate's probe). Absent: no button. */
+  onPasskey?: () => void;
+  passkeyBusy?: boolean;
+  passkeyMsg?: string;
 }
 
 const STEPS: { n: string; title: string; body: string }[] = [
@@ -44,7 +48,7 @@ const STEPS: { n: string; title: string; body: string }[] = [
   },
 ];
 
-export default function Landing({ onSignIn }: LandingProps) {
+export default function Landing({ onSignIn, onPasskey, passkeyBusy = false, passkeyMsg = '' }: LandingProps) {
   return (
     <div className="landing" data-testid="landing">
       <header className="landing-top">
@@ -62,9 +66,21 @@ export default function Landing({ onSignIn }: LandingProps) {
             2bee.farm workshop. It turns a design into G-code, checks the program
             before it leaves, and tells the operator what to set up.
           </p>
+          {onPasskey && (
+            <button
+              className="auth-gate-btn landing-cta"
+              onClick={onPasskey}
+              type="button"
+              disabled={passkeyBusy}
+              data-testid="landing-passkey"
+            >
+              {passkeyBusy ? 'Waiting for the passkey…' : 'Sign in with passkey'}
+            </button>
+          )}
           <button className="auth-gate-btn landing-cta" onClick={onSignIn} type="button" data-testid="landing-signin">
             Sign in
           </button>
+          {passkeyMsg && <p className="landing-note" role="status">{passkeyMsg}</p>}
           <p className="landing-note">Sign-in is for the 2bee.farm team.</p>
         </section>
 

@@ -49,7 +49,7 @@ Email sign-in links, the 2hives.com M4 shape (`home/2hives/app/twohives/accounts
 2. **Sign-in link**: `POST /app/auth/link {email}`. It always answers 202, so the reply never
    says whether an account exists. The server stores only the SHA-256 of a 32-byte random token,
    valid 15 minutes and usable once, and mails `https://2bee.app/#signin=<token>`. Rate limits
-   apply per email and per IP. Mail goes through SES, which the backend already uses.
+   apply per email and per IP. Mail needs SES set up from scratch: the live pool sends with `COGNITO_DEFAULT`, not SES (backend correction, ticket `2026-11-23-11-23-50`).
 3. **Session**: `POST /app/auth/redeem {token}` returns an HttpOnly, Secure, SameSite=Strict
    cookie on `api.2bee.farm` (session id stored as a hash, 30-day sliding), or a short-lived
    bearer if a cross-site cookie is refused. `POST /app/auth/logout` ends the session.
@@ -74,6 +74,10 @@ cost is about three days of work and a new home-built sign-in system, which is t
 in any app. If the founder still says go, section 3 is the plan, and backend builds steps 1-4.
 
 ## 5. Status and the review criteria (2026-11-23, later)
+
+**UPDATE 11:30: founder GO** (home ticket `2026-11-23-11-30-00`). The design for cyber is now
+`docs/design-local-auth.md`. It supersedes section 3 here: link plus passkey, admins only,
+same-origin sessions. The "HELD" paragraph below is history.
 
 **HELD.** `ceo` (ticket `2026-11-23-11-21-55`) put go/no-go in the founder queue with a no-go
 recommendation. No code starts before a founder go **and** a `cyber` sign-off against

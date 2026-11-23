@@ -43,6 +43,7 @@ import {
   type TokenSet,
 } from './auth';
 import Landing from './Landing';
+import { OUTCOME_TEXT, enrolPasskey, isEnrolRoute, probeSession, signInWithPasskey } from './passkeyAuth';
 
 /** Auth state machine:
  *  'checking'  — initial load, checking URL for callback
@@ -57,7 +58,9 @@ type AuthState =
   | 'expired'
   | 'authed'
   /** Some Cognito vars set and some not — see the mount effect. Never opens. */
-  | 'misconfigured';
+  | 'misconfigured'
+  /** Opened at #enrol with an operator's one-time code (docs/design-local-auth.md §5). Never opens the app. */
+  | 'enrol';
 
 interface AuthGateProps {
   children: ReactNode;
@@ -66,6 +69,15 @@ interface AuthGateProps {
 export default function AuthGate({ children }: AuthGateProps) {
   const [state, setState] = useState<AuthState>('checking');
   const [token, setToken] = useState<TokenSet | null>(null);
+  // Passkey sign-in (founder 2026-11-23, "go on local auth"; design v2 signed off by cyber).
+  // `passkeyReady` is true only once the server's own /api/auth/session answered JSON, so the
+  // button never appears before backend ships the routes.
+  const [passkeyReady, setPasskeyReady] = useState(false);
+  const [passkeyExpiresAt, setPasskeyExpiresAt] = useState(0);
+  const [passkeyMsg, setPasskeyMsg] = useState('');
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
+  const [enrolCode, setEnrolCode] = useState('');
+  const [enrolLabel, setEnrolLabel] = useState('');
 
   /* On mount: check for callback code, then check for existing token. */
   useEffect(() => {
@@ -88,6 +100,23 @@ export default function AuthGate({ children }: AuthGateProps) {
     }
 
     let alive = true;
+
+    if (isEnrolRoute(window.location.hash)) {
+      setState('enrol');
+      return () => { alive = false; };
+    }
+
+    // A passkey session (an HttpOnly cookie this page cannot read) is asked of the server.
+    // Only the server's own 200 with an admin session opens the gate; see passkeyAuth.ts.
+    void probeSession().then((p) => {
+      if (!alive) return;
+      if (p.state === 'absent') return;
+      setPasskeyReady(true);
+      if (p.state === 'signed-in') {
+        setPasskeyExpiresAt(p.session.expiresAt);
+        setState('authed');
+      }
+    });
 
     // Check if the URL contains an authorization code from Cognito.
     const url = new URL(window.location.href);
@@ -131,6 +160,16 @@ export default function AuthGate({ children }: AuthGateProps) {
     return () => { alive = false; };
   }, []);
 
+  /* Passkey session expiry: the server's absolute limit, read once at sign-in. The server
+   * also refuses an expired cookie; this only stops the page pretending it is still signed in. */
+  useEffect(() => {
+    if (token || state !== 'authed' || passkeyExpiresAt <= 0) return;
+    const remaining = passkeyExpiresAt * 1000 - Date.now();
+    if (remaining <= 0) { setState('expired'); return; }
+    const timer = setTimeout(() => setState('expired'), Math.min(remaining, 2 ** 31 - 1));
+    return () => clearTimeout(timer);
+  }, [token, state, passkeyExpiresAt]);
+
   /* Token expiry timer: if the token expires while the app is open, transition
    * to 'expired' rather than silently losing auth. */
   useEffect(() => {
@@ -146,6 +185,38 @@ export default function AuthGate({ children }: AuthGateProps) {
   }, [token, state]);
 
   const handleLogin = useCallback(() => { login(); }, []);
+  const handlePasskey = useCallback(async () => {
+    setPasskeyBusy(true);
+    setPasskeyMsg('');
+    const out = await signInWithPasskey();
+    if (out === 'ok') {
+      const p = await probeSession();
+      if (p.state === 'signed-in') {
+        setPasskeyExpiresAt(p.session.expiresAt);
+        setState('authed');
+      } else {
+        setPasskeyMsg(OUTCOME_TEXT.failed);
+      }
+    } else {
+      setPasskeyMsg(OUTCOME_TEXT[out]);
+    }
+    setPasskeyBusy(false);
+  }, []);
+  const handleEnrol = useCallback(async () => {
+    setPasskeyBusy(true);
+    setPasskeyMsg('');
+    const out = await enrolPasskey(enrolCode, enrolLabel);
+    setPasskeyBusy(false);
+    if (out === 'ok') {
+      setEnrolCode('');
+      setPasskeyMsg('Passkey added. Sign in with it now.');
+      window.history.replaceState(null, '', window.location.pathname);
+      setPasskeyReady(true);
+      setState('unauth');
+    } else {
+      setPasskeyMsg(out === 'failed' ? 'That code did not work. Ask for a new one.' : OUTCOME_TEXT[out]);
+    }
+  }, [enrolCode, enrolLabel]);
   const handleLogout = useCallback(() => {
     setToken(null);
     clearTokens();
@@ -172,7 +243,14 @@ export default function AuthGate({ children }: AuthGateProps) {
   // It renders no app and opens nothing; its only way forward is the same
   // `login()` redirect the card's button used.
   if (state === 'unauth') {
-    return <Landing onSignIn={handleLogin} />;
+    return (
+      <Landing
+        onSignIn={handleLogin}
+        onPasskey={passkeyReady ? () => void handlePasskey() : undefined}
+        passkeyBusy={passkeyBusy}
+        passkeyMsg={passkeyMsg}
+      />
+    );
   }
 
   return (
@@ -206,9 +284,37 @@ export default function AuthGate({ children }: AuthGateProps) {
           </>
         )}
 
+        {state === 'enrol' && (
+          <form
+            className="auth-gate-enrol"
+            data-testid="auth-enrol"
+            onSubmit={(e) => { e.preventDefault(); void handleEnrol(); }}
+          >
+            <p className="auth-gate-status">Add a passkey with the one-time code you were given.</p>
+            <label>
+              Code
+              <input value={enrolCode} onChange={(e) => setEnrolCode(e.target.value)} autoComplete="one-time-code" required />
+            </label>
+            <label>
+              Name for this device
+              <input value={enrolLabel} onChange={(e) => setEnrolLabel(e.target.value)} maxLength={40} placeholder="Laptop" />
+            </label>
+            <button className="auth-gate-btn" type="submit" disabled={passkeyBusy || enrolCode.trim() === ''}>
+              {passkeyBusy ? 'Waiting for the passkey…' : 'Add passkey'}
+            </button>
+            {passkeyMsg && <p className="auth-gate-status" role="status">{passkeyMsg}</p>}
+          </form>
+        )}
+
         {state === 'expired' && (
           <>
             <p className="auth-gate-status">Session expired.</p>
+            {passkeyReady && (
+              <button className="auth-gate-btn" onClick={() => void handlePasskey()} type="button" disabled={passkeyBusy}>
+                Sign in with passkey
+              </button>
+            )}
+            {passkeyMsg && <p className="auth-gate-status" role="status">{passkeyMsg}</p>}
             <button className="auth-gate-btn" onClick={handleLogin} type="button">
               Sign in again
             </button>

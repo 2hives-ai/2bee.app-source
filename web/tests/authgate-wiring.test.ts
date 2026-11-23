@@ -132,7 +132,7 @@ const LANDING_CODE = LANDING.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/
 
 test('unauth renders the landing page, wired to the gate\'s own login()', () => {
   assert.ok(
-    /if\s*\(\s*state\s*===\s*'unauth'\s*\)\s*\{\s*return\s*<Landing\s+onSignIn=\{handleLogin\}\s*\/>/.test(CODE),
+    /if\s*\(\s*state\s*===\s*'unauth'\s*\)\s*\{\s*return\s*\(?\s*<Landing\s+onSignIn=\{handleLogin\}/.test(CODE),
     "AuthGate no longer renders <Landing onSignIn={handleLogin} /> for state === 'unauth'. A " +
       'logged-out visitor would get the bare card (or nothing) instead of the landing page.',
   );
@@ -150,9 +150,26 @@ test('the landing page cannot open the app', () => {
   );
   const buttons = [...LANDING_CODE.matchAll(/<button[^>]*>/g)].map((m) => m[0]);
   assert.ok(buttons.length >= 1, 'the landing page has no sign-in button at all.');
+  // 2026-11-23 (passkey sign-in, docs/design-local-auth.md v2): a button may call onPasskey too.
+  // Both are AuthGate's own handlers; the landing page still decides nothing.
   for (const b of buttons) {
-    assert.ok(/onClick=\{onSignIn\}/.test(b), `a landing-page button does something other than onSignIn: ${b}`);
+    assert.ok(/onClick=\{(onSignIn|onPasskey)\}/.test(b), `a landing-page button does something other than onSignIn/onPasskey: ${b}`);
   }
+});
+
+test('the passkey button appears only after the server itself answered (passkeyReady)', () => {
+  /* Before backend ships /api/auth/*, the path falls through to the static site. The button must
+   * not appear then: it would offer a sign-in that cannot work. passkeyReady is set only by
+   * probeSession() seeing the contract's own JSON (tests/passkey-auth.test.ts covers that). */
+  assert.ok(
+    /onPasskey=\{passkeyReady \? [^}]*handlePasskey\(\) : undefined\}/.test(CODE),
+    'AuthGate passes onPasskey to the landing page without gating it on passkeyReady.',
+  );
+  assert.ok(/\{onPasskey && \(/.test(LANDING_CODE), 'Landing renders the passkey button even when onPasskey is absent.');
+  assert.ok(
+    /setPasskeyReady\(true\)/.test(CODE) && !/useState\(true\)[^;]*passkey/i.test(CODE),
+    'passkeyReady must start false and be set only after a probe.',
+  );
 });
 
 test('the landing page still says nothing has been cut or printed', () => {
