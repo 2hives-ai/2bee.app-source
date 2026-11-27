@@ -34,7 +34,7 @@ const meta = (v: number, p: Partial<DocMeta> = {}): DocMeta => ({
 });
 
 const store = (f: typeof fetch, token: string | null = 'ID.TOKEN.X') =>
-  createServerStore({ base: 'https://api.test/app/docs/', fetchImpl: f, getIdToken: () => token });
+  createServerStore({ auth: 'cognito', base: 'https://api.test/app/docs/', fetchImpl: f, getIdToken: () => token });
 
 test('put sends the ID token, base_version and data, and is ok only on the confirmed next version', async () => {
   const { f, calls } = mock([resp(200, meta(4))]);
@@ -168,4 +168,45 @@ test('remove is ok only when the server confirms deleted:true', async () => {
   assert.equal((await store(f).remove('drawing', 'd1')).ok, true);
   const { f: f2 } = mock([resp(200, {})]);
   assert.equal((await store(f2).remove('drawing', 'd1')).ok, false);
+});
+
+// ── session mode (jamesave passkey service, 2026-11-27) ──────────────────────
+// What these guard: after the DNS switch the page's CSP is connect-src 'self',
+// so a store that still calls api.2bee.farm with a Cognito token fails every
+// save. Session mode must call same-origin /api/docs, send X-2bee and the
+// cookie, and never send an Authorization header.
+
+test('session mode is the default: same-origin /api/docs, X-2bee, cookie, no Authorization', async () => {
+  const { f, calls } = mock([resp(200, meta(1))]);
+  const r = await createServerStore({ fetchImpl: f }).put('drawing', 'd1', { a: 1 }, 0);
+  assert.equal(r.ok, true);
+  assert.equal(calls[0].url, '/api/docs/drawing/d1');
+  const h = calls[0].init?.headers as Record<string, string>;
+  assert.equal(h['X-2bee'], '1');
+  assert.equal(h.Authorization, undefined);
+  assert.equal(calls[0].init?.credentials, 'same-origin');
+});
+
+test('session mode with no session: the server 401 is unauthenticated, never saved', async () => {
+  const { f, calls } = mock([resp(401, { error: 'unauthenticated' })]);
+  const r = await createServerStore({ fetchImpl: f }).put('drawing', 'd1', {}, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(r.ok, false);
+  assert.equal(r.ok === false && r.reason, 'unauthenticated');
+  assert.match(saveStatusText(r), /^NOT saved/);
+});
+
+test('session mode refuses a token getter instead of silently ignoring it', () => {
+  assert.throws(() => createServerStore({ getIdToken: () => 'T' }), /only for auth: 'cognito'/);
+});
+
+test('an unknown auth mode is refused', () => {
+  assert.throws(() => createServerStore({ auth: 'cookie' as unknown as 'session' }), /unknown auth mode/);
+});
+
+test('cognito mode default base is still the API Gateway route (migration script)', async () => {
+  const { f, calls } = mock([resp(200, meta(1))]);
+  await createServerStore({ auth: 'cognito', fetchImpl: f, getIdToken: () => 'T' }).put('drawing', 'd1', {}, 0);
+  assert.equal(calls[0].url, 'https://api.2bee.farm/app/docs/drawing/d1');
+  assert.equal((calls[0].init?.headers as Record<string, string>).Authorization, 'T');
 });

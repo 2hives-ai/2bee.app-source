@@ -21,14 +21,27 @@
 //    merged or overwritten. The user decides.
 //  - not a cache. It holds no state between calls.
 //
-// Auth: the API's Cognito User Pools authorizer has no OAuth scopes, so API
-// Gateway expects the ID token (not the access token) in `Authorization`.
+// Auth, two modes, chosen by the caller and never guessed (2026-11-27):
+//  - 'session' (the default): same-origin `/api/docs` on the jamesave passkey
+//    service (software/backend/local_auth). The session is the HttpOnly cookie
+//    this code never sees; every call sends `X-2bee: 1` and
+//    `credentials: 'same-origin'`, which `Auth.authenticate` requires. A state
+//    change also needs `Origin`, which the browser adds itself. This is the
+//    only mode that works once 2bee.app's DNS points at jamesave: its CSP is
+//    `connect-src 'self'`, so api.2bee.farm is unreachable from the page.
+//  - 'cognito': the old API Gateway route, `Authorization: <ID token>` (the
+//    Cognito User Pools authorizer has no OAuth scopes, so it wants the ID
+//    token, not the access token). Kept only for the Node migration script
+//    until Cognito is removed (design-local-auth.md section 8 step 5).
 
 import { isTokenExpired, loadTokens } from './auth';
 
 /** Default API base. The `/app/{proxy+}` route is on the TwoBeeApi REST API
  *  behind api.2bee.farm. Overridable for tests and the dev server. */
 export const DEFAULT_DOCS_BASE = 'https://api.2bee.farm/app/docs';
+
+/** Same-origin docs base on the jamesave passkey service (backend local_auth/service.py). */
+export const SESSION_DOCS_BASE = '/api/docs';
 
 /** Mirror of `KINDS` in app_docs.py. The server rejects any other kind with
  *  400, so a typo here fails loudly there; this union makes it fail at compile
@@ -91,9 +104,12 @@ export type Fail = {
 export type Result<T> = { ok: true; value: T } | Fail;
 
 export interface StoreOptions {
+  /** 'session' (default): same-origin cookie. 'cognito': ID token to API Gateway. See the header. */
+  auth?: 'session' | 'cognito';
+  /** Default: SESSION_DOCS_BASE for 'session', DEFAULT_DOCS_BASE for 'cognito'. */
   base?: string;
   fetchImpl?: typeof fetch;
-  /** Returns the Cognito ID token, or null when signed out / expired. */
+  /** 'cognito' only: returns the Cognito ID token, or null when signed out / expired. */
   getIdToken?: () => string | null;
 }
 
@@ -158,7 +174,11 @@ function isMeta(v: unknown): v is DocMeta {
 }
 
 export function createServerStore(opts: StoreOptions = {}) {
-  const base = (opts.base ?? DEFAULT_DOCS_BASE).replace(/\/+$/, '');
+  const mode = opts.auth ?? 'session';
+  if (mode !== 'session' && mode !== 'cognito') throw new Error(`serverStore: unknown auth mode "${String(mode)}"`);
+  // A token getter in session mode would be ignored silently, which reads as "the token is sent". Refuse it.
+  if (mode === 'session' && opts.getIdToken) throw new Error("serverStore: getIdToken is only for auth: 'cognito'");
+  const base = (opts.base ?? (mode === 'session' ? SESSION_DOCS_BASE : DEFAULT_DOCS_BASE)).replace(/\/+$/, '');
   const fetchImpl = opts.fetchImpl ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
   const getIdToken = opts.getIdToken ?? currentIdToken;
 
@@ -171,13 +191,21 @@ export function createServerStore(opts: StoreOptions = {}) {
 
   /** One authenticated call. `ok` only for 2xx with a JSON body. */
   async function call(method: string, path: string, body?: unknown): Promise<Result<unknown>> {
-    const token = getIdToken();
-    if (!token) return fail('unauthenticated', 0, `You are not signed in, or the sign-in has expired. ${NOT_DONE}`);
+    const ctype: Record<string, string> = body !== undefined ? { 'Content-Type': 'application/json' } : {};
+    let init: RequestInit;
+    if (mode === 'cognito') {
+      const token = getIdToken();
+      if (!token) return fail('unauthenticated', 0, `You are not signed in, or the sign-in has expired. ${NOT_DONE}`);
+      init = { headers: { Authorization: token, ...ctype } };
+    } else {
+      // No cookie check here: the page cannot read the HttpOnly cookie. The server's 401 is the answer.
+      init = { headers: { 'X-2bee': '1', ...ctype }, credentials: 'same-origin' };
+    }
     let r: Response;
     try {
       r = await fetchImpl(`${base}/${path}`, {
+        ...init,
         method,
-        headers: { Authorization: token, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
         body: body !== undefined ? JSON.stringify(body) : undefined,
         cache: 'no-store',
       });

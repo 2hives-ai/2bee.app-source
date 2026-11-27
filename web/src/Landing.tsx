@@ -18,7 +18,12 @@
 
 interface LandingProps {
   onSignIn: () => void;
-  /** Present only once the passkey server answered (AuthGate's probe). Absent: no button. */
+  /** Present only once the passkey server answered (AuthGate's probe). Absent: no button.
+   *  Present: the Cognito "Sign in" buttons are NOT shown (2026-11-27). The passkey server
+   *  answers only on the jamesave origin, whose CSP is `connect-src 'self'`, so the Cognito
+   *  token exchange is blocked there: that button would take the user through the Cognito
+   *  login and then fail. On CloudFront (and after a DNS rollback) the probe is 'absent',
+   *  so the page shows Cognito as before. */
   onPasskey?: () => void;
   passkeyBusy?: boolean;
   passkeyMsg?: string;
@@ -53,9 +58,15 @@ export default function Landing({ onSignIn, onPasskey, passkeyBusy = false, pass
     <div className="landing" data-testid="landing">
       <header className="landing-top">
         <strong className="landing-brand">2bee.app</strong>
-        <button className="auth-gate-btn" onClick={onSignIn} type="button" data-testid="landing-signin-top">
-          Sign in
-        </button>
+        {onPasskey ? (
+          <button className="auth-gate-btn" onClick={onPasskey} type="button" disabled={passkeyBusy} data-testid="landing-passkey-top">
+            Sign in with passkey
+          </button>
+        ) : (
+          <button className="auth-gate-btn" onClick={onSignIn} type="button" data-testid="landing-signin-top">
+            Sign in
+          </button>
+        )}
       </header>
 
       <main className="landing-main">
@@ -77,9 +88,11 @@ export default function Landing({ onSignIn, onPasskey, passkeyBusy = false, pass
               {passkeyBusy ? 'Waiting for the passkey…' : 'Sign in with passkey'}
             </button>
           )}
-          <button className="auth-gate-btn landing-cta" onClick={onSignIn} type="button" data-testid="landing-signin">
-            Sign in
-          </button>
+          {!onPasskey && (
+            <button className="auth-gate-btn landing-cta" onClick={onSignIn} type="button" data-testid="landing-signin">
+              Sign in
+            </button>
+          )}
           {passkeyMsg && <p className="landing-note" role="status">{passkeyMsg}</p>}
           <p className="landing-note">Sign-in is for the 2bee.farm team.</p>
         </section>

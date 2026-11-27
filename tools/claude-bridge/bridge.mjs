@@ -28,6 +28,16 @@
 //     such flag). `stream: true` is refused with 400 rather than faked.
 //   · It never logs a token or a request/response body: one line per request
 //     (time, method, path, origin, status, ms).
+//   · It never runs `claude` while the fleet AI pause file exists
+//     (~/.local/state/2hives/llm-pause, PAUSE_FILE_REL). Checked on EVERY chat
+//     request, again just before the child starts (a queued request can wait),
+//     and every PAUSE_POLL_MS while a child runs: a pause kills that child and
+//     the request answers 503. A pause file that cannot be checked (any error
+//     but "does not exist") counts as PAUSED. Why it is in code and not only in
+//     the unit: systemd's ConditionPathExists is read at START, so a bridge that
+//     is already running would ignore the pause (cyber 2026-11-26-14-07-53;
+//     ceo 2026-11-27-14-32-12, legal 2026-11-27-14-40-58: precondition for any
+//     restart). The pause file's path has no flag and no env knob on purpose.
 //
 // No npm dependencies: node:http, node:child_process, node:crypto, node:fs,
 // node:os, node:path only.
@@ -35,8 +45,8 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, statSync } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { peers as registryPeers, register as registerBridge } from '../bridge-registry.mjs';
@@ -54,6 +64,27 @@ export const MAX_QUEUE = 8;
 export const MAX_IMAGES = 4;
 /** Media types the CLI's image block accepts. Anything else is a 400. */
 export const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+/** The fleet's AI stop switch, relative to $HOME (the same file the llm-pause drop-in names). */
+export const PAUSE_FILE_REL = '.local/state/2hives/llm-pause';
+/** How often a RUNNING child is re-checked against the pause file. */
+export const PAUSE_POLL_MS = 500;
+
+/**
+ * True when the pause file exists. Fails CLOSED: only "does not exist"
+ * (ENOENT, or ENOTDIR for a missing parent) means "not paused"; a permission
+ * error or anything else means we cannot tell, so we are paused.
+ */
+export function isPaused(file) {
+  try {
+    statSync(file);
+    return true;
+  } catch (e) {
+    return !(e && (e.code === 'ENOENT' || e.code === 'ENOTDIR'));
+  }
+}
+const pausedError = (file) =>
+  new HttpError(503, `AI is paused: ${file} exists, so this bridge does not run claude. Nothing was sent.`);
+
 const MAX_STDOUT = 16 * 1024 * 1024;
 const MAX_STDERR = 64 * 1024;
 
@@ -396,8 +427,10 @@ function runClaude({ bin, cliModel, system, stdin, streamJson = false, timeoutMs
     settle(false, new HttpError(504, `claude did not answer within ${timeoutMs / 1000} s and was killed`));
   }, timeoutMs);
   const onAbort = () => {
-    kill('client-abort');
-    settle(false, new HttpError(499, 'client went away; claude was killed'));
+    // A reason that is an HttpError (the pause) is answered as itself; anything else is the client leaving.
+    const why = signal.reason instanceof HttpError ? signal.reason : null;
+    kill(why ? 'llm-pause' : 'client-abort');
+    settle(false, why || new HttpError(499, 'client went away; claude was killed'));
   };
   signal.addEventListener('abort', onAbort, { once: true });
 
@@ -459,6 +492,7 @@ export function createBridge(opts) {
     bin = 'claude',
     caveman = true,
     peersOf = () => [],
+    pauseFile = join(homedir(), PAUSE_FILE_REL),
     log = (line) => process.stdout.write(line + '\n'),
   } = opts;
   if (!token) throw new Error('createBridge needs a token');
@@ -526,7 +560,7 @@ export function createBridge(opts) {
     // the key is still pasted once (and remembered only if the person ticks it).
     if (path === '/v1/hello') {
       if (req.method !== 'GET') return fail(405, 'use GET', { Allow: 'GET, OPTIONS' });
-      return send(200, { ok: true, bridge: HELLO_ID, api: 1, needsToken: true, models: Object.keys(MODELS), peers: peersOf() });
+      return send(200, { ok: true, bridge: HELLO_ID, api: 1, needsToken: true, models: Object.keys(MODELS), peers: peersOf(), paused: isPaused(pauseFile) });
     }
 
     const route =
@@ -548,7 +582,12 @@ export function createBridge(opts) {
       });
     }
 
-    // POST /v1/chat/completions — read the body under a cap.
+    // POST /v1/chat/completions — refused while the fleet AI pause is on, before the body is read.
+    if (isPaused(pauseFile)) {
+      req.resume();
+      return fail(503, pausedError(pauseFile).message);
+    }
+    // Read the body under a cap.
     const declared = Number(req.headers['content-length']);
     if (Number.isFinite(declared) && declared > maxBody) {
       fail(413, `request body exceeds ${maxBody} bytes`, { Connection: 'close' });
@@ -598,7 +637,13 @@ export function createBridge(opts) {
       pending++;
       const job = chain.then(async () => {
         if (abort.signal.aborted) return;
+        // Re-checked here: this request may have waited in the queue while the pause was switched on.
+        if (isPaused(pauseFile)) return fail(503, pausedError(pauseFile).message);
         const run = runClaude({ bin, cliModel, ...conv, timeoutMs: timeoutS * 1000, signal: abort.signal });
+        // And while it runs: a pause switched on mid-answer kills the child.
+        const watch = setInterval(() => {
+          if (isPaused(pauseFile)) abort.abort(pausedError(pauseFile));
+        }, PAUSE_POLL_MS);
         try {
           const r = await run.result;
           const pt = (r.usage.input_tokens || 0) + (r.usage.cache_read_input_tokens || 0) + (r.usage.cache_creation_input_tokens || 0);
@@ -613,6 +658,8 @@ export function createBridge(opts) {
           });
         } catch (e) {
           fail(e instanceof HttpError ? e.status : 500, e.message);
+        } finally {
+          clearInterval(watch);
         }
         await run.closed; // the next child starts only after this one has exited
       });
@@ -655,6 +702,8 @@ function main() {
     else p(`  Key      : the token from ${tok.source} (not printed)`);
     p(`Allowed origins: ${o.origins.join(', ')}`);
     p(`Timeout ${o.timeoutS} s · body cap ${o.maxBody} bytes · one request at a time`);
+    const pf = join(homedir(), PAUSE_FILE_REL);
+    p(isPaused(pf) ? `AI PAUSED: ${pf} exists; every chat request answers 503 until it is removed.` : `AI pause file: ${pf} (absent; checked on every request)`);
     p(o.caveman ? 'Reply style: caveman (terse prose; formats and exact values kept). --no-caveman turns it off.' : 'Reply style: normal (--no-caveman).');
   });
   const stop = () => server.close(() => process.exit(0));

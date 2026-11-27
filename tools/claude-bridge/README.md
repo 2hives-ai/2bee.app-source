@@ -108,6 +108,17 @@ so the default 2 MiB `--max-body` was **not** raised (a test sends 400 kB of bas
 - **No body or token in the log.** It writes one line per request: time, method, path, origin,
   status, ms.
 
+## The fleet AI pause (`~/.local/state/2hives/llm-pause`)
+
+While that file exists the bridge runs no `claude`:
+- every chat request answers **503** "AI is paused", before its body is read and again just before the child would start;
+- a child already running is killed within about 0.5 s (`PAUSE_POLL_MS`) and its request answers 503;
+- `GET /v1/hello` reports `paused: true`.
+
+A pause file that cannot be checked (any error except "does not exist") counts as paused. The path has no flag and no environment override.
+The check is in the code because systemd's `ConditionPathExists` (the unit's `llm-pause.conf` drop-in) is read only when the unit STARTS, so it cannot stop a bridge that is already running (cyber 2026-11-26-14-07-53). Tests: the `llm-pause` tests in `bridge.test.mjs`, a plant and a mutant with the check removed that must fail it.
+The unit stays stopped and disabled. It restarts only on legal's go (legal 2026-11-27-14-40-58).
+
 ## Cost
 
 Every request is a real `claude -p` run on **your own Claude login/subscription**, counted

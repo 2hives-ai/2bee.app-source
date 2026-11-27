@@ -86,7 +86,7 @@ console.log(`snapshot: ${snap.origin} exported ${snap.exported_at}`);
 console.log(`${docs.length} doc(s) planned, ${skipped.length} source(s) not moved${apply ? '' : ' — DRY RUN, nothing is written'}`);
 for (const s of skipped) console.log(`  not moved: ${s}`);
 
-const store = createServerStore({ base: val('--base') ?? DEFAULT_DOCS_BASE, getIdToken: () => token });
+const store = createServerStore({ auth: 'cognito', base: val('--base') ?? DEFAULT_DOCS_BASE, getIdToken: () => token });
 const { lines, ok } = await runMigration(store, docs, {
   apply,
   onLine: (l) => console.log(`  ${l.outcome.padEnd(13)} ${l.kind}/${l.docId}  <- ${l.source}  (${l.detail})`),

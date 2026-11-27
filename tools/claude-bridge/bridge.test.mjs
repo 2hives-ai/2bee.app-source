@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CAVEMAN_RULES } from './bridge.mjs';
@@ -436,4 +436,121 @@ test('--no-caveman sends the system message unchanged', async () => {
     assert.equal(r.status, 200, r.text);
     assert.equal(JSON.parse(readFileSync(b.record, 'utf8')).system, 'SYSTEM INSTRUCTION');
   } finally { await b.stop(); }
+});
+
+/* ─────────────── llm-pause (ceo 2026-11-27-14-32-12, legal 2026-11-27-14-40-58) ───────────────
+ * PLANT: a RUNNING bridge refuses a chat request while ~/.local/state/2hives/llm-pause exists,
+ * and claude never starts. MUTANT: the same plant against a copy of bridge.mjs whose isPaused()
+ * always answers false must FAIL, or the plant is not testing the check. Each test gets its own
+ * HOME, so the operator's real pause file is never read or written. */
+function pauseHome() {
+  const home = mkdtempSync(join(os.tmpdir(), 'bridge-home-'));
+  const file = join(home, '.local', 'state', '2hives', 'llm-pause');
+  return {
+    home,
+    file,
+    on: () => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, ''); },
+    off: () => rmSync(file, { force: true }),
+  };
+}
+
+/** The plant, run against a given bridge script. Returns what it saw, so the mutant run can be judged. */
+async function pausePlant(script) {
+  const h = pauseHome();
+  const b = await startScript(script, [], { HOME: h.home });
+  try {
+    const before = await request(b.port, { method: 'POST', path: '/v1/chat/completions', headers: good, body: askBody });
+    rmSync(b.record, { force: true });
+    h.on(); // switched on while the bridge RUNS: this is the case the unit's ConditionPathExists cannot see
+    const during = await request(b.port, { method: 'POST', path: '/v1/chat/completions', headers: good, body: askBody });
+    const ranWhilePaused = existsSync(b.record);
+    const hello = await request(b.port, { path: '/v1/hello' });
+    h.off();
+    const after = await request(b.port, { method: 'POST', path: '/v1/chat/completions', headers: good, body: askBody });
+    return { before: before.status, during: during.status, duringText: during.text, ranWhilePaused, helloPaused: hello.json && hello.json.paused, after: after.status };
+  } finally { await b.stop(); }
+}
+
+function startScript(script, args, env) {
+  if (script === BRIDGE) return start(args, env);
+  // start() is bound to BRIDGE; the mutant runs the same way from its own path.
+  const dir = mkdtempSync(join(os.tmpdir(), 'bridge-test-'));
+  const record = join(dir, 'record.json');
+  const proc = spawn(process.execPath, [script, '--port', '0', ...args], {
+    env: { ...process.env, CLAUDE_BIN: FAKE, CLAUDE_BRIDGE_TOKEN: TOKEN, FAKE_RECORD: record, TWOBEE_BRIDGE_REGISTRY: join(dir, 'registry'), ...env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  proc.stdout.on('data', (d) => (out += d));
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('mutant bridge did not start')), 5000);
+    proc.stdout.on('data', () => {
+      const m = /listening on http:\/\/([\d.]+):(\d+)/.exec(out);
+      if (m && out.includes('one request at a time')) {
+        clearTimeout(t);
+        resolve({ proc, port: Number(m[2]), record, stop: () => new Promise((r) => { proc.once('exit', r); proc.kill('SIGTERM'); }) });
+      }
+    });
+  });
+}
+
+test('llm-pause PLANT: a running bridge answers 503 while the pause file exists, claude never starts, and it resumes when removed', async () => {
+  const r = await pausePlant(BRIDGE);
+  assert.equal(r.before, 200, 'control: a request before the pause must succeed');
+  assert.equal(r.during, 503, r.duringText);
+  assert.match(r.duringText, /AI is paused/);
+  assert.equal(r.ranWhilePaused, false, 'claude was started while the pause file existed');
+  assert.equal(r.helloPaused, true);
+  assert.equal(r.after, 200, 'removing the pause file must let requests through again');
+});
+
+test('llm-pause MUTANT: the plant fails against a bridge whose pause check is removed', async () => {
+  const src = readFileSync(BRIDGE, 'utf8');
+  const marker = 'export function isPaused(file) {';
+  assert.ok(src.includes(marker), 'isPaused() not found: the mutant would test nothing');
+  const mutant = join(HERE, '.mutant-no-pause-bridge.mjs'); // same dir, so its relative imports resolve
+  writeFileSync(mutant, src.replace(marker, `${marker}\n  return false; // MUTANT`));
+  try {
+    const r = await pausePlant(mutant);
+    assert.equal(r.during, 200, 'the mutant (no pause check) must answer while paused');
+    assert.equal(r.ranWhilePaused, true, 'the mutant must start claude while paused');
+  } finally { rmSync(mutant, { force: true }); }
+});
+
+test('llm-pause: a pause switched on mid-answer kills the running child and answers 503', async () => {
+  const h = pauseHome();
+  const b = await start(['--timeout', '60'], { HOME: h.home, FAKE_MODE: 'sleep' });
+  try {
+    const t0 = Date.now();
+    const pending = request(b.port, { method: 'POST', path: '/v1/chat/completions', headers: good, body: askBody });
+    while (!existsSync(b.record)) await new Promise((r) => setTimeout(r, 50)); // the child is running
+    h.on();
+    const r = await pending;
+    assert.equal(r.status, 503, r.text);
+    assert.ok(Date.now() - t0 < 10000, 'the pause must stop a running child within seconds, not at the 60 s timeout');
+    const { pid } = JSON.parse(readFileSync(b.record, 'utf8'));
+    await new Promise((r2) => setTimeout(r2, 2500)); // SIGTERM, then SIGKILL after 2 s
+    try {
+      assert.throws(() => process.kill(pid, 0), /ESRCH/, `child ${pid} still alive after the pause`);
+    } finally {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already dead — the passing case */ }
+    }
+  } finally { h.off(); await b.stop(); }
+});
+
+test('llm-pause fails CLOSED: a pause path that cannot be checked counts as paused', async () => {
+  const { isPaused } = await import('./bridge.mjs');
+  const h = pauseHome();
+  assert.equal(isPaused(h.file), false, 'absent file (missing parents) is not a pause');
+  h.on();
+  assert.equal(isPaused(h.file), true);
+  h.off();
+  // A parent directory we may not search: stat fails with EACCES, which is NOT "does not exist".
+  const locked = join(h.home, 'locked');
+  mkdirSync(join(locked, 'inner'), { recursive: true });
+  chmodSync(locked, 0o000);
+  try {
+    if (process.getuid && process.getuid() === 0) return; // root ignores modes; nothing to test
+    assert.equal(isPaused(join(locked, 'inner', 'llm-pause')), true);
+  } finally { chmodSync(locked, 0o700); }
 });
