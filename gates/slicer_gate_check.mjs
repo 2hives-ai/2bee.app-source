@@ -1303,7 +1303,10 @@ const CAD1H_STRICTER_KNOWN = [
   // else-if chain and passes #2..#9 each failed an earlier limb — fixed in the same commit (a
   // later limb's finding now rides on whichever limb reports). Openscad exports a solid for each,
   // so each is a capability we lack; the safe direction (nothing emitted), never a wrong shape.
-  { file: 'hardware/2bee_cnc_machine/cnc_limit_switch_plate_3d.scad', cause: 'difference() [kernel] (over the 200k-polygon budget)', since: '2026-10-15' },
+  // 2026-11-27: cnc_limit_switch_plate_3d.scad REMOVED from this list — cad deleted the file in
+  // 221eb2ea3d (replaced by cnc_limit_switch_bracket_3d.scad). A pin on a file that no longer exists
+  // would turn the full pass red as "no longer refuses". Whether the NEW bracket file refuses is
+  // unmeasured here; if it does, the full pass names it as an unknown STRICTER, which is the loud direction.
   { file: 'hardware/2bee_cnc_machine/probe_spindle_clear.scad', cause: 'union() + intersection() [kernel] (over the 200k-polygon budget)', since: '2026-10-15' },
   { file: 'hardware/2bee_cnc_machine/probe_wheel_seat.scad', cause: 'intersection() [kernel] (over the 200k-polygon budget)', since: '2026-10-15' },
   { file: 'hardware/2bee_hive/hive_variants.scad', cause: 'the deterministic work budget (spends 3.67e10 > MAX_WORK 3.3e10, the calibration in mesh.ts) + modifier % in hive_top_assembly/solar_box_assembly', since: '2026-10-15' },

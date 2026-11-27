@@ -189,7 +189,19 @@ There are no passwords, no email and no sign-up anywhere. Cognito is untouched a
 
 ## 8. Cut-over and rollback
 
-**Order:**
+**Order on the jamesave route (cyber 2026-11-27; supersedes the AWS-route list below):**
+1. Build the prod instance (own user, DB, roles, socket), `plant_test.sh`, socket and tunnel checks,
+   cache and rate rules on a temporary hostname, header diff.
+2. `migrate_docs` and `import-from-cognito`: dry run, real run, census (14 docs, count and sha256
+   per body, both sides). BEFORE the switch: S3 bodies are CSP-blocked after it.
+3. DNS switch, founder at the terminal. 4. Issue the CLI enrolment code at once; founder enrols two
+   passkeys on `https://2bee.app` and runs the section 6 test; then the A test with two sessions
+   (a passkey for `RP_ID=2bee.app` can only be enrolled at that origin, so prod enrolment follows the
+   switch; a stage enrolment is a rehearsal only). 5. Any failure: DNS back to CloudFront, same sitting.
+Then steps 4 to 7 below (measure, remove Cognito code, 7-day watch, delete `2bee-app-oidc`).
+`/` must not be served `immutable`, or a rollback would show a stale bundle from browser caches.
+
+**Order (original AWS-route list):**
 1. Backend ships the tables, CLI, routes, the authorizer (accepting a session **or** a Cognito
    admin ID token), the CloudFront Function and behaviour, and the WAF attach and rule. The
    authorizer replaces the Cognito authorizer on `/app/*`. Today's bundle keeps working through
@@ -209,9 +221,14 @@ There are no passwords, no email and no sign-up anywhere. Cognito is untouched a
 - Each one must have a passkey row and a session created on the new path.
 - The query and its output are pasted into the cut-over ticket.
 
-**Rollback:**
-- Until step 5, Cognito still works through the same authorizer. Rollback is a bundle redeploy of
-  the previous commit (`build-info.json` records it).
+**Rollback (CORRECTED 2026-11-27, backend on cyber 14-36-19):**
+- On the jamesave route the whole `2bee.app` hostname moves to the tunnel, and the CSP stays
+  `connect-src 'self'` (Cognito and S3 are NOT added back). Once the hostname is on jamesave the
+  bundle's Cognito branch is dead there, so the DNS switch IS the user-facing cut-over. **Rollback
+  before step 5 is the DNS edit back to CloudFront `E3FJDJCTELYYXY` (left untouched), not a bundle
+  redeploy.** The "Cognito still works" claim below holds only on the old AWS route.
+- Old AWS route only: until step 5, Cognito still works through the same authorizer. Rollback is a
+  bundle redeploy of the previous commit (`build-info.json` records it).
 - After step 5 and before step 7, rollback is restoring the Cognito branch (a code revert and
   redeploy) plus the previous bundle.
 - After step 7, rollback means re-creating the client with the same settings. That is the reason

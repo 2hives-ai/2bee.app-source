@@ -2,10 +2,13 @@
 //
 // Founder 2026-11-23: "go on local auth" (no Cognito for 2bee.app). cyber signed v2 off the
 // same day (ticket 2026-11-23-11-36-29). The server half is backend's: the routes below, a
-// Lambda authorizer, DynamoDB tables and an operator CLI that mints enrolment codes.
+// Python service on jamesave behind a Cloudflare tunnel (Postgres; an operator CLI mints
+// enrolment codes). Design §9 has the stack; it was AWS (Lambda, DynamoDB) until 2026-11-23.
 //
 // WHAT THIS FILE DOES, AND WHAT IT NEVER DOES
-//   · Talks only to same-origin /api/auth/* (CloudFront rewrites it to the API). The session
+//   · Talks only to same-origin /api/auth/* (the service mounts its routes at /api/, no rewrite;
+//     backend ticket 2026-11-23-12-26-44). Calls per user action: page load 1 GET; sign-in
+//     2 POST + 1 GET; enrolment 2 POST; sign-out 1 POST. No polling, no retry. The session
 //     is an HttpOnly cookie this code never sees; nothing here reads or stores a token.
 //   · Sends no identifier to sign in: the passkey is discoverable, so the server never learns
 //     an email or user name from this page.
